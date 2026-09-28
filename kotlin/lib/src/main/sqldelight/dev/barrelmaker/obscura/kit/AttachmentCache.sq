@@ -17,5 +17,8 @@ SELECT COALESCE(SUM(size_bytes), 0) AS total FROM AttachmentCache;
 deleteOldest:
 DELETE FROM AttachmentCache WHERE attachment_id IN (SELECT attachment_id FROM AttachmentCache ORDER BY cached_at ASC LIMIT ?);
 
+deleteById:
+DELETE FROM AttachmentCache WHERE attachment_id = ?;
+
 deleteAll:
 DELETE FROM AttachmentCache;
