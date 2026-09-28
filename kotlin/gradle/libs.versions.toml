@@ -6,7 +6,7 @@
 # Dependabot is configured to leave org.jetbrains.kotlin:* alone.
 kotlin = "2.1.20"
 protobuf-plugin = "0.10.0"
-protobuf = "4.36.1"
+protobuf = "4.36.2"
 sqldelight = "2.0.2"
 libsignal = "0.72.0"
 okhttp = "5.4.0"
