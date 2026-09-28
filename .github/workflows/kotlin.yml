@@ -97,7 +97,7 @@ jobs:
           cat > compose.ci.yml <<'EOF'
           services:
             obscura-server:
-              image: ghcr.io/barrelmaker97/obscura-server:latest
+              image: ghcr.io/obscura-messaging/obscura-server:latest
               pull_policy: always
               environment:
                 # Prod runs 3 load-balanced instances (~3x effective limits); this
