@@ -156,4 +156,4 @@ Requires macOS 13+, Xcode 16+. `dev.sh` sets `LIBRARY_PATH` for the vendored lib
 ## Server
 
 - **API:** https://obscura.barrelmaker.dev
-- **Server Repo:** https://github.com/barrelmaker97/obscura-server
+- **Server Repo:** https://github.com/obscura-messaging/obscura-server

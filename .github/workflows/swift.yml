@@ -103,7 +103,7 @@ jobs:
         id: server-ref
         run: |
           for i in 1 2 3; do
-            sha=$(git ls-remote https://github.com/barrelmaker97/obscura-server.git HEAD | cut -f1) && break
+            sha=$(git ls-remote https://github.com/obscura-messaging/obscura-server.git HEAD | cut -f1) && break
             sleep 15
           done
           [ -n "$sha" ] || { echo "could not resolve server HEAD" >&2; exit 1; }
@@ -128,7 +128,7 @@ jobs:
         run: |
           for i in 1 2 3; do  # --recurse-submodules: proto/ is a submodule
             git clone --depth 1 --recurse-submodules \
-              https://github.com/barrelmaker97/obscura-server /tmp/obscura-server && break
+              https://github.com/obscura-messaging/obscura-server /tmp/obscura-server && break
             rm -rf /tmp/obscura-server; sleep 15
           done
           cd /tmp/obscura-server
