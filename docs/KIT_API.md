@@ -324,7 +324,7 @@ The store does not:
 
 The app selects a merge rule from its local model configuration when applying
 each `APP_ENTRY`. The normative rules live in
-[`DOMAIN_CONTRACT.md`](https://github.com/rhelsing/obscura-pix/blob/main/docs/DOMAIN_CONTRACT.md):
+[`DOMAIN_CONTRACT.md`](https://github.com/obscura-messaging/obscura-pix/blob/main/docs/DOMAIN_CONTRACT.md):
 
 - `APPEND`: first write for an entry ID wins; later repeats are idempotent.
 - `REPLACE`: highest `(sentAt, authorDeviceId)` wins.
