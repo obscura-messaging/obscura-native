@@ -193,8 +193,10 @@ class ObscuraClient(
     init {
         if (externalDriver == null) {
             ObscuraDatabase.Schema.create(driver)
-            try { driver.execute(null, "PRAGMA secure_delete = ON", 0) } catch (e: Exception) { log("PRAGMA secure_delete failed: ${e.message}") }
         }
+        // Every driver, including an app-supplied one: `EntryStore.erase` relies on freed pages
+        // being zeroed.
+        try { driver.pragma("PRAGMA secure_delete = ON") } catch (e: Exception) { log("PRAGMA secure_delete failed: ${e.message}") }
         db = ObscuraDatabase(driver)
 
         signalStore = SignalStore(db)
@@ -205,7 +207,7 @@ class ObscuraClient(
         devices = DeviceStore(db)
         messenger = Messenger(signalStore, api)
         inbox = InboxStore(db)
-        entries = EntryStore(db)
+        entries = EntryStore(db, driver)
         // A discard is data loss the app chose deliberately, and §3.3 rule 5 requires it be logged
         // as a security-relevant event rather than being the quiet path.
         inbox.onDiscard = { ids, reason ->
@@ -1100,7 +1102,7 @@ class ObscuraClient(
      */
     fun observeTyping(contextId: String): Flow<List<String>> = typingTracker.observe(contextId)
 
-    suspend fun uploadAttachment(data: ByteArray): String = contentService.uploadAttachment(data)
+    suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload = contentService.uploadAttachment(plaintext)
     suspend fun downloadAttachment(id: String): ByteArray = contentService.downloadAttachment(id)
     suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray =
         contentService.downloadDecryptedAttachment(id, contentKey, nonce)

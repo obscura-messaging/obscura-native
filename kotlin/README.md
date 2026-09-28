@@ -114,7 +114,7 @@ public facade against a configured `obscura-server`.
   leave the message on the server to redeliver.
 - **The durable inbox** (`KIT_API.md` §3) — `peek` / `consume` / `discard` / `depth`, deduped on
   `envelope_id` while a row remains pending.
-- **The entry store** (§8.1) — `put` / `all` / `delete` over opaque JSON. Three methods, no fourth.
+- **The entry store** (§8.1) — `put` / `all` / `erase` over opaque JSON. Three methods, no fourth.
 - **Friend graph** — request/accept, with device lists learned from DEVICE_ANNOUNCE.
 - **Device provisioning and linking** — `loginAndProvision()` → `PENDING_APPROVAL` →
   QR/link-code approval, which carries the own-device list and friends export.

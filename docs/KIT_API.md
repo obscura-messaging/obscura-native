@@ -225,8 +225,11 @@ inside the application's explicit-audience model payload.
 
 ### 5.2 Attachments
 
-Attachment bytes are encrypted client-side before upload. The server stores
-ciphertext and returns an opaque attachment identifier. The application decides
+Both kits expose `uploadAttachment(plaintext)`, which encrypts inside the kit
+(AES-256-GCM, fresh key and nonce per attachment) and returns the attachment
+identifier with its `contentKey` and `nonce`. The caller never handles
+unencrypted upload bytes. The server stores ciphertext and issues the opaque
+identifier. The application decides
 which attachment metadata to include in its encrypted payload. The current app
 carries the identifier, key material, nonce, and an app-level media kind; MIME
 type and size are not part of the shared kit contract.
@@ -301,11 +304,17 @@ The native entry store is intentionally small:
 ```text
 put(model, entry)
 all(model)
+erase(model, id)
 ```
 
 `StoredEntry` contains the application-selected identifier, timestamp,
 session-attributed author device, opaque payload bytes/JSON, and nullable
 `localMetadata`.
+
+`erase` removes one entry so its contents are unrecoverable from the database
+files: the delete runs under `secure_delete`, then the WAL is checkpointed and
+truncated. Erasing a missing entry is a no-op. Both kits enable `secure_delete`
+on every database, including an app-supplied driver.
 
 `localMetadata` is an opaque, app-owned sidecar for local bookkeeping. `put`
 persists it verbatim. It is local-only: the kit never reads its contents,
@@ -317,7 +326,7 @@ The store does not:
 - resolve audiences;
 - execute filters or sorting expressions;
 - merge competing writes;
-- enforce expiry;
+- enforce expiry (it provides `erase`; the app decides when to call it);
 - synchronize a local deletion to peers.
 
 ### 8.2 Merge
@@ -334,8 +343,9 @@ data. Incoming timestamps are clamped per `NATIVE_CONTRACT.md` §2.4.
 
 ### 8.3 Expiry
 
-Expiry is an application concern. The current app does not expire stored
-stories or entries automatically. New work must not assume that declaring a TTL
+Expiry is an application concern: the app decides when an entry expires and
+calls `erase`, which guarantees the content is unrecoverable locally. The
+current app does not expire stored stories or entries automatically. New work must not assume that declaring a TTL
 in payload data causes either kit to enforce it.
 
 ---

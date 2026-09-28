@@ -1194,8 +1194,8 @@ public class ObscuraClient {
 
     /// Encrypt plaintext and upload the ciphertext, returning the reference triple.
     /// The caller embeds `{id, contentKey, nonce}` in a synced model entry whose sync carries the
-    /// reference. Mirrors the Kotlin `uploadAttachment` primitive; returns key material so the
-    /// bridge needn't reach into `AttachmentCrypto` directly. Pair with
+    /// reference. The server only ever sees ciphertext. Mirrors the Kotlin `uploadAttachment`;
+    /// returns key material so the bridge needn't reach into `AttachmentCrypto` directly. Pair with
     /// `downloadDecryptedAttachment`.
     public func uploadAttachment(_ plaintext: Data) async throws -> (id: String, contentKey: Data, nonce: Data) {
         let encrypted = try AttachmentCrypto.encrypt(plaintext)
