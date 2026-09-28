@@ -18,5 +18,8 @@ INSERT OR REPLACE INTO ModelEntry(
 )
 VALUES (?, ?, ?, ?, ?, ?);
 
+deleteEntry:
+DELETE FROM ModelEntry WHERE model_name = ? AND entry_id = ?;
+
 deleteAllEntries:
 DELETE FROM ModelEntry;

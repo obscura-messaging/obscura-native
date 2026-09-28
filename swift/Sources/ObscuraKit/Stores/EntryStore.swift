@@ -34,8 +34,9 @@ public struct StoredEntry: Sendable, Equatable {
 /// Raw storage for application entries (`KIT_API.md` §8.1).
 ///
 /// `InboxStore` is how messages arrive; this is where the app keeps what it made of them. The API is
-/// `put` / `all`. `put` is a blind upsert; the app resolves merge before writing. This
-/// store has no schema parser, query layer, merge engine, or expiry policy.
+/// `put` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before writing. This
+/// store has no schema parser, query layer, merge engine, or expiry policy: the app decides *when*
+/// an entry goes away, and `erase` guarantees *how*.
 public actor EntryStore {
     private let db: DatabaseQueue
 
@@ -91,6 +92,25 @@ public actor EntryStore {
                     localMetadata: row["local_metadata"]
                 )
             }
+        }
+    }
+
+    /// Remove one entry so its contents are unrecoverable from the database files.
+    ///
+    /// The row is deleted under `secure_delete`, so SQLite zeroes the freed pages; the pragma is set
+    /// in the deleting write rather than trusted from open time. The WAL is then checkpointed and
+    /// truncated, because in WAL mode the pre-delete page would otherwise survive in the `-wal` file
+    /// until the next checkpoint. Erasing an entry that does not exist is a no-op. Not synchronized
+    /// to peers: each device erases its own copy.
+    public func erase(model: String, id: String) async throws {
+        try await db.write { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+            try db.execute(
+                sql: "DELETE FROM model_entries WHERE model_name = ? AND id = ?",
+                arguments: [model, id])
+        }
+        try await db.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
         }
     }
 

@@ -30,7 +30,8 @@ class StoryAttachmentTests {
 
         // Upload JPEG image
         val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) + ByteArray(250)
-        val attId = alice.uploadAttachment(jpeg)
+        val att = alice.uploadAttachment(jpeg)
+        val attId = att.id
         assertTrue(attId.isNotEmpty())
 
         // Send story with media reference
@@ -48,7 +49,7 @@ class StoryAttachmentTests {
         assertEquals("image/jpeg", storyData.getString("mimeType"))
 
         // Bob downloads the attachment and verifies
-        val downloaded = bob.downloadAttachment(attId)
+        val downloaded = bob.downloadDecryptedAttachment(attId, att.contentKey, att.nonce)
         assertEquals(jpeg.size, downloaded.size, "Downloaded size must match")
         assertEquals(0xFF.toByte(), downloaded[0], "JPEG SOI marker byte 1")
         assertEquals(0xD8.toByte(), downloaded[1], "JPEG SOI marker byte 2")
@@ -91,7 +92,8 @@ class StoryAttachmentTests {
 
         // Upload image
         val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) + ByteArray(500)
-        val attId = alice.uploadAttachment(jpeg)
+        val att = alice.uploadAttachment(jpeg)
+        val attId = att.id
 
         // Send story with both text and image
         alice.sendStory(bob, "story_combo_${System.currentTimeMillis()}",
@@ -107,7 +109,7 @@ class StoryAttachmentTests {
         assertEquals("image/jpeg", data.getString("contentType"), "Content type should be image/jpeg")
 
         // Verify attachment downloadable
-        val downloaded = bob.downloadAttachment(attId)
+        val downloaded = bob.downloadDecryptedAttachment(attId, att.contentKey, att.nonce)
         assertEquals(jpeg.size, downloaded.size)
         assertArrayEquals(jpeg, downloaded)
 

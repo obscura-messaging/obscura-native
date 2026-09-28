@@ -5,6 +5,9 @@ import obscura.client.v1.Client.ClientMessage
 /**
  * Send application entries. Upload/download attachments.
  */
+/** The reference to an uploaded attachment: server id plus the key material to decrypt it. */
+class AttachmentUpload(val id: String, val contentKey: ByteArray, val nonce: ByteArray)
+
 internal class ContentService(
     private val ctx: ClientContext
 ) {
@@ -110,7 +113,15 @@ internal class ContentService(
         }
     }
 
-    suspend fun uploadAttachment(data: ByteArray): String = api.uploadAttachment(data)
+    /**
+     * Encrypt [plaintext] and upload the ciphertext. The server only ever sees ciphertext; the
+     * caller embeds the returned reference in its encrypted entry payload. Mirrors the Swift kit.
+     */
+    suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload {
+        val encrypted = dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto.encrypt(plaintext)
+        val id = api.uploadAttachment(encrypted.ciphertext)
+        return AttachmentUpload(id = id, contentKey = encrypted.contentKey, nonce = encrypted.nonce)
+    }
 
     suspend fun downloadAttachment(id: String): ByteArray = api.fetchAttachment(id)
 
