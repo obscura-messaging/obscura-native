@@ -1107,6 +1107,19 @@ class ObscuraClient(
     suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray =
         contentService.downloadDecryptedAttachment(id, contentKey, nonce)
 
+    /**
+     * Remove this device's decrypted copy of an attachment, so it is unrecoverable from the
+     * database files: deleted under `secure_delete`, then the WAL is truncated (as for
+     * `EntryStore.erase`). The server's ciphertext is untouched. No-op if nothing is cached.
+     */
+    suspend fun purgeAttachment(id: String) = withContext(Dispatchers.IO) {
+        db.transaction {
+            driver.pragma("PRAGMA secure_delete = ON")
+            db.attachmentCacheQueries.deleteById(id)
+        }
+        driver.pragma("PRAGMA wal_checkpoint(TRUNCATE)")
+    }
+
     suspend fun befriend(targetUserId: String, targetUsername: String) = friendshipManager.befriend(targetUserId, targetUsername)
     suspend fun acceptFriend(targetUserId: String) = friendshipManager.acceptFriend(targetUserId)
 

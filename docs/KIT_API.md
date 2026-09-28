@@ -234,7 +234,11 @@ which attachment metadata to include in its encrypted payload. The current app
 carries the identifier, key material, nonce, and an app-level media kind; MIME
 type and size are not part of the shared kit contract.
 
-Downloads return ciphertext to the kit, which decrypts locally. Attachment
+Downloads return ciphertext to the kit, which decrypts locally and may keep the
+decrypted bytes in its database cache. `purgeAttachment(id)` removes this
+device's decrypted copy unrecoverably (under `secure_delete`, then a WAL
+truncate); the server's ciphertext is untouched. The app calls it when the
+entry referencing the attachment expires. Attachment
 metadata is application data; the kit does not infer model semantics from it.
 
 ---
