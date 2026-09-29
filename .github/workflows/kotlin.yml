@@ -92,12 +92,12 @@ jobs:
         run: |
           # Clone only for docker-compose.yml (services + env); the server
           # itself comes prebuilt from GHCR — no Rust build in CI.
-          git clone --depth 1 https://github.com/barrelmaker97/obscura-server /tmp/obscura-server
+          git clone --depth 1 https://github.com/obscura-messaging/obscura-server /tmp/obscura-server
           cd /tmp/obscura-server
           cat > compose.ci.yml <<'EOF'
           services:
             obscura-server:
-              image: ghcr.io/barrelmaker97/obscura-server:latest
+              image: ghcr.io/obscura-messaging/obscura-server:latest
               pull_policy: always
               environment:
                 # Prod runs 3 load-balanced instances (~3x effective limits); this

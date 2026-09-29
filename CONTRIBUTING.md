@@ -32,7 +32,7 @@ macOS.
 ## Setup
 
 ```bash
-git clone --recurse-submodules https://github.com/barrelmaker97/obscura-native.git
+git clone --recurse-submodules https://github.com/obscura-messaging/obscura-native.git
 cd obscura-native
 just setup
 just doctor

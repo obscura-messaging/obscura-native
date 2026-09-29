@@ -67,7 +67,7 @@ It must agree with ObscuraKit-Kotlin on the **wire** (`../protocol/conformance/w
 
 - **API:** https://obscura.barrelmaker.dev
 - **OpenAPI Spec:** https://obscura.barrelmaker.dev/openapi.yaml
-- **Server Repo:** https://github.com/barrelmaker97/obscura-server
+- **Server Repo:** https://github.com/obscura-messaging/obscura-server
 
 All smoke/scenario tests run against the live server.
 
