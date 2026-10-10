@@ -1,13 +1,12 @@
 package dev.barrelmaker.obscura.kit.managers
 
+import dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto
 import obscura.client.v1.Client.ClientMessage
 
-/**
- * Send application entries. Upload/download attachments.
- */
 /** The reference to an uploaded attachment: server id plus the key material to decrypt it. */
 class AttachmentUpload(val id: String, val contentKey: ByteArray, val nonce: ByteArray)
 
+/** Sends application entries; uploads and downloads attachments. */
 internal class ContentService(
     private val ctx: ClientContext
 ) {
@@ -118,35 +117,11 @@ internal class ContentService(
      * caller embeds the returned reference in its encrypted entry payload. Mirrors the Swift kit.
      */
     suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload {
-        val encrypted = dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto.encrypt(plaintext)
+        val encrypted = AttachmentCrypto.encrypt(plaintext)
         val id = api.uploadAttachment(encrypted.ciphertext)
         return AttachmentUpload(id = id, contentKey = encrypted.contentKey, nonce = encrypted.nonce)
     }
 
-    suspend fun downloadAttachment(id: String): ByteArray = api.fetchAttachment(id)
-
-    companion object {
-        private const val MAX_CACHE_BYTES = 50L * 1024 * 1024 // 50MB
-    }
-
-    suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray {
-        // Check cache first
-        val cached = ctx.db.attachmentCacheQueries.selectById(id).executeAsOneOrNull()
-        if (cached != null) return cached
-
-        // Cache miss — download, decrypt, cache
-        val ciphertext = api.fetchAttachment(id)
-        val plaintext = dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto.decrypt(ciphertext, contentKey, nonce)
-
-        // Store in encrypted DB
-        ctx.db.attachmentCacheQueries.insert(id, plaintext, plaintext.size.toLong(), System.currentTimeMillis())
-
-        // Evict if over size limit
-        val totalSize = ctx.db.attachmentCacheQueries.totalSize().executeAsOne()
-        if (totalSize > MAX_CACHE_BYTES) {
-            ctx.db.attachmentCacheQueries.deleteOldest(10)
-        }
-
-        return plaintext
-    }
+    suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray =
+        AttachmentCrypto.decrypt(api.fetchAttachment(id), contentKey, nonce)
 }

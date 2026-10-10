@@ -75,15 +75,6 @@ public enum ObscuraSchema {
             """)
 
             try db.execute(sql: """
-                CREATE TABLE attachment_cache (
-                    attachment_id TEXT NOT NULL PRIMARY KEY,
-                    plaintext BLOB NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    cached_at INTEGER NOT NULL
-                )
-            """)
-
-            try db.execute(sql: """
                 CREATE TABLE inbox_rows (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     envelope_id TEXT NOT NULL UNIQUE,
@@ -128,7 +119,6 @@ public enum ObscuraSchema {
         "signal_signed_prekeys",
         "signal_sessions",
         "signal_sender_keys",
-        "attachment_cache",
         "inbox_rows",
         "model_entries",
     ]
