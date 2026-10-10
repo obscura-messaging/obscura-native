@@ -1217,6 +1217,12 @@ public class ObscuraClient {
         return plaintext
     }
 
+    /// Remove this device's decrypted copy of an attachment, so it is unrecoverable from the database
+    /// files. The server's ciphertext is untouched. No-op if nothing is cached.
+    public func purgeAttachment(id: String) async throws {
+        try await attachmentCache?.remove(id)
+    }
+
     /// Send an application entry (`KIT_API.md` §5) — the outbox half of the thin kit,
     /// paired with ``inbox`` on the receive side and ``entries`` for local storage.
     ///

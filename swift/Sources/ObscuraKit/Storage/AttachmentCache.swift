@@ -47,6 +47,19 @@ public class AttachmentCache {
         }
     }
 
+    /// Remove one attachment's decrypted bytes, unrecoverably: deleted under `secure_delete`, then
+    /// the WAL is truncated (as for `EntryStore.erase`).
+    public func remove(_ attachmentId: String) async throws {
+        try await db.write { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+            try db.execute(sql: "DELETE FROM attachment_cache WHERE attachment_id = ?",
+                           arguments: [attachmentId])
+        }
+        try await db.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+    }
+
     /// Clear all cached attachments.
     public func clearAll() async {
         try? await db.write { db in
