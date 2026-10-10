@@ -116,7 +116,7 @@ each other, so broader behavioral interoperability is not claimed.
 - Persist-then-ack: a failed durable write skips the ack, so the server redelivers (SPEC §0.9)
 - Dedupe while pending: `envelope_id UNIQUE` + `INSERT OR IGNORE`
 - Offline/reconnect: the server queues, and the inbox absorbs the duplicates that produces
-- Attachments: encrypt, upload, download, cache — the bytes path, kept
+- Attachments: encrypt, upload, download, decrypt — the bytes path, kept
 - Device linking: QR/code generation, validation, approval flow
 - Ephemeral signals: caller-addressed typed STARTED/STOPPED indicators, in-memory only
 - Self-sync: own *other* devices get your content too, and the sending device does not

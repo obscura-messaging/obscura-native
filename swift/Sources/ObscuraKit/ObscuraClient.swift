@@ -159,9 +159,6 @@ public class ObscuraClient {
     /// a 401 (broadcasts fail, reconnect fails). See `refreshTokenNow()`.
     public var onSessionChanged: (() -> Void)?
 
-    /// Attachment cache — decrypted bytes cached in the encrypted DB.
-    private var attachmentCache: AttachmentCache?
-
     // MARK: - Observable State
 
     private var _connectionState: ConnectionState = .disconnected {
@@ -357,7 +354,6 @@ public class ObscuraClient {
             ofItemAtPath: dbPath
         )
         self.sharedDb = db
-        self.attachmentCache = try? AttachmentCache(db: db)
 
         self.api = APIClient(baseURL: apiURL)
         self.friends = try FriendStore(db: db)
@@ -1155,23 +1151,9 @@ public class ObscuraClient {
     }
 
     /// Download ciphertext and decrypt with provided key material.
-    /// Checks in-DB cache first — returns instantly on hit.
     public func downloadDecryptedAttachment(id: String, contentKey: Data, nonce: Data) async throws -> Data {
-        // Cache hit — return immediately, zero network
-        if let cached = await attachmentCache?.get(id) {
-            return cached
-        }
-        // Cache miss — fetch, decrypt, cache
         let ciphertext = try await api.fetchAttachment(id)
-        let plaintext = try AttachmentCrypto.decrypt(ciphertext, contentKey: contentKey, nonce: nonce)
-        await attachmentCache?.put(id, plaintext: plaintext)
-        return plaintext
-    }
-
-    /// Remove this device's decrypted copy of an attachment, so it is unrecoverable from the database
-    /// files. The server's ciphertext is untouched. No-op if nothing is cached.
-    public func purgeAttachment(id: String) async throws {
-        try await attachmentCache?.remove(id)
+        return try AttachmentCrypto.decrypt(ciphertext, contentKey: contentKey, nonce: nonce)
     }
 
     /// Send an application entry (`KIT_API.md` §5) — the outbox half of the thin kit,
@@ -1416,7 +1398,6 @@ public class ObscuraClient {
 
         // Clear persisted session
         sessionStorage?.clear()
-        Task { await attachmentCache?.clearAll() }
         logger.log("full logout complete")
     }
 
