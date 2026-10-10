@@ -6,6 +6,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 
 /**
  * Raw entry storage (`KIT_API.md` §8.1).
@@ -24,7 +26,7 @@ class EntryStoreTest {
     fun setup() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ObscuraDatabase.Schema.create(driver)
-        store = EntryStore(ObscuraDatabase(driver))
+        store = EntryStore(ObscuraDatabase(driver), driver)
     }
 
     private fun entry(
@@ -144,5 +146,51 @@ class EntryStoreTest {
         store.put("pix", entry("pix_1", localMetadata = null))
 
         assertNull(store.all("pix").single().localMetadata)
+    }
+
+    @Test
+    fun `erase removes only the named entry`() = runBlocking {
+        store.put("directMessage", entry("dm_1"))
+        store.put("directMessage", entry("dm_2"))
+        store.put("pix", entry("dm_1"))
+
+        store.erase("directMessage", "dm_1")
+
+        assertEquals(listOf("dm_2"), store.all("directMessage").map { it.id })
+        assertEquals(listOf("dm_1"), store.all("pix").map { it.id })
+    }
+
+    @Test
+    fun `erasing a missing entry is a no-op`() = runBlocking {
+        store.put("directMessage", entry("dm_1"))
+
+        store.erase("directMessage", "never_written")
+
+        assertEquals(1, store.all("directMessage").size)
+    }
+
+    /**
+     * The guarantee `erase` exists for: the erased content is not recoverable from the database
+     * files. WAL mode is the hard case, because a deleted page otherwise lingers in `-wal`.
+     */
+    @Test
+    fun `erased content is not recoverable from the database or its WAL`(@TempDir dir: File) = runBlocking {
+        val path = File(dir, "erase.db")
+        val driver = JdbcSqliteDriver("jdbc:sqlite:${path.absolutePath}")
+        ObscuraDatabase.Schema.create(driver)
+        driver.pragma("PRAGMA journal_mode = WAL")
+        val fileStore = EntryStore(ObscuraDatabase(driver), driver)
+        val secret = "ERASE-ME-7f3a9c"
+        fun onDisk(): Boolean = listOf(path, File("${path.absolutePath}-wal"))
+            .filter { it.exists() }
+            .any { String(it.readBytes(), Charsets.ISO_8859_1).contains(secret) }
+
+        fileStore.put("directMessage", entry("dm_1", data = """{"content":"$secret"}"""))
+        assertTrue(onDisk(), "control: the secret must be on disk before erase")
+
+        fileStore.erase("directMessage", "dm_1")
+
+        assertFalse(onDisk(), "erased content must not survive in the database or its WAL")
+        driver.close()
     }
 }

@@ -1,5 +1,7 @@
 package dev.barrelmaker.obscura.kit.stores
 
+import app.cash.sqldelight.db.QueryResult
+import app.cash.sqldelight.db.SqlDriver
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -29,11 +31,15 @@ data class StoredEntry(
  * The other half of the thin kit's app-facing surface: `InboxStore` is how messages arrive,
  * this is where the app keeps what it made of them. Together they are the whole data path.
  *
- * The API is `put` / `all`. `put` is a blind upsert; the app resolves merge before
- * writing. This store has no schema parser, query layer, merge engine, or expiry policy.
+ * The API is `put` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before
+ * writing. This store has no schema parser, query layer, merge engine, or expiry policy: the app
+ * decides *when* an entry goes away, and `erase` guarantees *how*.
  * `all(model)` therefore loads every live entry for that model.
  */
-class EntryStore internal constructor(private val db: ObscuraDatabase) {
+class EntryStore internal constructor(
+    private val db: ObscuraDatabase,
+    private val driver: SqlDriver,
+) {
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1)
 
     /**
@@ -67,4 +73,29 @@ class EntryStore internal constructor(private val db: ObscuraDatabase) {
         }
     }
 
+    /**
+     * Remove one entry so its contents are unrecoverable from the database files.
+     *
+     * The row is deleted under `secure_delete`, so SQLite zeroes the freed pages. The pragma is
+     * per-connection and drivers may pool connections, so it is set inside the deleting transaction
+     * rather than trusted from open time. The WAL is then checkpointed and truncated, because in WAL
+     * mode the pre-delete page would otherwise survive in the `-wal` file until the next checkpoint.
+     * Erasing an entry that does not exist is a no-op. Not synchronized to peers: each device
+     * erases its own copy.
+     */
+    suspend fun erase(model: String, id: String) = withContext(dispatcher) {
+        db.transaction {
+            driver.pragma("PRAGMA secure_delete = ON")
+            db.modelEntryQueries.deleteEntry(model, id)
+        }
+        driver.pragma("PRAGMA wal_checkpoint(TRUNCATE)")
+    }
+}
+
+/**
+ * Run a PRAGMA through `executeQuery`: several PRAGMAs return a row, which Android's
+ * `execute` path rejects.
+ */
+internal fun SqlDriver.pragma(sql: String) {
+    executeQuery(null, sql, { cursor -> cursor.next(); QueryResult.Unit }, 0)
 }

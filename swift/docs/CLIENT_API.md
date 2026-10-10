@@ -198,9 +198,14 @@ try await client.resetAllSessions(reason: "key rotation")
 ## Attachments
 
 ```swift
-let result = try await client.api.uploadAttachment(encryptedData)
-let bytes = try await client.api.fetchAttachment(attachmentId)
+// Encrypts inside the kit; the server only sees ciphertext.
+let ref = try await client.uploadAttachment(plaintext)   // (id, contentKey, nonce)
+let bytes = try await client.downloadDecryptedAttachment(
+    id: ref.id, contentKey: ref.contentKey, nonce: ref.nonce)
 ```
+
+Embed `id`, `contentKey`, and `nonce` in your encrypted entry payload so the
+recipient can download and decrypt.
 
 ## Logging
 

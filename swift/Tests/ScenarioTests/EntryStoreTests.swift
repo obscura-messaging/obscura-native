@@ -141,4 +141,57 @@ final class EntryStoreTests: XCTestCase {
         let stored = try await store.all(model: "pix")
         XCTAssertNil(stored.first?.localMetadata)
     }
+
+    func testEraseRemovesOnlyTheNamedEntry() async throws {
+        let store = try makeStore()
+        try await store.put(model: "directMessage", entry: entry("dm_1"))
+        try await store.put(model: "directMessage", entry: entry("dm_2"))
+        try await store.put(model: "pix", entry: entry("dm_1"))
+
+        try await store.erase(model: "directMessage", id: "dm_1")
+
+        let dms = try await store.all(model: "directMessage")
+        let pix = try await store.all(model: "pix")
+        XCTAssertEqual(dms.map(\.id), ["dm_2"])
+        XCTAssertEqual(pix.map(\.id), ["dm_1"])
+    }
+
+    func testErasingAMissingEntryIsANoOp() async throws {
+        let store = try makeStore()
+        try await store.put(model: "directMessage", entry: entry("dm_1"))
+
+        try await store.erase(model: "directMessage", id: "never_written")
+
+        let all = try await store.all(model: "directMessage")
+        XCTAssertEqual(all.count, 1)
+    }
+
+    /// The guarantee `erase` exists for: the erased content is not recoverable from the database
+    /// files. WAL mode is the hard case, because a deleted page otherwise lingers in `-wal`.
+    func testErasedContentIsNotRecoverableFromTheDatabaseOrItsWAL() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("erase.db").path
+
+        var config = Configuration()
+        config.prepareDatabase { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
+        let store = try EntryStore(db: try DatabaseQueue(path: path, configuration: config))
+        let secret = "ERASE-ME-7f3a9c"
+        func onDisk() -> Bool {
+            [path, path + "-wal"].contains { file in
+                guard let data = FileManager.default.contents(atPath: file) else { return false }
+                return data.range(of: Data(secret.utf8)) != nil
+            }
+        }
+
+        try await store.put(
+            model: "directMessage", entry: entry("dm_1", data: #"{"content":"\#(secret)"}"#))
+        XCTAssertTrue(onDisk(), "control: the secret must be on disk before erase")
+
+        try await store.erase(model: "directMessage", id: "dm_1")
+
+        XCTAssertFalse(onDisk(), "erased content must not survive in the database or its WAL")
+    }
 }
