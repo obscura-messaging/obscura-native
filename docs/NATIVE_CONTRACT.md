@@ -108,7 +108,7 @@ uses and their trust status.
 Model semantics and validation; recipient resolution; all derived state
 (queries, filters, sorting); notification copy; and expiry when implemented.
 The current app rules are defined in
-[`DOMAIN_CONTRACT.md`](https://github.com/rhelsing/obscura-pix/blob/main/docs/DOMAIN_CONTRACT.md).
+[`DOMAIN_CONTRACT.md`](https://github.com/obscura-messaging/obscura-pix/blob/main/docs/DOMAIN_CONTRACT.md).
 
 ### 0.7 Consequences
 

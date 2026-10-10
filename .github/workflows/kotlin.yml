@@ -27,12 +27,12 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
-      - uses: actions/setup-java@v6.0.0
+      - uses: actions/setup-java@v6.0.1
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - uses: gradle/actions/setup-gradle@v6.3.0
+      - uses: gradle/actions/setup-gradle@v6.4.0
 
       - uses: bufbuild/buf-setup-action@v1
         with:
@@ -81,23 +81,23 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
-      - uses: actions/setup-java@v6.0.0
+      - uses: actions/setup-java@v6.0.1
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - uses: gradle/actions/setup-gradle@v6.3.0
+      - uses: gradle/actions/setup-gradle@v6.4.0
 
       - name: Start obscura-server (latest prebuilt image)
         run: |
           # Clone only for docker-compose.yml (services + env); the server
           # itself comes prebuilt from GHCR — no Rust build in CI.
-          git clone --depth 1 https://github.com/barrelmaker97/obscura-server /tmp/obscura-server
+          git clone --depth 1 https://github.com/obscura-messaging/obscura-server /tmp/obscura-server
           cd /tmp/obscura-server
           cat > compose.ci.yml <<'EOF'
           services:
             obscura-server:
-              image: ghcr.io/barrelmaker97/obscura-server:latest
+              image: ghcr.io/obscura-messaging/obscura-server:latest
               pull_policy: always
               environment:
                 # Prod runs 3 load-balanced instances (~3x effective limits); this
