@@ -10,7 +10,7 @@ Things that aren't obvious from reading the code. Saves hours.
 swift test --filter CoreFlowTests
 ```
 
-**The 100ms rate limit between server calls is load-bearing.** Without `rateLimitDelay()`, tests flake with HTTP 429. Every helper method includes it. If you add new server-calling methods, include the delay. The default is `SERVER_REQUEST_DELAY_MS = 100` in `Network/Constants.swift` (auth calls use `authRateLimitDelay()`, 1000ms); this note said 500ms, which matched nothing — `CLAUDE.md` and `docs/PITFALLS.md` both say 100.
+**The 100ms rate limit between server calls is load-bearing.** Without `rateLimitDelay()`, tests flake with HTTP 429. Every helper method includes it. If you add new server-calling methods, include the delay. The default is `SERVER_REQUEST_DELAY_MS = 100` in `Network/Constants.swift` (auth calls use `authRateLimitDelay()`, 1000ms).
 
 **Tests create real users on the live server.** Each test registers unique usernames (`test_RANDOM`). Don't worry about cleanup — the server handles it.
 
@@ -35,11 +35,9 @@ typed `Codable` models; only the JWT payload is schemaless.
 
 ## Reference Codebase
 
-**There is no "feature parity reference." Do not copy another kit's design.**
-
-The only thing this kit must match in the sibling `kotlin/` package is the **wire**
-(`protocol/conformance/wire.json`). Behavior is specified by
-[`NATIVE_CONTRACT.md`](../../docs/NATIVE_CONTRACT.md) — the contract, not a sibling codebase.
+Do not copy the Kotlin kit's design. Behaviour is specified by
+[`docs/KIT_API.md`](../../docs/KIT_API.md) and the wire by
+`protocol/conformance/wire.json`.
 
 ## The Public API Contract
 

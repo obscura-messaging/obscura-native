@@ -10,8 +10,7 @@ import org.junit.jupiter.api.Test
 import dev.barrelmaker.obscura.kit.stores.FriendStatus
 
 /**
- * The friend graph is the only source of display names (SPEC §0.5, §0.10
- * rule 5).
+ * The friend graph is the only source of display names.
  *
  * These tests drive genuine encrypted messages and require that an established
  * friend cannot rewrite its own record, and that a stranger cannot create an

@@ -1,9 +1,7 @@
 import XCTest
 @testable import ObscuraKit
 
-/// `send` — the outbox half of the thin kit (`KIT_API.md` §5).
-///
-/// §5 requires two properties:
+/// `send` — the kit's explicit-audience send.
 ///
 /// 1. the sending device must be excluded from its own fan-out;
 /// 2. the sender gets no inbox row, so the app must write its own outgoing entry.
@@ -41,12 +39,8 @@ final class EntrySendTests: XCTestCase {
         alice.disconnectWebSocket(); bob.disconnectWebSocket()
     }
 
-    /// **§5 property 1.** `getOwnDevices()` includes this device, so a send that does not filter
-    /// would encrypt a copy to itself. The app would then see its own write arrive as an incoming
-    /// row and have to dedupe it — a whole class of bug for no benefit.
-    ///
-    /// A single-device sender is the sharpest version: every own-device target IS this device, so an
-    /// unfiltered fan-out has nowhere else to go and the echo is unmissable.
+    /// `getOwnDevices()` includes this device, so a send that does not filter would encrypt a copy
+    /// to itself. A single-device sender makes the echo unmissable.
     func testTheSendingDeviceDoesNotReceiveItsOwnEntry() async throws {
         let alice = try await ObscuraTestClient.register()
         await rateLimitDelay()
@@ -71,19 +65,15 @@ final class EntrySendTests: XCTestCase {
 
         let aliceDepth = try await alice.client.inbox.depth()
         let bobDepth = try await bob.client.inbox.depth()
-        XCTAssertEqual(aliceDepth, 0, "a device must not receive the entry it just sent — §5")
+        XCTAssertEqual(aliceDepth, 0, "a device must not receive the entry it just sent")
         XCTAssertEqual(bobDepth, 1, "...while the recipient still gets it")
 
         alice.disconnectWebSocket(); bob.disconnectWebSocket()
     }
 
-    /// **§5 property 2, stated as a consequence rather than a mechanism.** Nothing loops back
-    /// locally, so `send` alone leaves the sender with no record of what it sent. obscura-pix must
-    /// write its own outgoing entry to `entries` — one write path in the kit, two in the app.
-    ///
-    /// The alternative design (the kit writes the sender's copy too) is the tempting one and would
-    /// quietly re-import audience knowledge into the kit: to store it, the kit would have to decide
-    /// which model and which id, from the payload.
+    /// Nothing loops back locally, so `send` alone leaves the sender with no record of what it sent;
+    /// the app writes its own outgoing entry to `entries`. A kit-written copy would require the kit to
+    /// pick a model and id from the payload.
     func testSendDoesNotStoreAnythingLocally() async throws {
         let alice = try await ObscuraTestClient.register()
         await rateLimitDelay()
@@ -118,9 +108,8 @@ final class EntrySendTests: XCTestCase {
         alice.disconnectWebSocket(); bob.disconnectWebSocket()
     }
 
-    /// An empty recipient list is "my own devices only", not an error. A self-scoped model wants
-    /// exactly this, and the kit is not guessing an audience — the caller named one, and it was
-    /// empty. Failing loud is reserved for an audience the kit was asked to invent (SPEC §1.2).
+    /// An empty recipient list is "my own devices only", not an error: the caller named an audience,
+    /// and it was empty.
     ///
     /// The fixture links a second device through `validateAndApproveLink` so
     /// self-sync has an observable destination.
@@ -157,7 +146,7 @@ final class EntrySendTests: XCTestCase {
 
         let alice1Depth = try await alice1.client.inbox.depth()
         let alice2Depth = try await alice2.client.inbox.depth()
-        XCTAssertEqual(alice1Depth, 0, "the sending device is excluded from its own fan-out — §5 property 1")
+        XCTAssertEqual(alice1Depth, 0, "the sending device is excluded from its own fan-out")
         XCTAssertEqual(alice2Depth, depthAfterLinking + 1,
                        "an empty recipient list means 'my own OTHER devices', and one of them exists")
 

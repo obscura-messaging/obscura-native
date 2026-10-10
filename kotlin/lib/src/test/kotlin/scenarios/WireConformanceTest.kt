@@ -12,12 +12,12 @@ import java.io.File
 
 /**
  * Vector-driven client-wire conformance, consuming the shared
- * `protocol/conformance/wire.json` (see NATIVE_CONTRACT §3). Both platforms run the
+ * `protocol/conformance/wire.json`. Both platforms run the
  * same file.
  *
  * Pins the signal enum <-> app-facing-form mapping and that a AppEntry
  * round-trips through the wire by VALUE.
- * Byte-canonicity is intentionally NOT asserted (SPEC §3.3).
+ * Byte-canonicity is intentionally NOT asserted.
  */
 class WireConformanceTest {
 

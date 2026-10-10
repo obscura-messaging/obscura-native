@@ -1,4 +1,4 @@
--- The app's opaque entry store (`KIT_API.md` §8.1). Read and written by `EntryStore.kt`.
+-- The app's opaque entry store. Read and written by `EntryStore.kt`.
 CREATE TABLE IF NOT EXISTS ModelEntry (
     model_name TEXT NOT NULL,
     entry_id TEXT NOT NULL,

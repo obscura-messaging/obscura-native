@@ -25,7 +25,7 @@ data class DecryptedMessage(
     // The sending USER's UUID, taken from envelope.sender_id (Signal's source_service_id). This is
     // a routing/attribution HINT the server stamps: the recipient uses it to key the conversation
     // and to look up the display name in its OWN friend graph — it never trusts it as a display
-    // name and never reads a user from the payload (SPEC §0.5). The Signal session (selected by the
+    // name and never reads a user from the payload. The Signal session (selected by the
     // sending device below) is the actual authentication.
     val sourceUserId: String,
     // The sending device UUID is the address of the session that authenticated this message,
@@ -174,7 +174,7 @@ class Messenger internal constructor(
     suspend fun decrypt(envelope: Envelope): DecryptedMessage = withContext(dispatcher) {
         // The USER hint. envelope.sender_id (Signal's source_service_id) is server-stamped from the
         // sender's account; we take the message's user from it and look up the display name in our
-        // OWN friend graph (SPEC §0.5) — never from the payload. It is a routing/attribution hint,
+        // OWN friend graph — never from the payload. It is a routing/attribution hint,
         // NOT the trust root: the Signal session (selected by the device below) authenticates.
         val senderId = UuidCodec.bytesToUuid(envelope.senderId.toByteArray()).toString()
 

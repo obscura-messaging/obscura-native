@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-/// One drained inbox row, as the app sees it (`KIT_API.md` §3.1).
+/// One drained inbox row, as the app sees it.
 ///
 /// `payload` is opaque bytes the kit never parsed. The `AppEntry`-derived fields are `nil` for every
 /// other kind, including an unknown arm — there is no `AppEntry` to derive them from.
@@ -47,36 +47,13 @@ struct InboxInsert: Sendable {
     let payload: Data
 }
 
-/// The durable inbox (`KIT_API.md` §3).
-///
-/// The kit is a durable, authenticated inbox for **opaque payloads**: it stores bytes it cannot read,
-/// addressed to and from identities it can prove. This actor is that store.
-///
-/// ## Why an inbox and not an event stream
-///
-/// Handing a payload to the app and then acknowledging it would make an asynchronous event the only
-/// copy:
-///
-/// ```
-/// decrypt → emit to app → ACK (server DELETEs) → ...app writes to its store, maybe, later
-/// ```
-///
-/// The bridge may be backpressured and the app may not be running. The kit therefore persists bytes
-/// it does not understand before acknowledging the server copy.
-///
-/// ## Four methods, and there is no fifth
-///
-/// `peek` / `consume` / `discard` / `depth`. In particular there is **no insert**: the inbox is
-/// kit-write, app-read-and-delete (§3.3 rule 9). The only candidate for an app-side write was
-/// self-sync, and it does not need one — a send fans out to the user's *other* devices via the
-/// server, which receive it through the ordinary envelope path. The originating device is never
-/// echoed to and writes its own store directly.
+/// The durable inbox: opaque payloads persisted before the server copy is acked, because the app
+/// may not be running to receive an event. Only the receive path writes it; the app drains it.
 public actor InboxStore {
     private let db: DatabaseQueue
 
     /// Reports a discard to the security log. Taken at construction rather than set afterwards: a
-    /// store that is reachable before its hook is wired can lose a discard silently, which is the
-    /// quiet path §3.3 rule 5 forbids.
+    /// store that is reachable before its hook is wired could lose a discard silently.
     private let onDiscard: (@Sendable ([Int64], String) -> Void)?
 
     public init(db: DatabaseQueue, onDiscard: (@Sendable ([Int64], String) -> Void)? = nil) throws {
@@ -171,7 +148,7 @@ public actor InboxStore {
         // Chunked because each id binds one SQL variable and SQLite caps that at 999 on older
         // builds. The app chooses the batch size, so a large `peek` followed by `consume` would
         // throw "too many SQL variables" — exactly when a backlog exists, i.e. the one situation
-        // where the drain must not stall (§3.5).
+        // where the drain must not stall.
         for chunk in stride(from: 0, to: ids.count, by: deleteChunk).map({
             Array(ids[$0..<min($0 + deleteChunk, ids.count)])
         }) {
@@ -188,10 +165,8 @@ public actor InboxStore {
 
     /// Drop rows the app declares it can **never** process.
     ///
-    /// This is data loss, chosen deliberately: the server's copy is already gone, so nothing else
-    /// holds these bytes. It is therefore logged as a security-relevant event and must never be the
-    /// quiet path (§3.3 rule 5) — which is the entire reason it is a separate method from
-    /// ``consume(_:)`` rather than a flag on it. The SQL is identical; the accountability is not.
+    /// This is deliberate data loss: the server's copy is already gone. It is separate from
+    /// ``consume(_:)`` so it can be logged as a security-relevant event.
     public func discard(_ ids: [Int64], reason: String) async throws {
         guard !ids.isEmpty else { return }
         try await consume(ids)
@@ -200,11 +175,8 @@ public actor InboxStore {
 
     /// How many rows are waiting.
     ///
-    /// Exposed because it MUST be (§3.3 rule 7): unbounded growth means the app has stopped draining.
-    /// §3.5 traces where that ends — inbox grows, disk pressure, the durable write throws, the kit
-    /// correctly refuses to ack, the message stays on the server, the *server's* queue hits 1000, and
-    /// it evicts oldest-first and silently. **A number nobody reads is not observability**: the app is
-    /// expected to surface this past a threshold, not merely be able to ask.
+    /// Unbounded growth means the app has stopped draining; the app is expected to surface this
+    /// past a threshold before the server's queue fills.
     public func depth() async throws -> Int {
         try await db.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM inbox_rows") ?? 0
@@ -213,10 +185,8 @@ public actor InboxStore {
 
     /// Destroy every row.
     ///
-    /// The §3.3 rule 2 carve-out, and **not** an eviction policy: a device wipe has to be able to
-    /// destroy decrypted plaintext, and that is a security requirement.
-    /// Note it takes no selector — destroying the whole store is what keeps it from becoming "drop
-    /// the oldest when things get tight", which is the rule this design exists to refuse.
+    /// For device wipe only, so decrypted plaintext can be destroyed. It takes no selector so it
+    /// cannot become an eviction policy.
     func wipe() async throws {
         try await db.write { db in
             try db.execute(sql: "DELETE FROM inbox_rows")

@@ -4,7 +4,7 @@ import Foundation
 ///
 /// The message kind is the `ClientMessage.payload` oneof arm. A kit that maps these inconsistently
 /// silently breaks cross-platform interop, so the mappings are consolidated here
-/// and pinned by `protocol/conformance/wire.json` (see NATIVE_CONTRACT §3).
+/// and pinned by `protocol/conformance/wire.json`.
 /// Mirrors the Kotlin kit's `WireCodec`.
 ///
 /// Internal on purpose: SwiftProtobuf generates the `Obscura_Client_V1_*` types with

@@ -73,7 +73,7 @@ class FriendStore internal constructor(private val db: ObscuraDatabase) {
      * Move an EXISTING record to [status], keeping its username and devices.
      *
      * Deliberately separate from [add]: `add` writes a caller-supplied username, and the only
-     * usernames a peer can supply are attacker-chosen (SPEC §0.5, §0.10 rule 5). A status change
+     * usernames a peer can supply are attacker-chosen. A status change
      * driven by an inbound message must never be able to carry a name with it.
      */
     suspend fun updateStatus(userId: String, status: FriendStatus) = withContext(dispatcher) {

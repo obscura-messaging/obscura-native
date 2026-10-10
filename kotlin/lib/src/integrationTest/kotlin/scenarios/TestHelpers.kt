@@ -122,7 +122,7 @@ suspend fun becomeFriends(a: ObscuraClient, b: ObscuraClient) {
  * Send a message the way obscura-pix does, and assert it arrived.
  *
  * The helper names the recipient by userId, carries a canonical conversation
- * id, and reads delivery from the receiver's inbox (SPEC §0.4).
+ * id, and reads delivery from the receiver's inbox.
  */
 /**
  * Send without asserting delivery — for tests where the receiver is deliberately OFFLINE and the
@@ -145,7 +145,7 @@ suspend fun ObscuraClient.hasReceived(content: String, timeoutMs: Long = 10_000)
 }
 
 /**
- * Send a `story` entry the way obscura-pix does: the caller names the recipient (SPEC §0.4) and the
+ * Send a `story` entry the way obscura-pix does: the caller names the recipient and the
  * body is opaque payload bytes the kit never opens.
  */
 suspend fun ObscuraClient.sendStory(receiver: ObscuraClient, entryId: String, data: Map<String, Any?>) {
@@ -186,12 +186,9 @@ suspend fun sendAndVerify(sender: ObscuraClient, receiver: ObscuraClient, text: 
         )).toString().toByteArray(),
     )
 
-    // Poll the INBOX rather than consuming from `incomingMessages`.
-    //
-    // That is not a style choice. The channel is a droppable wake-up (SPEC §0.9 rule 4) and the ROW
-    // is the delivery path — so asserting on the row is what the architecture says to do. It also
-    // Consuming a channel item here would also steal it from callers that wait
-    // for a specific notification afterwards.
+    // Poll the INBOX rather than consuming from `incomingMessages`: the channel is a droppable
+    // wake-up and the row is the delivery path. Consuming a channel item would also steal it from
+    // callers that wait for a specific notification afterwards.
     val deadline = System.currentTimeMillis() + timeoutMs
     var row: dev.barrelmaker.obscura.kit.stores.InboxRecord? = null
     while (System.currentTimeMillis() < deadline && row == null) {

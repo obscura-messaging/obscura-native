@@ -11,7 +11,7 @@ final class StoryAttachmentTests: XCTestCase {
     /// A story entry naming an uploaded attachment reaches the recipient's inbox with the
     /// attachment id intact.
     ///
-    /// The payload is opaque to the kit (SPEC §0.4) — `mediaRef` is an application field, and the
+    /// The payload is opaque to the kit — `mediaRef` is an application field, and the
     /// assertion below reads it back out of the *stored bytes* rather than from any kit-parsed
     /// structure, because the kit does not parse it.
     func testAStoryEntryCarriesItsAttachmentIdToTheRecipientsInbox() async throws {
@@ -35,7 +35,7 @@ final class StoryAttachmentTests: XCTestCase {
         XCTAssertEqual(received.type, "APP_ENTRY")
         XCTAssertEqual(received.sourceUserId, alice.userId!)
 
-        // The inbox row is the delivery — the wake-up above is droppable (§0.9 rule 4).
+        // The inbox row is the delivery — the wake-up above is droppable.
         let row = try await bob.client.inbox.peek(limit: 200).first { $0.entryId == entryId }
         let stored = try XCTUnwrap(row, "the story must be in Bob's inbox")
         XCTAssertEqual(stored.modelKey, "story")

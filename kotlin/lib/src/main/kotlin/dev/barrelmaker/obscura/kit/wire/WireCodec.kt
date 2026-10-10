@@ -8,8 +8,7 @@ import obscura.client.v1.Client
  * the app-facing message kind.
  *
  * Keeping every mapping here prevents call-site drift. The shared
- * `protocol/conformance/wire.json` vectors pin cross-platform behavior
- * (SPEC §3).
+ * `protocol/conformance/wire.json` vectors pin cross-platform behavior.
  */
 object WireCodec {
 

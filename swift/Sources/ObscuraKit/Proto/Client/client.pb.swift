@@ -13,7 +13,7 @@
 // The client-to-client payload carried inside the server transport's encrypted
 // bytes. The server never parses this layer.
 //
-// Behavioral contract: docs/NATIVE_CONTRACT.md and protocol/conformance/.
+// Behavioral contract: docs/KIT_API.md and protocol/conformance/.
 
 #if canImport(FoundationEssentials)
 import FoundationEssentials

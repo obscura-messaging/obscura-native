@@ -17,28 +17,11 @@ internal class ContentService(
     private val messageSender get() = ctx.messageSender
 
     /**
-     * Send an application entry (`KIT_API.md` §5) — the outbox half of the thin kit.
+     * Send an application entry to every device of the caller-named users plus the author's own
+     * other devices. The sending device is excluded and gets no inbox row (pinned by
+     * `EntrySendTests`).
      *
-     * ```
-     * send(recipientUserIds, modelKey, entryId, sentAt, payload)
-     * ```
-     *
-     * **The caller names the recipients** (SPEC §0.4). The kit fans out to every device of every
-     * listed userId, plus the author's own *other* devices, and makes **no delivery decision of its
-     * own** — no audience resolution, no reading of `payload` to discover who it is for.
-     *
-     * Two properties §5 asks to be proven rather than assumed, both pinned by `EntrySendTests`:
-     *
-     * 1. **The sending device is excluded from its own fan-out.** `getSelfSyncTargets()` returns
-     *    every own device *including this one*, and a message encrypted to yourself is at best waste
-     *    and at worst a duplicate the app must dedupe.
-     * 2. **The sender gets no inbox row.** Nothing loops back locally, so the app must write its own
-     *    outgoing entry — one write path in the kit, two in the app. `payload` is what the app
-     *    stores; the kit never opens it.
-     *
-     * An empty `recipientUserIds` is legitimate and not an error: it means "my own devices only",
-     * which is what a self-scoped model wants. Failing loud is for an audience the kit was asked to
-     * *guess*, and here it never guesses.
+     * An empty `recipientUserIds` is valid and means "my own devices only".
      */
     suspend fun sendEntry(
         recipientUserIds: List<String>,
@@ -77,8 +60,8 @@ internal class ContentService(
             }
         }
 
-        // Own OTHER devices. Runs whether or not a recipient failed — see above. The filter is
-        // §5 property 1: without it this device encrypts to itself.
+        // Own OTHER devices. Runs whether or not a recipient failed — see above. Without the
+        // filter this device encrypts to itself.
         val selfTargets = devices.getSelfSyncTargets().filter { it != session.deviceId }
         val selfUserId = session.userId
         if (selfTargets.isNotEmpty() && selfUserId != null) {

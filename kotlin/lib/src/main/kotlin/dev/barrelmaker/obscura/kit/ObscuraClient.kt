@@ -119,17 +119,12 @@ class ObscuraClient(
     internal val messenger: Messenger
 
     /**
-     * The durable inbox (`KIT_API.md` §3) — the thin kit's receive API.
-     *
-     * Four methods: peek / consume / discard / depth. The kit writes rows before it acks; the app
-     * drains them. There is no insert, because the kit is the only writer.
+     * The durable inbox. The kit writes rows before it acks; the app drains them.
      */
     val inbox: InboxStore
 
     /**
-     * Raw storage for application entries (`KIT_API.md` §8.1) — the other half of the
-     * thin kit's app-facing surface. `inbox` is how messages arrive; this is where the app keeps
-     * what it made of them.
+     * Opaque storage for the app's entries.
      */
     val entries: EntryStore
 
@@ -208,8 +203,7 @@ class ObscuraClient(
         messenger = Messenger(signalStore, api)
         inbox = InboxStore(db)
         entries = EntryStore(db, driver)
-        // A discard is data loss the app chose deliberately, and §3.3 rule 5 requires it be logged
-        // as a security-relevant event rather than being the quiet path.
+        // A discard is deliberate data loss, so it goes to the security log.
         inbox.onDiscard = { ids, reason ->
             logger.log("INBOX DISCARD ${ids.size} row(s) reason=\"$reason\" ids=$ids")
             log("INBOX DISCARD ${ids.size} row(s): $reason")
@@ -257,10 +251,7 @@ class ObscuraClient(
                 db.signalKeyQueries.deleteAllSessions()
                 db.signalKeyQueries.deleteAllSenderKeys()
                 db.modelEntryQueries.deleteAllEntries()
-                // The §3.3 rule 2 carve-out: a device wipe must also destroy the inbox's decrypted
-                // plaintext. The whole table is cleared so this remains a security operation, not
-                // the eviction policy §3.4 refuses to add.
-                // Keep the security carve-out behind InboxStore rather than exposing its query.
+                // A device wipe must also destroy the inbox's decrypted plaintext.
                 inbox.wipe()
             },
             onSessionChanged = { persistSession() }
@@ -692,16 +683,9 @@ class ObscuraClient(
                     continue
                 }
 
-                // `Envelope.id` is now the inbox's DEDUPE KEY, so it gets the same length check
-                // `sender_id` above and `sender_device_id` in Messenger already get — and for
-                // the same reason: SPEC §0.10 treats everything the relay stamps as untrusted.
-                //
-                // Without this, `UuidCodec.bytesToUuid` returns the NIL UUID for anything shorter
-                // than 16 bytes (proto3's default for an unset `bytes` field is empty). Every such
-                // envelope would then hash to one key: the first inserts and is acked, and every
-                // one after it is suppressed by INSERT OR IGNORE, reported as a duplicate, and
-                // ACKED — the server deletes messages that were never stored. Silent, permanent,
-                // and remotely triggerable by anything upstream that emits a short id.
+                // `Envelope.id` is the inbox dedupe key. A short id would decode to the nil UUID,
+                // so every such envelope would collide, be treated as a duplicate, and be acked
+                // without being stored.
                 val envelopeIdBytes = envelope.id.toByteArray()
                 if (envelopeIdBytes.size != 16) {
                     log("RECV FAIL envelope id is ${envelopeIdBytes.size} bytes, expected 16 " +
@@ -742,7 +726,7 @@ class ObscuraClient(
 
                     decryptFailures.remove(senderId)
 
-                    // DISPLAY NAME (SPEC §0.5): for a friend REQUEST/RESPONSE — first contact, sender
+                    // DISPLAY NAME: for a friend REQUEST/RESPONSE — first contact, sender
                     // not yet a friend — the display username is the legitimate payload bootstrap.
                     // For every other payload the display name is NOT read here; it comes from the
                     // friend graph keyed on sourceUserId when the app renders the conversation.
@@ -829,10 +813,10 @@ class ObscuraClient(
     }
 
     /**
-     * Persist a decrypted message, by class (`KIT_API.md` §4).
+     * Persist a decrypted message, by payload class.
      *
      * Called from the envelope loop **before** the ack, and it throws on a failed durable write so
-     * the ack is skipped and the message survives on the server (SPEC §0.9 rule 3).
+     * the ack is skipped and the message survives on the server.
      *
      * [classify] decides what each arm may do; this method performs the corresponding handler.
      *
@@ -882,13 +866,7 @@ class ObscuraClient(
         val inserted = inbox.put(
             InboxInsert(
                 envelopeId = envelopeId,
-                // Must match Swift byte for byte — the app reads one `kind` column from two
-                // kits, and §4.1 has pix's drain BRANCH on it (an unrecognised kind is discarded).
-                // `payloadCase.name` gives Kotlin's "PAYLOAD_NOT_SET" where Swift's WireCodec gives
-                // "", so a drain keying on one silently fails on the other platform: rows pile up,
-                // depth never returns to zero, and with the `after:` cursor deferred the head of the
-                // queue wedges. Both kits now go through WireCodec and share the UNKNOWN sentinel —
-                // an empty string is a poor value for a NOT NULL column read across a bridge.
+                // Must match Swift byte for byte: the app branches on `kind` from both kits.
                 kind = WireCodec.decodeType(msg.payloadCase).ifEmpty { "UNKNOWN" },
                 senderUserId = sourceUserId,
                 senderDeviceId = senderDeviceId,
@@ -914,18 +892,13 @@ class ObscuraClient(
     }
 
     /**
-     * SPEC §2.4: a peer-supplied timestamp is clamped before it is stored, not after.
-     *
-     * Without this a peer can set `sentAt` far in the future and win every REPLACE conflict forever
-     * — the tie-break can only order writes it can compare honestly.
+     * Clamps a peer-supplied timestamp before it is stored, so a far-future `sentAt` cannot win
+     * every REPLACE conflict.
      */
     internal fun clampFutureTimestamp(sentAt: Long): Long {
         val cap = System.currentTimeMillis() + 60_000L
-        // `AppEntry.timestamp` is proto3 `uint64`, which protobuf-java surfaces as a SIGNED Long —
-        // so a peer sending >= 2^63 arrives here NEGATIVE and sails under any `minOf` cap. Swift
-        // does the same comparison in UInt64 space and correctly yields the cap, so the unguarded
-        // version stored roughly -9.2e18 on Android and now+60s on iOS for identical wire bytes.
-        // Clamping both ends keeps §2.4 honest and the two kits in agreement.
+        // `AppEntry.timestamp` is a uint64 that protobuf-java surfaces as a signed Long, so a value
+        // >= 2^63 arrives negative. Swift compares as UInt64 and yields the cap; match it.
         if (sentAt < 0) return cap
         return minOf(sentAt, cap)
     }
@@ -935,7 +908,7 @@ class ObscuraClient(
         // authenticated by the Signal session that decrypted this message (TOFU: libsignal pins the
         // sender's identity key on first contact, exactly as Signal does).
         //
-        // The payload username is a first-contact label only (SPEC §0.10 rule 5). A known peer
+        // The payload username is a first-contact label only. A known peer
         // cannot use another request to replace its locally trusted name or friendship status.
         val existing = friends.get(sourceUserId)
         if (existing != null) {
@@ -973,7 +946,7 @@ class ObscuraClient(
         }
 
         // Promote in place. The name stays the one WE recorded when we sent the request; the
-        // payload's username is not consulted (SPEC §0.5 — the graph names the peer, not the peer).
+        // payload's username is not consulted.
         friends.updateStatus(sourceUserId, FriendStatus.ACCEPTED)
         friends.updateDevices(sourceUserId, messenger.knownDevicesFor(sourceUserId))
     }
@@ -1052,15 +1025,12 @@ class ObscuraClient(
     }
 
     // Attachment convenience methods resolve friend usernames. App entry sends use explicit
-    // recipient user ids through `send` (SPEC §0.4).
+    // recipient user ids through `send`.
 
     /**
-     * Send an application entry (`KIT_API.md` §5) — the outbox half of the thin kit,
-     * paired with [inbox] on the receive side and [entries] for local storage.
-     *
-     * **The caller names the recipients.** The kit fans out to every device of every listed userId
-     * plus this user's own *other* devices, and resolves no audience of its own (SPEC §0.4). The
-     * sender receives no inbox row, so the app writes its own outgoing entry to [entries].
+     * Send an application entry to the caller-named recipients, their devices, and this user's
+     * other devices. The sender receives no inbox row, so the app writes its own outgoing entry to
+     * [entries].
      */
     suspend fun send(
         recipientUserIds: List<String>,
@@ -1094,8 +1064,7 @@ class ObscuraClient(
     /**
      * Who is currently typing in a context, by display name.
      *
-     * Auto-expires; a signal with no refresh disappears on its own, which is what makes signals
-     * droppable (`KIT_API.md` §4) rather than something the inbox has to carry.
+     * Auto-expires; a signal with no refresh disappears on its own.
      */
     fun observeTyping(contextId: String): Flow<List<String>> = typingTracker.observe(contextId)
 

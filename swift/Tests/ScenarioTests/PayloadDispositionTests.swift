@@ -1,10 +1,7 @@
 import XCTest
 @testable import ObscuraKit
 
-/// The §4 classification table.
-///
-/// This is the piece that makes SPEC §0.9 checkable rather than aspirational — "never ack before
-/// persisting" means nothing until something says, per arm, what persisting means for that arm.
+/// The payload classification table.
 ///
 /// Mirrors `ObscuraKit-Kotlin`'s `PayloadDispositionTest`. The two kits must agree here in a way they need
 /// not agree elsewhere: a divergence means one of them acks something the other stores.
@@ -34,11 +31,8 @@ final class PayloadDispositionTests: XCTestCase {
         }
     }
 
-    /// The one decision in §4.1 that was not a coin flip. Declining to ack an arm we do not
-    /// understand looks conservative and is the opposite: any authenticated user may send to any
-    /// device, a never-acked message redelivers forever, and the server's queue caps at 1000 per
-    /// device and evicts **oldest-first, silently**. So refusing to ack unknown arms hands a stranger
-    /// a remote wipe of the recipient's real undelivered mail.
+    /// Leaving an unknown arm unacked would let any sender fill the server's per-device queue, which
+    /// evicts oldest-first, and push the recipient's real mail out.
     func testAnUnsetPayloadIsInboxedRatherThanLeftUnacked() {
         XCTAssertEqual(payloadDisposition(nil), .inboxed)
     }

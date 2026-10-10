@@ -1,62 +1,22 @@
 # Claude Code Context
 
-## Read this before changing anything
-
-Read these first:
-
-- [`NATIVE_CONTRACT.md` §0 — The kit boundary](../docs/NATIVE_CONTRACT.md) — normative, and the
-  section that decides every "should the kit do this?" argument.
-- [`KIT_API.md`](../docs/KIT_API.md) — the app-facing surface this kit
-  implements: the inbox (§3), payload classification (§4), `send` (§5), the entry store (§8.1), and
-  §9's rule that the entry store does not grow a query API.
-- [`HISTORY.md`](../docs/HISTORY.md) — non-normative
-  migration history.
-
-The current app-facing surface is
-`client.send(to:modelKey:entryId:sentAt:payload:)`, the durable
-`client.inbox`, and opaque `client.entries` storage. Merge, audience resolution,
-schemas, queries, expiry, and notification policy live in `obscura-pix`.
+Read [`docs/KIT_API.md`](../docs/KIT_API.md), the kit contract, first. It
+defines the boundary, persist-then-ack, envelope identity, the inbox, entry
+store, send and the known gaps. Do not restate its rules here.
 
 `ObscuraSchema` owns the current pre-release baseline. Until the first public
 release, schema changes require clearing app data rather than carrying prototype
 migrations. After release, never edit an applied migration.
-
-The rule that governs this repo:
-
-> **If the kit reads it, it is a field in `client.proto`.
-> If it is not in `client.proto`, the kit MUST NOT read it.**
-
-**Do not add an ORM, CRDT layer, query builder, audience/routing engine, or
-schema parser.** Re-check `NATIVE_CONTRACT.md` §0 and the shipping app before expanding the
-entry store beyond `KIT_API.md` §8.1.
 
 ## Current constraints
 
 - No Notification Service Extension exists. Shared database, key, and session
   plumbing exists but is not device-verified; the current APNs payload cannot
   launch an NSE. See `docs/NSE_PREREQUISITES.md`.
-- This kit sends `DEVICE_LINK_APPROVAL` but has no receive handler. The arm is
-  logged, dropped, and acknowledged so it cannot wedge the queue. Kotlin handles
-  it, so linked-device behavior differs by platform.
-- Device announcements have no replay protection.
-- Linked devices receive the friend graph at link time but do not learn friends
-  added later.
-- `APP_ENTRY` has one durable receive write: `inbox.put`. Persistence errors
-  propagate and skip acknowledgement (`NATIVE_CONTRACT.md` §0.9).
+- `APP_ENTRY` has one durable receive write: `inbox.put`.
 
-`obscura-client-web` is a throwaway proof of concept, not a porting target or
-normative implementation.
-
-## Project Overview
-
-ObscuraKit — the **native iOS platform layer** for the Obscura app (`obscura-pix`). Not a
-general-purpose framework; it has one consumer and owes API stability to no one.
-
-It exists natively because libsignal has no supported shared core and
-background push processing cannot depend on a React Native runtime. Everything
-else belongs in the app.
-
-It must agree with ObscuraKit-Kotlin on the **wire** (`../protocol/conformance/wire.json`) and nothing more.
+`obscura-client-web` is a throwaway proof of concept, not a reference
+implementation.
 
 @README.md
 @docs/PITFALLS.md
@@ -77,12 +37,6 @@ All smoke/scenario tests run against the live server.
 - Use `await rateLimitDelay()` (100ms) between general calls
 - Use `await authRateLimitDelay()` (1000ms) between auth calls
 - Both configurable via `SERVER_REQUEST_DELAY_MS` and `AUTH_REQUEST_DELAY_MS` in `Constants.swift`
-
-## Reference implementations
-
-There is no porting reference. This kit is written against
-`docs/NATIVE_CONTRACT.md` and `protocol/conformance/`, not against another
-implementation.
 
 ## Server API Quick Reference
 

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 CONFORMANCE_DIR = Path(__file__).resolve().parent
-CONTRACT = CONFORMANCE_DIR.parents[1] / "docs" / "NATIVE_CONTRACT.md"
+CONTRACT = CONFORMANCE_DIR.parents[1] / "docs" / "KIT_API.md"
 
 # The vector files this validator knows how to check. Adding a new behavior
 # class is a deliberate act: register its file + a checker here (fail-loud).
@@ -133,14 +133,14 @@ def main() -> int:
     present = {p.stem for p in CONFORMANCE_DIR.glob("*.json")}
     orphans = present - KNOWN_FILES
     for stem in sorted(orphans):
-        rep.err(f"{stem}.json", "unknown vector file — register it in validate.py and NATIVE_CONTRACT.md")
+        rep.err(f"{stem}.json", "unknown vector file — register it in validate.py and KIT_API.md")
     missing = KNOWN_FILES - present
     for stem in sorted(missing):
         rep.err(f"{stem}.json", "expected vector file is missing")
 
     contract_text = CONTRACT.read_text() if CONTRACT.exists() else ""
     if not CONTRACT.exists():
-        rep.err("NATIVE_CONTRACT.md", "canonical native contract not found under docs/")
+        rep.err("KIT_API.md", "kit contract not found under docs/")
 
     for stem in sorted(KNOWN_FILES & present):
         path = CONFORMANCE_DIR / f"{stem}.json"
@@ -154,7 +154,7 @@ def main() -> int:
             continue
         CHECKERS[stem](rep, doc)
         if f"{stem}.json" not in contract_text:
-            rep.err(f"{stem}.json", "not referenced anywhere in NATIVE_CONTRACT.md")
+            rep.err(f"{stem}.json", "not referenced anywhere in KIT_API.md")
 
     if rep.errors:
         print(f"conformance vectors INVALID — {len(rep.errors)} problem(s):\n", file=sys.stderr)

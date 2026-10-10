@@ -17,18 +17,11 @@ public enum DatabaseSecret {
     ///
     /// - Parameter accessGroup: a shared keychain access group
     ///   (e.g. `"$(AppIdentifierPrefix)com.example.shared"`). Pass `nil` — the default — to keep the
-    ///   item in the app's own default group, which is the behaviour this kit has always had.
+    ///   item in the app's own default group.
     ///
-    ///   **Why this parameter exists (`KIT_API.md` P2).** A Notification Service
-    ///   Extension runs under a *different bundle id*, so it cannot read a keychain item in the
-    ///   app's default access group — it would be unable to decrypt the SQLCipher database, i.e.
-    ///   unable to do the one job SPEC §0.1 uses to justify native kits existing. The extension also
-    ///   needs the database *file* in an App Group container; that is the app's side of the change
-    ///   (this kit already takes `dataDirectory` from the caller).
-    ///
-    ///   Adding the group later is not free: a keychain item cannot be moved between access groups
-    ///   in place, it has to be re-created — and the key it holds is the only way to read the
-    ///   message store. Accepting the parameter now costs nothing and keeps that door open.
+    ///   A Notification Service Extension runs under a different bundle id, so it can only read
+    ///   the database key from a shared access group. A keychain item cannot be moved between
+    ///   groups in place. See `docs/NSE_PREREQUISITES.md`.
     public static func getOrCreate(userId: String, accessGroup: String? = nil) -> Data {
         let service = "dev.barrelmaker.obscura.kit.dbsecret"
         let account = "db_key_\(userId)"

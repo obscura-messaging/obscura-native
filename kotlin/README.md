@@ -3,27 +3,11 @@
 The **native Android/JVM platform layer** for the Obscura app (`obscura-pix`). It is not a
 general-purpose framework, it has exactly one consumer, and it owes API stability to no one.
 
-Read [`CLAUDE.md`](CLAUDE.md) before changing anything. The normative brief is
-[`NATIVE_CONTRACT.md` §0 — the kit boundary](../docs/NATIVE_CONTRACT.md), with the app-facing
-contract in [`KIT_API.md`](../docs/KIT_API.md).
-
-**Why a native kit exists at all:** libsignal ships only as `libsignal-java` / `libsignal-swift` —
-there is no supported shared core, so the Signal protocol must be implemented
-per platform. Background push processing also cannot depend on a React Native
-runtime. Those constraints justify native code; everything else belongs in the
-app.
-
-Merge, audience resolution, schemas, queries, expiry, and notification policy
-belong in `obscura-pix`. Do not add ORM, CRDT, query, schema, or routing layers
-to this kit; `KIT_API.md` §9 defines the boundary.
+Read [`CLAUDE.md`](CLAUDE.md) before changing anything. The kit contract, including the
+boundary between kit and app, is [`docs/KIT_API.md`](../docs/KIT_API.md).
 
 *(`obscura-client-web` is a throwaway proof-of-concept. It is **not** a reference implementation and
 must not be treated as a porting target.)*
-
-## The rule that governs this repo
-
-> **If the kit reads it, it is a field in `client.proto`.
-> If it is not in `client.proto`, the kit MUST NOT read it.**
 
 ## Quick Start
 
@@ -37,7 +21,7 @@ client.addFriendByCode(theirCode)
 
 // SEND: the caller names the recipients. The kit fans out to every device of every
 // listed userId plus this user's own other devices, and resolves no audience of its
-// own (SPEC §0.4). `payload` is opaque bytes the kit never parses.
+// own. `payload` is opaque bytes the kit never parses.
 client.send(
     recipientUserIds = listOf(friendUserId),
     modelKey = "pix",
@@ -106,41 +90,22 @@ See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for auth and device linking
 The unit suite runs without a network. The integration suite exercises the
 public facade against a configured `obscura-server`.
 
-- **Signal Protocol** — identity, prekeys, sessions, encrypt/decrypt. Sessions are addressed by
-  **device UUID** (SPEC §0.10): the inbound session comes from `Envelope.sender_device_id`, prekey
-  bundles are selected by device UUID with no fallback, and `registrationId` addresses nothing.
-- **Persist-then-ack receive loop** (SPEC §0.9) — an ack is a DELETE on the server, so the kit acks
-  only what it has durably written. A decrypt failure, a rate-limited sender, or a failed write all
-  leave the message on the server to redeliver.
-- **The durable inbox** (`KIT_API.md` §3) — `peek` / `consume` / `discard` / `depth`, deduped on
-  `envelope_id` while a row remains pending.
-- **The entry store** (§8.1) — `put` / `all` / `erase` over opaque JSON. Three methods, no fourth.
+- **Signal Protocol** — identity, prekeys, sessions, encrypt/decrypt, addressed by device UUID.
+- **Persist-then-ack receive loop** — the kit acks only what it has durably written.
+- **The durable inbox** — `peek` / `consume` / `discard` / `depth`.
+- **The entry store** — `put` / `all` / `erase` over opaque JSON.
 - **Friend graph** — request/accept, with device lists learned from DEVICE_ANNOUNCE.
-- **Login** — `login()` returns a `LoginScenario`; only `EXISTING_DEVICE` authenticates (`KIT_API.md` §10).
+- **Login** — `login()` returns a `LoginScenario`; only `EXISTING_DEVICE` authenticates.
 - **Device provisioning and linking** — `loginAndProvision()` → `PENDING_APPROVAL` (when another device can approve) →
   QR/link-code approval, which carries the own-device list and friends export.
 - **Transport** — REST + gateway WebSocket with auto-reconnect and token refresh; the offline queue
   is the server's, not ours.
 - **Attachment crypto** — upload/download with an AES key shipped over Signal.
-- **Push-wake drain** — `processPendingMessages(timeoutMs)` returns one opaque total without
-  consuming the app's event stream. Zero also represents failure to connect after the bounded
-  retries, so it is not proof that the server queue is empty. Notification policy stays in the app;
-  the kit never posts one.
+- **Push-wake drain** — `processPendingMessages(timeoutMs)` returns a processed-envelope count.
 - **Ephemeral signals** — typing indicators, in memory only, throttled to 2s and expiring after 3s.
-  The caller supplies explicit recipients and a typed STARTED/STOPPED state; the context id is opaque.
 
-## What this kit deliberately does not do
-
-- **No merge, no CRDT, no TTL, no query DSL, no schema, no audience resolution.** These are
-  `obscura-pix` responsibilities. `EntryStore.all(model)` returns everything and the app filters.
-- **No OS notifications**, no UI, no application field names. `modelKey` is opaque throughout.
-- **No eviction policy on the inbox.** Rows leave only by an explicit `consume`/`discard` from the
-  app, or by the security carve-out in a device wipe (§3.3 rule 2).
-
-## Cross-kit contract
-
-`ObscuraKit-swift` must agree with this kit on the **wire**
-([`protocol/conformance/wire.json`](../protocol/conformance/wire.json)). Broader implementation parity is not implied.
+What the kit must not do (merge, queries, expiry, audience resolution, notifications) is listed in
+[`docs/KIT_API.md`](../docs/KIT_API.md).
 
 ## Build & Test
 
@@ -159,8 +124,8 @@ suite runs on every PR without touching prod. Each integration test is gated on
 server *correctly configured*: seed the MinIO `test-bucket` and raise the auth rate limit, or you
 get ~63 environmental failures (HTTP 429/500) that are not code failures.
 
-**A non-void `@Test` is silently ignored by JUnit 5.** This has bitten twice. If a test body ends in
-`assertThrows(...)`, add a trailing `Unit`.
+**A non-void `@Test` is silently ignored by JUnit 5.** If a test body ends in `assertThrows(...)`,
+add a trailing `Unit`.
 
 ## Docs
 

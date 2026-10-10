@@ -11,8 +11,8 @@ the facade instead: `send()`, `uploadAttachment()`, `announceDevices()`, etc.
 
 `send()` is the only app-payload send. It takes explicit `recipientUserIds` — a
 helper that resolves an audience from a friend username would be the kit
-deciding an audience from an application concept, which `NATIVE_CONTRACT.md`
-§0.4 forbids. Test helpers wrap `send()`; they do not get their own facade method.
+deciding an audience from an application concept, which the kit contract
+forbids. Test helpers wrap `send()`; they do not get their own facade method.
 
 Raw protobuf is appropriate when the test intentionally creates input that no
 public API should expose. Current exceptions are:

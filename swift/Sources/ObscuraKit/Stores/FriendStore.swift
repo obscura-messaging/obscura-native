@@ -66,7 +66,7 @@ public actor FriendStore {
     }
 
 
-    // SPEC §0.9 rule 3: a durable write that backs an acked message must be able to fail loudly,
+    // A durable write that backs an acked message must be able to fail loudly,
     // so the envelope loop skips the ack instead of deleting an un-persisted message server-side.
     public func add(_ userId: String, _ username: String, status: FriendStatus, devices: [[String: String]] = []) async throws {
         let now = UInt64(Date().timeIntervalSince1970 * 1000)

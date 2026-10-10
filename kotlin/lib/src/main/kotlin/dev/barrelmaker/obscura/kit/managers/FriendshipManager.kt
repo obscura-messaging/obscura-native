@@ -28,8 +28,8 @@ internal class FriendshipManager(
 
         messenger.fetchPreKeyBundles(targetUserId)
 
-        // The FriendRequest carries only our display username — a first-contact bootstrap label
-        // (SPEC §0.5). Our IDENTITY is not in the payload: the server stamps envelope.sender_id with
+        // The FriendRequest carries only our display username — a first-contact bootstrap label.
+        // Our IDENTITY is not in the payload: the server stamps envelope.sender_id with
         // our user id, and the recipient's Signal session pins our identity key on first contact
         // (TOFU), exactly as Signal authenticates. No user_id field is needed or sent.
         val msg = ClientMessage.newBuilder()

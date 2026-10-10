@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test
 
 /**
  * The message's user comes from the envelope (`sender_id`), and its display
- * name comes from the recipient's friend graph, never the payload (SPEC §0.5).
+ * name comes from the recipient's friend graph, never the payload.
  *
  * Signal-aligned: the Envelope carries BOTH the sending user (source_service_id -> sender_id, a
  * routing/attribution HINT) and the sending device (source_device -> sender_device_id, which selects

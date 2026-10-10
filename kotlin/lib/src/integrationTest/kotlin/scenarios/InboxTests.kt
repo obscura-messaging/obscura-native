@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 
 /**
- * The durable inbox, end to end against a real server (`KIT_API.md` §3).
+ * The durable inbox, end to end against a real server.
  *
  * `InboxStoreTest` covers the store's rules in isolation. This file covers the part that cannot be
  * faked: that a real APP_ENTRY, sent by a real peer over a real Signal session and delivered by the
@@ -20,7 +20,7 @@ class InboxTests {
 
     // The inbox needs no schema; modelKey is an opaque namespace string.
 
-    /** Send an entry the way obscura-pix does: the caller names the recipient (SPEC §0.4). */
+    /** Send an entry the way obscura-pix does: the caller names the recipient. */
     private suspend fun sendStory(from: ObscuraClient, to: ObscuraClient, entryId: String, content: String) =
         from.send(
             recipientUserIds = listOf(to.userId!!),
@@ -48,8 +48,7 @@ class InboxTests {
 
         assertEquals("APP_ENTRY", row.kind)
         assertEquals("story", row.modelKey, "modelKey is carried opaquely so the app can merge")
-        // Identity comes from the envelope and the Signal session, never from the payload
-        // (SPEC §0.5, §0.10). This is the assertion a unit test cannot make honestly.
+        // Identity comes from the envelope and the Signal session, never from the payload.
         assertEquals(alice.userId, row.senderUserId)
         assertEquals(alice.deviceId, row.senderDeviceId,
             "senderDeviceId is the address of the session that decrypted — cryptographic attribution")
@@ -59,7 +58,7 @@ class InboxTests {
     }
 
     /**
-     * **SPEC §2.4: a peer-supplied timestamp is clamped BEFORE it is stored.**
+     * **A peer-supplied timestamp is clamped BEFORE it is stored.**
      *
      * `ReceivePathTest` covers the function directly, including negative protobuf `uint64` values;
      * this test proves the clamp is reached on the wire path.

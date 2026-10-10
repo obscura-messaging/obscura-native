@@ -11,7 +11,7 @@ client.connect()
 `register()` creates the user account on the server, generates a Signal Protocol identity (keypair + 100 one-time prekeys), provisions the device, and authenticates. After this call, `authState` is `AUTHENTICATED` and you can start sending entries, draining the inbox, and befriending other users.
 
 `login()` returns a `LoginScenario`. Only `EXISTING_DEVICE` authenticates; the
-other outcomes leave the client logged out (see `docs/KIT_API.md` §10):
+other outcomes leave the client logged out (see `docs/KIT_API.md`):
 
 ```kotlin
 when (client.login("alice", "mypassword123!")) {
