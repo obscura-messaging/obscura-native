@@ -7,7 +7,7 @@ import Foundation
 ///   (cd ../obscura-server && docker compose up -d)   # server on :3000
 ///   OBSCURA_TEST_API=http://localhost:3000 swift test --filter ScenarioTests
 ///
-/// The container image comes from github.com/barrelmaker97/obscura-server.
+/// Server source is maintained at github.com/obscura-messaging/obscura-server.
 enum TestServer {
     static let apiURL: String =
         ProcessInfo.processInfo.environment["OBSCURA_TEST_API"] ?? "https://obscura.barrelmaker.dev"
