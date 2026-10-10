@@ -205,7 +205,8 @@ let bytes = try await client.downloadDecryptedAttachment(
 ```
 
 Embed `id`, `contentKey`, and `nonce` in your encrypted entry payload so the
-recipient can download and decrypt.
+recipient can download and decrypt. The kit keeps no decrypted copy; each call
+fetches and decrypts again, so cache the result in the app if needed.
 
 ## Logging
 

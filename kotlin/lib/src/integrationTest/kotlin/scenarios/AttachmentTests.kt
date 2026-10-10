@@ -24,7 +24,7 @@ class AttachmentTests {
         assertTrue(att.id.isNotEmpty())
 
         // The server holds ciphertext only: the kit encrypted before upload.
-        val stored = alice.downloadAttachment(att.id)
+        val stored = alice.api.fetchAttachment(att.id)
         assertFalse(stored.contentEquals(payload), "server must never receive plaintext")
 
         val downloaded = alice.downloadDecryptedAttachment(att.id, att.contentKey, att.nonce)
