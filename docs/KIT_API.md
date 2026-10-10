@@ -231,7 +231,6 @@ Debug output is pull-only via `getDebugLog`.
 | `newDevice` | No stored local device | Logged out |
 | `deviceMismatch` | Server no longer knows the stored device | Logged out |
 | `invalidCredentials` | User-scoped login returned 401/403 (incl. unknown username) | Logged out |
-| `userNotFound` | A login returned 404 | Logged out |
 
 Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
 `deviceMismatch` call `wipeDevice` first. `loginAndProvision` ends in

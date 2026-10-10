@@ -22,7 +22,6 @@ public enum LoginScenario: Sendable {
     case newDevice            // No local device. Call loginAndProvision().
     case deviceMismatch       // Server rejected the stored local device. Call wipeDevice(), then loginAndProvision().
     case invalidCredentials
-    case userNotFound
 }
 
 public struct MessageWakeEvent: Sendable {
@@ -618,7 +617,6 @@ public class ObscuraClient {
                 return .existingDevice
             } catch let error as APIClient.APIError {
                 // The user-scoped login below classifies 401/403.
-                if error.status == 404 { return .userNotFound }
                 if error.status != 401 && error.status != 403 { throw error }
                 await rateLimitDelay()
             }
@@ -629,7 +627,6 @@ public class ObscuraClient {
         } catch let error as APIClient.APIError {
             switch error.status {
             case 401, 403: return .invalidCredentials
-            case 404: return .userNotFound
             default: throw error
             }
         }

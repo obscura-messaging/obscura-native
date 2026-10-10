@@ -103,11 +103,7 @@ internal class AuthManager(
                 return LoginScenario.EXISTING_DEVICE
             } catch (e: HttpException) {
                 // The user-scoped login below classifies 401/403.
-                when (e.statusCode) {
-                    401, 403 -> Unit
-                    404 -> return LoginScenario.USER_NOT_FOUND
-                    else -> throw e
-                }
+                if (e.statusCode != 401 && e.statusCode != 403) throw e
             }
         }
 
@@ -116,7 +112,6 @@ internal class AuthManager(
         } catch (e: HttpException) {
             return when (e.statusCode) {
                 401, 403 -> LoginScenario.INVALID_CREDENTIALS
-                404 -> LoginScenario.USER_NOT_FOUND
                 else -> throw e
             }
         }

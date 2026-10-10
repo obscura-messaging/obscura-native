@@ -18,7 +18,7 @@ when (client.login("alice", "mypassword123!")) {
     LoginScenario.EXISTING_DEVICE -> client.connect()
     LoginScenario.NEW_DEVICE -> client.loginAndProvision("alice", "mypassword123!", "Alice's Phone")
     LoginScenario.DEVICE_MISMATCH -> { client.wipeDevice(); client.loginAndProvision("alice", "mypassword123!", "Alice's Phone") }
-    LoginScenario.INVALID_CREDENTIALS, LoginScenario.USER_NOT_FOUND -> showError()
+    LoginScenario.INVALID_CREDENTIALS -> showError()
 }
 ```
 
