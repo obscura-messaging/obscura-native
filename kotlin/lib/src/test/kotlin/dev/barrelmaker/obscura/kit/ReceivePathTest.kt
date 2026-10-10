@@ -57,7 +57,7 @@ class ReceivePathTest {
             })
             .build()
 
-    // ── SPEC §2.4: clamping a peer-supplied timestamp ─────────────────────────
+    // ── Clamping a peer-supplied timestamp ────────────────────────────────────
 
     @Test
     fun `a past timestamp is stored unchanged`() {
@@ -99,7 +99,7 @@ class ReceivePathTest {
         assertTrue(clamped <= cap && clamped > cap - 5_000L, "it must land on the cap, as Swift does")
     }
 
-    // ── §3.3 rule 8: a redelivery must not notify twice ───────────────────────
+    // ── A redelivery must not notify twice ────────────────────────────────────
 
     /**
      * Persist-then-ack GUARANTEES redelivery, so this is a normal path. `Inbox.sq` says the dedupe

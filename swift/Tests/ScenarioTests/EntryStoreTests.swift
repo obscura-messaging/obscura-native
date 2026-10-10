@@ -2,11 +2,8 @@ import XCTest
 import GRDB
 @testable import ObscuraKit
 
-/// Raw entry storage (`KIT_API.md` §8.1).
-///
-/// Mirrors `ObscuraKit-Kotlin`'s `EntryStoreTest`. The property under test throughout is **that the
-/// kit does not interpret anything**: merge moved to the app, so this store writes what it is given
-/// and returns it unchanged.
+/// Raw entry storage. Mirrors `ObscuraKit-Kotlin`'s `EntryStoreTest`: the store writes what it is
+/// given and returns it unchanged.
 final class EntryStoreTests: XCTestCase {
 
     private func makeStore() throws -> EntryStore {
@@ -84,7 +81,7 @@ final class EntryStoreTests: XCTestCase {
         let all = try await store.all(model: "weird")
 
         XCTAssertEqual(all.first?.data, notJSON,
-                       "the kit must not validate a shape it is forbidden to read (SPEC §0.4)")
+                       "the kit must not validate a shape it is forbidden to read")
     }
 
     func testUnicodeAndNestedPayloadsSurviveUnchanged() async throws {
@@ -106,7 +103,7 @@ final class EntryStoreTests: XCTestCase {
     }
 
     /// The merge metadata has to survive the round trip, because it IS the app's merge input:
-    /// REPLACE is a total order on `(sentAt, authorDeviceId)` (§8.2). A store that dropped or
+    /// REPLACE is a total order on `(sentAt, authorDeviceId)`. A store that dropped or
     /// rewrote either would make the app's tie-break silently non-deterministic across devices.
     func testMergeMetadataRoundTripsExactly() async throws {
         let store = try makeStore()

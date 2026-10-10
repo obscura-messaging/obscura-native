@@ -9,8 +9,7 @@ the required CI jobs finish before merging.
 land here first; `obscura-pix` then updates its gitlink to the merged Native
 commit in a separate pull request.
 
-Read [`docs/NATIVE_CONTRACT.md`](docs/NATIVE_CONTRACT.md) and
-[`docs/KIT_API.md`](docs/KIT_API.md) before changing cross-platform behavior.
+Read [`docs/KIT_API.md`](docs/KIT_API.md) before changing cross-platform behavior.
 Kotlin and Swift share wire behavior, not implementation architecture.
 
 ## Prerequisites

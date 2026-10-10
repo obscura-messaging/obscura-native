@@ -46,5 +46,4 @@ The app then performs:
 inbox.peek → authorize/merge in obscura-pix → entries.put → inbox.consume
 ```
 
-Signal sessions are keyed by device UUID, never `registrationId`
-(`NATIVE_CONTRACT.md` §0.10).
+Signal sessions are keyed by device UUID, never `registrationId`.

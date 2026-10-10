@@ -74,7 +74,7 @@ public struct DeviceLink {
         // catchable, so nothing upstream can contain it: scanning a hostile QR code kills the app.
         //
         // Compare first and subtract only on the branch where the subtraction is defined.
-        // A future-dated code is treated as fresh, matching SPEC §2.4's treatment of peer time.
+        // A future-dated code is treated as fresh rather than rejected.
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         if code.timestamp < now && now - code.timestamp > maxAge {
             return .expired

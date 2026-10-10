@@ -1,7 +1,7 @@
 {
   "version": 1,
   "kind": "wire",
-  "description": "Client wire mapping + round-trip conformance. Pins every ClientMessage payload arm, TypingState mappings, and value-preserving AppEntry round trips. Byte-canonicity is intentionally not required; see docs/NATIVE_CONTRACT.md section 3.",
+  "description": "Client wire mapping + round-trip conformance. Pins every ClientMessage payload arm, TypingState mappings, and value-preserving AppEntry round trips. Byte-canonicity is intentionally not required; see docs/KIT_API.md.",
   "messageTypes": [
     { "wire": "friend_request", "app": "FRIEND_REQUEST" },
     { "wire": "friend_accept", "app": "FRIEND_ACCEPT" },

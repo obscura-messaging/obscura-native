@@ -6,7 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * One drained inbox row, as the app sees it (`KIT_API.md` §3.1).
+ * One drained inbox row, as the app sees it.
  *
  * `payload` is opaque bytes the kit never parsed. The AppEntry-derived fields are null for every
  * other kind, including an unknown arm — there is no AppEntry to derive them from.
@@ -47,30 +47,8 @@ internal data class InboxInsert(
 )
 
 /**
- * The durable inbox (`KIT_API.md` §3).
- *
- * The kit is a durable, authenticated inbox for **opaque payloads**: it stores bytes it cannot read,
- * addressed to and from identities it can prove. This class is that store.
- *
- * ## Why an inbox and not an event stream
- *
- * Handing a payload to the app and then acknowledging it would make an asynchronous event the only
- * copy:
- *
- * ```
- * decrypt → emit to app → ACK (server DELETEs) → ...app writes to its store, maybe, later
- * ```
- *
- * The bridge may be backpressured and the app may not be running. The kit therefore persists bytes
- * it does not understand before acknowledging the server copy.
- *
- * ## The API is four methods, and there is no fifth
- *
- * `peek` / `consume` / `discard` / `depth`. In particular there is **no insert**: the inbox is
- * kit-write, app-read-and-delete (§3.3 rule 9). The only candidate for an app-side write was
- * self-sync, and it does not need one — a send fans out to the user's *other* devices via the
- * server, which receive it through the ordinary envelope path. The originating device is never
- * echoed to and writes its own store directly.
+ * The durable inbox: opaque payloads persisted before the server copy is acked, because the app
+ * may not be running to receive an event. Only the receive path writes it; the app drains it.
  */
 class InboxStore internal constructor(private val db: ObscuraDatabase) {
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1)
@@ -138,17 +116,15 @@ class InboxStore internal constructor(private val db: ObscuraDatabase) {
         // Chunked because `WHERE id IN ?` binds one variable per id, and SQLite caps that at 999 on
         // older builds. The app chooses the batch size, so `peek(limit = 5000)` then `consume` of
         // 5000 ids would throw "too many SQL variables" — and it would throw exactly when a large
-        // backlog exists, i.e. the one situation where the drain must not stall (§3.5).
+        // backlog exists, i.e. the one situation where the drain must not stall.
         ids.chunked(DELETE_CHUNK).forEach { db.inboxQueries.deleteByIds(it) }
     }
 
     /**
      * Drop rows the app declares it can **never** process.
      *
-     * This is data loss, chosen deliberately: the server's copy is already gone, so nothing else
-     * holds these bytes. It is therefore logged as a security-relevant event and must never be the
-     * quiet path (§3.3 rule 5) — which is the entire reason it is a separate method from [consume]
-     * rather than a flag on it. The SQL is identical; the accountability is not.
+     * This is deliberate data loss: the server's copy is already gone. It is separate from
+     * [consume] so it can be logged as a security-relevant event.
      */
     suspend fun discard(ids: List<Long>, reason: String): List<Long> = withContext(dispatcher) {
         if (ids.isEmpty()) return@withContext emptyList()
@@ -178,10 +154,8 @@ class InboxStore internal constructor(private val db: ObscuraDatabase) {
     /**
      * Destroy every row.
      *
-     * The §3.3 rule 2 carve-out, and **not** an eviction policy: a device wipe has to be able to
-     * destroy decrypted plaintext, and that is a security requirement.
-     * Note it takes no selector — destroying the whole store is what keeps it from becoming "drop
-     * the oldest when things get tight", which is the rule this design exists to refuse.
+     * For device wipe only, so decrypted plaintext can be destroyed. It takes no selector so it
+     * cannot become an eviction policy.
      */
     internal suspend fun wipe() = withContext(dispatcher) {
         db.inboxQueries.deleteAll()

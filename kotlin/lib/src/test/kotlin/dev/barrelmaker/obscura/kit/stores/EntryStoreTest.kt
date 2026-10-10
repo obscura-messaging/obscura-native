@@ -10,13 +10,8 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 
 /**
- * Raw entry storage (`KIT_API.md` §8.1).
- *
- * The property under test throughout is **that the kit does not interpret anything**. Merge moved to
- * the app; this store writes what it is given and returns it unchanged. Most of these tests exist to
- * pin the *absence* of behaviour, which is unusual and deliberate: every one of them would still
- * pass if someone re-added merge logic here, EXCEPT the ones that assert a blind overwrite — so
- * those are the ones that matter.
+ * Raw entry storage. The store writes what it is given and returns it unchanged; the blind-overwrite
+ * tests are the ones that would catch merge logic added here.
  */
 class EntryStoreTest {
 
@@ -97,7 +92,7 @@ class EntryStoreTest {
         store.put("weird", entry("w", data = notJson))
 
         assertEquals(notJson, store.all("weird").single().data,
-            "the kit must not validate a shape it is forbidden to read (SPEC §0.4)")
+            "the kit must not validate a shape it is forbidden to read")
     }
 
     @Test
@@ -115,7 +110,7 @@ class EntryStoreTest {
 
     /**
      * The merge metadata has to survive the round trip, because it IS the app's merge input: REPLACE
-     * is a total order on `(sentAt, authorDeviceId)` (§8.2). A store that dropped or rewrote either
+     * is a total order on `(sentAt, authorDeviceId)`. A store that dropped or rewrote either
      * would make the app's tie-break silently non-deterministic across devices.
      */
     @Test

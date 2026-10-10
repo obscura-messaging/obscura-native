@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 
 /**
- * `send` — the kit's explicit-audience send (`KIT_API.md` §5).
+ * `send` — the kit's explicit-audience send.
  *
  * 1. the sending device must be excluded from its own fan-out;
  * 2. the sender gets no inbox row, so the app must write its own outgoing entry.
@@ -43,12 +43,8 @@ class EntrySendTests {
     }
 
     /**
-     * **§5 property 1.** `getSelfSyncTargets()` returns every own device *including this one*, so a
-     * send that does not filter would encrypt a copy to itself. The app would then see its own write
-     * arrive as an incoming row and have to dedupe it — a whole class of bug for no benefit.
-     *
-     * A single-device sender is the sharpest version of the test: every own-device target IS this
-     * device, so an unfiltered fan-out has nowhere else to go and the echo is unmissable.
+     * `getSelfSyncTargets()` returns every own device *including this one*, so a send that does not
+     * filter would encrypt a copy to itself. A single-device sender makes the echo unmissable.
      */
     @Test
     fun `the sending device does not receive its own entry`() = runBlocking {
@@ -69,20 +65,16 @@ class EntrySendTests {
         delay(3000)
 
         assertEquals(0L, alice.inbox.depth(),
-            "a device must not receive the entry it just sent — see KIT_API.md §5")
+            "a device must not receive the entry it just sent")
         assertEquals(1L, bob.inbox.depth(), "...while the recipient still gets it")
 
         alice.disconnect(); bob.disconnect()
     }
 
     /**
-     * **§5 property 2, stated as a consequence rather than a mechanism.** Nothing loops back
-     * locally, so `send` alone leaves the sender with no record of what it sent. obscura-pix must
-     * write its own outgoing entry to `entries` — one write path in the kit, two in the app.
-     *
-     * This is the test that makes that explicit, because the alternative design (the kit writes the
-     * sender's copy too) is the tempting one and would quietly re-import audience knowledge into the
-     * kit: to store it, the kit would have to decide which model and which id, from the payload.
+     * Nothing loops back locally, so `send` alone leaves the sender with no record of what it sent;
+     * the app writes its own outgoing entry to `entries`. A kit-written copy would require the kit to
+     * pick a model and id from the payload.
      */
     @Test
     fun `send does not store anything locally — the app owns its own copy`() = runBlocking {
@@ -174,9 +166,8 @@ class EntrySendTests {
     }
 
     /**
-     * An empty recipient list is "my own devices only", not an error. A self-scoped model wants
-     * exactly this, and the kit is not guessing an audience — the caller named one, and it was
-     * empty. Failing loud is reserved for an audience the kit was asked to invent (SPEC §1.2).
+     * An empty recipient list is "my own devices only", not an error: the caller named an audience,
+     * and it was empty.
      */
     @Test
     fun `an empty recipient list is a self-sync, not a failure`() = runBlocking {

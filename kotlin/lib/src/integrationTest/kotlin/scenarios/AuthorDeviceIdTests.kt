@@ -55,8 +55,7 @@ class AuthorDeviceIdTests {
         // The DURABLY PERSISTED record carries the honest device id too — and THIS is the assertion
         // that matters, because the wake-up above is droppable while the row is the delivery path.
         //
-        // `senderDeviceId` on the row is the address of the Signal session that decrypted it —
-        // cryptographic attribution, SPEC §0.10 rule 4.
+        // `senderDeviceId` on the row is the address of the Signal session that decrypted it.
         val row = alice.inbox.peek(200).find {
             org.json.JSONObject(String(it.payload)).optString("content", "") == "attribute me correctly"
         }

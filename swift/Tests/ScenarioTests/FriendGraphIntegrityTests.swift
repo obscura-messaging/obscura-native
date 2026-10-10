@@ -1,8 +1,7 @@
 import XCTest
 @testable import ObscuraKit
 
-/// The friend graph is the only source of display names (SPEC §0.5, §0.10
-/// rule 5), including notification names. Genuine encrypted messages must not
+/// The friend graph is the only source of display names, including notification names. Genuine encrypted messages must not
 /// let an established friend rewrite its own record or a stranger create an
 /// accepted friendship through an unsolicited response.
 final class FriendGraphIntegrityTests: XCTestCase {

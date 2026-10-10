@@ -3,7 +3,7 @@ import XCTest
 
 /// `Envelope.sender_device_id` is stamped server-side from the sender's device-scoped JWT, and
 /// derives attribution from the address of the session that decrypted: a valid MAC proves possession
-/// of that session's chain key, which only the sender's device holds (`NATIVE_CONTRACT.md` §0.10 rule 4).
+/// of that session's chain key, which only the sender's device holds.
 ///
 /// This asserts the attribution is the sender's **real device UUID**, on the wake-up and in the
 /// durable inbox, and emphatically **not** the user id.

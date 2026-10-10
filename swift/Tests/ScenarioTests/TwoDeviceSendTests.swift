@@ -3,7 +3,7 @@ import XCTest
 
 /// Two-device Signal fan-out and session-addressing invariants.
 ///
-/// Both kits address Signal sessions by device UUID (`NATIVE_CONTRACT.md` §0.10).
+/// Both kits address Signal sessions by device UUID.
 /// These live-server tests exercise fan-out before and after a gateway
 /// reconnect; they do not reconstruct a client or prove cold-start persistence.
 final class TwoDeviceSendTests: XCTestCase {

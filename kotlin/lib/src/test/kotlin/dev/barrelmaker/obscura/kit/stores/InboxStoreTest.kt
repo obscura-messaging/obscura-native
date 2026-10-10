@@ -8,11 +8,8 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 /**
- * The durable inbox (`KIT_API.md` §3).
- *
- * These test the properties the design is *for*, not the SQL. Each one corresponds to a normative
- * rule, and most of them exist because getting the rule wrong loses messages permanently — the row
- * is the only copy once the kit has acked, because **an ACK is a DELETE**.
+ * The durable inbox. Once the kit has acked, the row is the only copy, so getting these rules wrong
+ * loses messages permanently.
  */
 class InboxStoreTest {
 
@@ -43,7 +40,7 @@ class InboxStoreTest {
         payload = payload,
     )
 
-    // ── §3.3 rule 8: idempotence ──────────────────────────────────────────────
+    // ── Idempotence ───────────────────────────────────────────────────────────
 
     /**
      * The rule the whole design leans on. Persist-then-ack **guarantees** redelivery: the ack is
@@ -108,7 +105,7 @@ class InboxStoreTest {
         Unit
     }
 
-    // ── §3.3 rule 3: peek is side-effect free ─────────────────────────────────
+    // ── Peek is side-effect free ──────────────────────────────────────────────
 
     /**
      * The crash-safety property, stated as a test because it reads like a bug otherwise: draining
@@ -157,7 +154,7 @@ class InboxStoreTest {
             "rowid reuse would make drain order go backwards; AUTOINCREMENT is what prevents it")
     }
 
-    // ── §3.3 rules 2, 4, 5: removal ───────────────────────────────────────────
+    // ── Removal ───────────────────────────────────────────────────────────────
 
     @Test
     fun `consume is idempotent and accepts a subset`() = runBlocking {
@@ -182,9 +179,8 @@ class InboxStoreTest {
 
     /**
      * A discard is data loss the app chose — the server's copy is already gone, so nothing else
-     * holds these bytes. §3.3 rule 5 requires it be logged as a security-relevant event, and this
-     * pins that the hook actually fires. It is the entire reason discard is a separate method from
-     * consume rather than a flag: the SQL is identical, the accountability is not.
+     * holds these bytes. It must be logged as a security-relevant event; this pins that the hook
+     * fires.
      */
     @Test
     fun `discard removes rows and reports them for the security log`() = runBlocking {
@@ -211,7 +207,7 @@ class InboxStoreTest {
         assertEquals(0, calls, "an empty discard is not a data-loss event and must not read as one")
     }
 
-    // ── §3.3 rule 7: depth ────────────────────────────────────────────────────
+    // ── Depth ─────────────────────────────────────────────────────────────────
 
     @Test
     fun `depth reflects what is waiting`() = runBlocking {
@@ -224,7 +220,7 @@ class InboxStoreTest {
         assertEquals(2L, inbox.depth())
     }
 
-    // ── §3.1: the record ──────────────────────────────────────────────────────
+    // ── The record ────────────────────────────────────────────────────────────
 
     @Test
     fun `every field survives a round trip, including opaque payload bytes`() = runBlocking {
@@ -242,7 +238,7 @@ class InboxStoreTest {
     }
 
     /**
-     * An unknown arm has no AppEntry to derive from, so those columns are null (§4.1). The row
+     * An unknown arm has no AppEntry to derive from, so those columns are null. The row
      * still exists, which is the point — the message is preserved rather than destroyed.
      */
     @Test
@@ -260,12 +256,11 @@ class InboxStoreTest {
         assertNull(row.sentAt)
     }
 
-    // ── §3.3 rule 2 carve-out ─────────────────────────────────────────────────
+    // ── Device-wipe carve-out ─────────────────────────────────────────────────
 
     /**
-     * A device wipe must be able to destroy decrypted plaintext. Note it takes
-     * no selector: destroying the whole store is what keeps this a security operation rather than
-     * "drop the oldest when things get tight", which is the policy §3.4 refuses to add.
+     * A device wipe must be able to destroy decrypted plaintext. It takes no selector so it cannot
+     * become an eviction policy.
      */
     @Test
     fun `wipe destroys everything`() = runBlocking {

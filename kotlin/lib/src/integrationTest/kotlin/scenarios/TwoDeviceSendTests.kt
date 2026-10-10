@@ -104,8 +104,7 @@ class TwoDeviceSendTests {
 
     /** Bob sends one message; BOTH of Alice's devices must receive and decrypt it. */
     private suspend fun sendAndBothMustDecrypt(text: String) {
-        // The app names the recipient by userId now (SPEC §0.4); the kit fans out to every device
-        // of that user, which is exactly what this test is about.
+        // The app names the recipient by userId; the kit fans out to every device of that user.
         bob!!.send(
             recipientUserIds = listOf(alice1!!.userId!!),
             modelKey = "directMessage",

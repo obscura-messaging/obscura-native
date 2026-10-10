@@ -26,7 +26,7 @@ File-backed clients restore Signal identity from the database on init. After `re
 // Register new user — creates account + device + Signal keys
 try await client.register(username, password)
 
-// Login; only .existingDevice authenticates (see docs/KIT_API.md §10)
+// Login; only .existingDevice authenticates (see docs/KIT_API.md)
 switch try await client.login(username, password) {
 case .existingDevice: try await client.connect()
 case .newDevice: try await client.loginAndProvision(username, password)  // .pendingApproval if another device can approve
@@ -78,7 +78,7 @@ Both are cancelled by `disconnect()` or `deinit`.
 
 ## Friends
 
-Friends are the social graph. The kit uses them to address devices and to resolve a sender's display name (`NATIVE_CONTRACT.md` §0.5) — it does **not** use them to decide an audience. The caller names recipients (§0.4).
+Friends are the social graph. The kit uses them to address devices and to resolve a sender's display name — it does **not** use them to decide an audience. The caller names recipients.
 
 ```swift
 // Send friend request (encrypted FRIEND_REQUEST)

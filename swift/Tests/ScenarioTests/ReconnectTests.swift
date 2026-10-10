@@ -80,7 +80,7 @@ final class ReconnectTests: XCTestCase {
     ///
     /// The assertion is against the INBOX, not against the wake-up. A `waitForMessage` proves an
     /// envelope arrived; only the durable row proves it survived, and after an ack the row is the
-    /// only copy there is (`NATIVE_CONTRACT.md` §0.9). Both ids are checked by name rather than
+    /// only copy there is. Both ids are checked by name rather than
     /// by counting, so "delivered twice" cannot pass as "both delivered".
     func testEntriesSurviveReconnect() async throws {
         let alice = try await ObscuraTestClient.register()

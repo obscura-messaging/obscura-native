@@ -3,22 +3,11 @@
 The **native iOS platform layer** for the Obscura app (`obscura-pix`). Not a general-purpose
 framework; one consumer, no API-stability obligation.
 
-The normative brief is
-[`NATIVE_CONTRACT.md`](../docs/NATIVE_CONTRACT.md), with the app-facing
-contract in [`KIT_API.md`](../docs/KIT_API.md). Merge,
-audience resolution, schemas, queries, expiry, and notification policy belong
-in `obscura-pix`; do not add those layers to this kit.
+The kit contract, including the boundary and current known gaps, is
+[`docs/KIT_API.md`](../docs/KIT_API.md).
 
-Current platform gaps include receiving `DEVICE_LINK_APPROVAL` and replay
-protection for device announcements. See `CLAUDE.md`. No Notification Service
-Extension exists; shared storage/session plumbing and the remaining transport,
-concurrency, migration, and device-verification work are documented in
+No Notification Service Extension exists; the remaining work is documented in
 [`docs/NSE_PREREQUISITES.md`](docs/NSE_PREREQUISITES.md).
-
-**Why a native kit exists at all:** libsignal ships only as `libsignal-swift` (no supported
-shared core), and background push processing cannot depend on a React Native
-runtime. Those constraints justify native code; everything else belongs in the
-app.
 
 ## What it does
 
@@ -26,12 +15,12 @@ Encryption, device fan-out, and a durable inbox. The app names the recipients, s
 bytes, and decides what those bytes mean.
 
 ```swift
-// Send: the CALLER names the audience (SPEC §0.4). The kit resolves none of its own.
+// Send: the caller names the audience. The kit resolves none of its own.
 try await client.send(
     to: [bobUserId], modelKey: "story", entryId: "story_123", payload: jsonBytes)
 
 // Receive: peek → decide → write → consume. An ack is a DELETE, so the row is the only copy
-// until the app takes it (KIT_API.md §3).
+// until the app takes it.
 for row in try await client.inbox.peek(limit: 100) {
     try await client.entries.put(model: row.modelKey!, entry: merged(row))
 }
@@ -66,7 +55,7 @@ else (messages, stories, profiles, settings) is application content the kit stor
 ```swift
 // Auth
 try await client.register(username, password)
-let scenario = try await client.login(username, password) // LoginScenario; see KIT_API.md §10
+let scenario = try await client.login(username, password) // LoginScenario; see docs/KIT_API.md
 try await client.connect()
 
 // Friends
@@ -113,7 +102,7 @@ each other, so broader behavioral interoperability is not claimed.
 
 - Register, login, friend handshake, encrypted messaging
 - Entries: send to a caller-named audience, receive into a durable inbox, store and read back
-- Persist-then-ack: a failed durable write skips the ack, so the server redelivers (SPEC §0.9)
+- Persist-then-ack: a failed durable write skips the ack, so the server redelivers
 - Dedupe while pending: `envelope_id UNIQUE` + `INSERT OR IGNORE`
 - Offline/reconnect: the server queues, and the inbox absorbs the duplicates that produces
 - Attachments: encrypt, upload, download, decrypt — the bytes path, kept

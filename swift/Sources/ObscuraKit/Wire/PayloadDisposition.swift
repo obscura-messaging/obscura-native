@@ -1,10 +1,7 @@
 import Foundation
 
-/// What a payload arm is allowed to do on receipt (`KIT_API.md` §4).
-///
-/// Every arm MUST be classified, because **the classification is what makes SPEC §0.9 checkable
-/// rather than aspirational**. "Never ack before persisting" is not a rule the code can follow until
-/// something says, per arm, *what persisting means for this one*.
+/// What a payload arm is allowed to do on receipt. Every arm is classified so persist-then-ack has
+/// a defined meaning for each one.
 enum PayloadDisposition: Equatable {
     /// Application content. Goes in the inbox; the app drains it. Ack only after the row commits.
     case inboxed
@@ -20,17 +17,9 @@ enum PayloadDisposition: Equatable {
     case unimplemented
 }
 
-/// The §4 classification table, as code.
-///
-/// An arm this kit has never heard of is **inboxed unparsed** (§4.1). Leaving it unacked would turn
-/// an unsupported sender into an unbounded retry:
-///
-/// > any authenticated user may send to any device → a never-acked message is never deleted and
-/// > redelivers forever → the server's queue caps at 1000 per device and evicts **oldest-first,
-/// > silently** → a stranger looping unknown arms pushes the recipient's real undelivered mail off
-/// > the back of the queue.
-///
-/// Refusing to ack is reserved for transient local failures that can succeed on a later attempt.
+/// An unknown arm is inboxed unparsed. Leaving it unacked would let any sender fill the server's
+/// per-device queue, which evicts oldest-first, and push real mail out. Refusing to ack is reserved
+/// for transient local failures.
 ///
 /// - Note: Swift's generated oneof has no `PAYLOAD_NOT_SET` case; an unset payload is `nil`, which
 ///   lands in the same `default` and is inboxed for the same reason.
@@ -50,8 +39,7 @@ func payloadDisposition(_ payload: Obscura_Client_V1_ClientMessage.OneOf_Payload
     case .deviceLinkApproval?:
         return .unimplemented
 
-    // Typing indicators. The contract makes them in-memory only, and §4 permits acking without
-    // persistence — the ONLY class for which that is allowed.
+    // Typing indicators are in-memory only: the one class acked without persistence.
     case .typingSignal?:
         return .droppable
 

@@ -1,48 +1,24 @@
 # ObscuraKit-Kotlin
 
-## Read this before changing anything
+Read [`docs/KIT_API.md`](../docs/KIT_API.md), the kit contract, first. It
+defines the boundary, persist-then-ack, envelope identity, the inbox, entry
+store and send. Do not restate its rules here.
 
-Read [`NATIVE_CONTRACT.md`](../docs/NATIVE_CONTRACT.md) and
-[`KIT_API.md`](../docs/KIT_API.md) first.
-
-This kit exposes an explicit-audience send path, a durable
-`peek`/`consume`/`discard`/`depth` inbox, and opaque `EntryStore` storage.
-Application merge, audience resolution, schemas, queries, expiry, and
-notification policy live in `obscura-pix`.
-
-The receive loop is persist-then-ack (`SPEC` §0.9): never acknowledge a decrypt
-failure, a deferred sender, or data that was not durably handled. Signal
-sessions are addressed by device UUID (`SPEC` §0.10);
 `FriendDeviceInfo.registrationId` is diagnostic metadata, not an address.
-
-The rule that governs this repo:
-
-> **If the kit reads it, it is a field in `client.proto`.
-> If it is not in `client.proto`, the kit MUST NOT read it.**
-
-**Do not add an ORM, CRDT layer, query builder, audience/routing engine, or
-schema parser.** If a task seems to require one, re-check the boundary in
-`NATIVE_CONTRACT.md` §0 and the application implementation in `obscura-pix`.
 
 ## Quick Context
 
-- **What:** the **native platform layer** for the Obscura app. Not a general-purpose framework;
-  it has exactly one consumer (`obscura-pix`) and no API-stability obligation to anyone else.
-- **Why it exists natively at all:** libsignal ships only as `libsignal-java` / `libsignal-swift`
-  (no shared core), and background push processing cannot depend on a React
-  Native runtime. Everything *else* belongs in the app.
 - **Server:** `obscura.barrelmaker.dev` (OpenAPI spec at `/openapi.yaml`)
 - **Transport:** `obscura-proto` (shared submodule at `../proto/`).
-- **Client contract:** repository-local `protocol/` + `docs/`.
-- **Sibling kit:** [`../swift`](../swift). It must agree with this one on the **wire**
-  (`../protocol/conformance/wire.json`) and nothing more.
-
-> **Not a reference:** `obscura-client-web` is a throwaway proof-of-concept, **not** a porting
-> target and **not** a normative implementation.
+- **Client contract:** `../protocol/` and `../docs/KIT_API.md`.
+- **Sibling kit:** [`../swift`](../swift). It must agree with this one on the
+  contract and the wire vectors, not on internal design.
 - **Build:** `JAVA_HOME=/path/to/jdk-21 ./gradlew :lib:test`
 - **Tests:** `src/test` runs without a network; `src/integrationTest` drives the
   public facade against a configured server. JUnit 5 ignores non-void `@Test`
   methods, so a body ending in `assertThrows(...)` needs a trailing `Unit`.
+
+`obscura-client-web` is a throwaway proof-of-concept, not a reference implementation.
 
 ## Runtime boundaries
 

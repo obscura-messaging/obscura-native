@@ -1,10 +1,10 @@
--- The durable inbox (KIT_API.md §3).
+-- The durable inbox.
 --
--- One row per successfully decrypted INBOXED message (§4). The kit stores bytes it cannot read:
+-- One row per successfully decrypted INBOXED message. The kit stores bytes it cannot read:
 -- every column is either kit-owned identity or a declared client.proto field, and `payload` is
 -- never parsed here.
 --
--- The rule that shapes all of this: AN ACK IS A DELETE (SPEC §0.9). Once the kit acks, the server
+-- AN ACK IS A DELETE. Once the kit acks, the server
 -- destroys its copy and this row is the ONLY one. So the row must commit before the ack, and it may
 -- only be removed by an explicit consume() or discard() from the app — never on reconnect, never on
 -- logout, never on a cap or a timer.
@@ -20,22 +20,18 @@
 --                       plain INTEGER PRIMARY KEY aliases rowid, and SQLite REUSES rowids after
 --                       deletion, so a drained-then-refilled inbox would hand out ids that go
 --                       backwards while `peek` orders by id.
---   envelope_id         The dedupe key (§3.3 rule 8). Persist-then-ack GUARANTEES redelivery: the
---                       ack is best-effort and its failure is swallowed, so the server's
---                       per-connection cursor re-sends on reconnect. Correct — losing the message
---                       would be worse — but it means the same envelope arrives more than once.
---                       UNIQUE + INSERT OR IGNORE absorbs pending redeliveries.
+--   envelope_id         The dedupe key. A failed ack means the envelope is redelivered on
+--                       reconnect; UNIQUE + INSERT OR IGNORE absorbs pending redeliveries.
 --   kind                The payload oneof arm, e.g. 'APP_ENTRY'. Present because the record must
 --                       describe all declared arms, not just AppEntry.
---   sender_user_id      Authenticated (SPEC §0.10).
+--   sender_user_id      Server-stamped `Envelope.sender_id`.
 --   sender_device_id    The address of the Signal session that decrypted this — cryptographic
---                       attribution rather than an assertion in a payload, which is exactly why it
---                       can serve as the REPLACE tie-break (§8.2).
+--                       attribution, so it can serve as the REPLACE tie-break.
 --   model_key           }
 --   entry_id            } AppEntry-derived, so NULL for every other kind — including an unknown
---   sent_at             } arm, which has no AppEntry to derive them from (§4.1). sent_at is
---                       } clamped per SPEC §2.4 before it gets here.
---   payload             Opaque bytes. The kit MUST NOT parse this (SPEC §0.4).
+--   sent_at             } arm, which has no AppEntry to derive them from. sent_at is
+--                       } clamped to now + 60s before it gets here.
+--   payload             Opaque bytes. The kit MUST NOT parse this.
 CREATE TABLE IF NOT EXISTS InboxRow (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     envelope_id TEXT NOT NULL UNIQUE,
@@ -68,25 +64,21 @@ existsByEnvelopeId:
 SELECT EXISTS(SELECT 1 FROM InboxRow WHERE envelope_id = ?);
 
 -- Rows in drain order. Side-effect free: peeking twice without consuming returns the same rows, and
--- that is the crash-safety property rather than a bug (§3.3 rule 3).
+-- that is the crash-safety property.
 peek:
 SELECT id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
 FROM InboxRow ORDER BY id ASC LIMIT ?;
 
--- consume() and discard() are the ONLY ways a row leaves this table (§3.3 rule 2). They are the same
--- statement because the difference between them is not in the SQL — it is that discard is data loss
--- the app chose out loud, and must be logged as such.
+-- consume() and discard() are the only app-driven ways a row leaves this table. They share this
+-- statement; discard additionally logs.
 deleteByIds:
 DELETE FROM InboxRow WHERE id IN ?;
 
--- Depth must be exposed (§3.3 rule 7): an inbox that grows without bound means the app has stopped
--- draining, and that has to be visible rather than silently absorbed. §3.5 spells out where it ends
--- if it is not — disk pressure, refused acks, and the SERVER evicting the oldest messages silently.
+-- Depth is exposed so an inbox the app has stopped draining is visible.
 depth:
 SELECT COUNT(*) FROM InboxRow;
 
--- The security carve-out in §3.3 rule 2: a device wipe MUST be able to destroy decrypted
--- plaintext. It destroys the whole table rather than selecting rows — that is what
--- keeps it a security operation and not an eviction policy in disguise.
+-- Device wipe only: destroys decrypted plaintext. It takes no selector so it cannot become an
+-- eviction policy.
 deleteAll:
 DELETE FROM InboxRow;

@@ -35,6 +35,3 @@ payload without requiring a canonical JSON encoding.
 - Each kit runs the shared cases against its own codec; those suites verify the
   semantic wire-to-app mappings.
 - A behavior change updates `wire.json` and both kit suites together.
-
-See [`../../docs/HISTORY.md`](../../docs/HISTORY.md) for removed vectors and
-migration chronology.

@@ -125,16 +125,10 @@ public class ObscuraClient {
     public let devices: DeviceStore
     public let gateway: GatewayConnection
 
-    /// The durable inbox (`KIT_API.md` §3), and the only place an inbound APP_ENTRY
-    /// lands.
+    /// The durable inbox, and the only place an inbound APP_ENTRY lands.
     public let inbox: InboxStore
 
-    /// Raw storage for application entries (`KIT_API.md` §8.1) — the other half of the
-    /// thin kit's app-facing surface. `inbox` is how messages arrive; this is where the app keeps
-    /// what it made of them.
-    ///
-    /// It stores and returns rows. It does not merge them, expire them, or decide who they go to —
-    /// the app owns all three (`NATIVE_CONTRACT.md` §0.4).
+    /// Opaque storage for the app's entries. It does not merge, expire, or route them.
     public let entries: EntryStore
 
     // Messenger is initialized after register/login with real keys
@@ -320,8 +314,8 @@ public class ObscuraClient {
     /// On init, restores Signal identity from DB if one exists.
     /// - Parameter keychainAccessGroup: shared keychain access group for the SQLCipher key. Pass
     ///   `nil` (default) for today's behaviour. Required if a Notification Service Extension must
-    ///   open this database — see `KIT_API.md` P2, and note the extension also needs
-    ///   `dataDirectory` to be an App Group container path, which is the caller's to supply.
+    ///   open this database; the extension also needs `dataDirectory` to be an App Group
+    ///   container path, which is the caller's to supply.
     public init(apiURL: String, dataDirectory: String, userId: String? = nil,
                 keychainAccessGroup: String? = nil, logger: ObscuraLogger = PrintLogger()) throws {
         let recordingLogger = RecordingLogger(delegate: logger)
@@ -1156,25 +1150,11 @@ public class ObscuraClient {
         return try AttachmentCrypto.decrypt(ciphertext, contentKey: contentKey, nonce: nonce)
     }
 
-    /// Send an application entry (`KIT_API.md` §5) — the outbox half of the thin kit,
-    /// paired with ``inbox`` on the receive side and ``entries`` for local storage.
+    /// Send an application entry to every device of the caller-named users plus this user's own
+    /// other devices. The sending device is excluded and gets no inbox row, so the app writes its
+    /// own outgoing entry to ``entries``.
     ///
-    /// **The caller names the recipients** (SPEC §0.4). The kit fans out to every device of every
-    /// listed userId, plus this user's own *other* devices, and makes **no delivery decision of its
-    /// own** — no audience resolution, no reading of `payload` to discover who it is for.
-    ///
-    /// Two properties §5 asks to be proven rather than assumed, both pinned by Kotlin's
-    /// `EntrySendTests` and mirrored here:
-    ///
-    /// 1. **The sending device is excluded from its own fan-out.** `getOwnDevices()` includes this
-    ///    device, and a message encrypted to yourself is at best waste and at worst a duplicate the
-    ///    app must dedupe.
-    /// 2. **The sender gets no inbox row.** Nothing loops back locally, so the app writes its own
-    ///    outgoing entry to ``entries`` — one write path in the kit, two in the app.
-    ///
-    /// An empty `recipientUserIds` is legitimate and not an error: it means "my own devices only",
-    /// which is what a self-scoped model wants. Failing loud is for an audience the kit was asked to
-    /// *guess*, and here it never guesses.
+    /// An empty `recipientUserIds` is valid and means "my own devices only".
     public func send(
         to recipientUserIds: [String],
         modelKey: String,
@@ -1211,8 +1191,8 @@ public class ObscuraClient {
             }
         }
 
-        // Own OTHER devices. Runs whether or not a recipient failed — see above. The `!=` is
-        // §5 property 1: without it this device encrypts to itself.
+        // Own OTHER devices. Runs whether or not a recipient failed — see above. Without the
+        // `!=` this device encrypts to itself.
         let ownDevices = await devices.getOwnDevices().filter { $0.deviceId != self.deviceId }
         if !ownDevices.isEmpty, let uid = userId {
             let messenger = try requireMessenger()
@@ -1276,8 +1256,7 @@ public class ObscuraClient {
 
     /// Who is currently typing in a context, by display name.
     ///
-    /// Auto-expires; a signal with no refresh disappears on its own, which is what makes signals
-    /// droppable (`KIT_API.md` §4) rather than something the inbox has to carry.
+    /// Auto-expires; a signal with no refresh disappears on its own.
     public nonisolated func observeTyping(contextId: String) -> TypingObservation {
         TypingObservation(tracker: TypingStateRegistry.shared.tracker, contextId: contextId)
     }
@@ -1416,7 +1395,7 @@ public class ObscuraClient {
     }
 
     /// Restore kit-owned session state from storage and connect. Application schemas are not part
-    /// of persisted kit state (SPEC §0.4).
+    /// of persisted kit state.
     public func restorePersistedSession() async throws {
         guard let storage = sessionStorage, let saved = storage.load(),
               let token = saved["token"] as? String, !token.isEmpty,
@@ -1493,9 +1472,8 @@ public class ObscuraClient {
         await friends.clearAll()
         await devices.clearAll()
         try? await entries.wipe()
-        // The §3.3 rule 2 carve-out, and the reason it is worded as a MUST: the inbox holds
-        // DECRYPTED plaintext — full payloads, the resolved sender name, the model key. A wipe that
-        // spared it would leave decrypted application content behind.
+        // The inbox holds decrypted plaintext; a wipe that spared it would leave application
+        // content behind.
         try? await inbox.wipe()
     }
 
@@ -1623,19 +1601,11 @@ public class ObscuraClient {
             }
             let clientMsg = try Obscura_Client_V1_ClientMessage(serializedData: Data(plaintext))
 
-            // Route by message type. SPEC §0.9 rule 3+4: decrypt → persist → (notify) → ack.
-            // routeMessage now throws, so if durable persistence fails the error propagates to the
-            // catch below and we SKIP the ack — the message stays on the server for retry rather
-            // than being deleted un-persisted. authorDeviceId is the decrypting session's device
-            // UUID (== senderDeviceId, proven by the MAC), never the userId.
-            // `Envelope.id` is the inbox's DEDUPE KEY, so it gets the same length check
-            // `sender_device_id` already gets above — and for the same reason: SPEC §0.10 treats
-            // everything the relay stamps as untrusted.
-            //
-            // Without it, `bytesToUuid` falls back to raw hex for non-16-byte input, so an EMPTY id
-            // (proto3's default) becomes "" for every envelope. They would all hash to one key: the
-            // first inserts and is acked, and every one after is suppressed by INSERT OR IGNORE,
-            // reported as a duplicate, and ACKED — the server deleting messages never stored.
+            // Decrypt → persist → (notify) → ack. If persistence throws, the catch below skips the
+            // ack and the message stays on the server. authorDeviceId is the decrypting session's
+            // device UUID, never the userId.
+            // `Envelope.id` is the inbox dedupe key. A short id would collapse to one key, so every
+            // such envelope would be treated as a duplicate and acked without being stored.
             guard raw.id.count == 16 else {
                 throw ObscuraError.provisionFailed(
                     "Envelope id is \(raw.id.count) bytes, expected 16; cannot use it as a dedupe key")
@@ -1678,7 +1648,7 @@ public class ObscuraClient {
                 logger.ackFailed(envelopeId: raw.id.map { String(format: "%02x", $0) }.joined(), error: "\(error)")
             }
         } catch {
-            // No ack — the message stays on the server (SPEC §0.9 rule 3). The rate-limit counter is
+            // No ack — the message stays on the server. The rate-limit counter is
             // NOT touched here; see the inner catch around `decrypt`.
             logger.decryptFailed(sourceUserId: sourceUserId, error: "\(error)")
         }
@@ -1686,10 +1656,10 @@ public class ObscuraClient {
 
     // MARK: - Internal: Message Routing
 
-    /// Persist a decrypted message, by class (`KIT_API.md` §4).
+    /// Persist a decrypted message, by payload class.
     ///
     /// Called from the envelope loop **before** the ack, and it throws on a failed durable write so
-    /// the ack is skipped and the message survives on the server (SPEC §0.9 rule 3).
+    /// the ack is skipped and the message survives on the server.
     ///
     /// `classify` decides what each arm may do; the switch routes only within
     /// that policy.
@@ -1710,7 +1680,7 @@ public class ObscuraClient {
         case .unimplemented:
             // Diagnose and acknowledge declared unsupported arms so they cannot wedge the queue.
             logger.log("RECV UNIMPLEMENTED arm=\(WireCodec.decodeMessageType(msg.payload)) "
-                + "from=\(sourceUserId.prefix(8)) (dropped and acked — see KIT_API.md §4.2)")
+                + "from=\(sourceUserId.prefix(8)) (dropped and acked)")
             return true
 
         case .kitInternal, .droppable:
@@ -1826,10 +1796,7 @@ public class ObscuraClient {
         let inserted = try await inbox.put(
             InboxInsert(
                 envelopeId: envelopeId,
-                // Must match Kotlin byte for byte — the app reads one `kind` column from two kits,
-                // and §4.1 has pix's drain BRANCH on it. WireCodec returns "" for an unset payload,
-                // which is a poor value for a NOT NULL column read across a bridge; both kits now
-                // share the UNKNOWN sentinel.
+                // Must match Kotlin byte for byte: the app branches on `kind` from both kits.
                 kind: WireCodec.decodeMessageType(msg.payload).isEmpty
                     ? "UNKNOWN" : WireCodec.decodeMessageType(msg.payload),
                 senderUserId: sourceUserId,
@@ -1853,35 +1820,20 @@ public class ObscuraClient {
         return inserted
     }
 
-    /// SPEC §2.4: a peer-supplied timestamp is clamped before it is stored, not after.
+    /// Clamps a peer-supplied timestamp before it is stored. Apply it at every site that puts a
+    /// wire `uint64` in the database:
     ///
-    /// Two distinct failures, one clamp. Apply it at **every** site that takes a `uint64` off the
-    /// wire and puts it in the database:
-    ///
-    /// 1. **It is a crash fix.** GRDB binds `UInt64` through the NON-FAILABLE `Int64(self)` (see
-    ///    `GRDB/Core/Support/StandardLibrary/StandardLibrary.swift`), so any value above
-    ///    `Int64.max` TRAPS. A Swift trap is not catchable, so `processEnvelope`'s do/catch cannot
-    ///    contain it: the process dies. Any authenticated user can deliver a message — friendship
-    ///    is not required — so this is a remote kill with no privileges. The same bug class was
-    ///    also applies to the ephemeral typing timestamp.
-    /// 2. **It is an ordering fix.** Without it a peer sets a timestamp far in the future and wins
-    ///    every LWW/REPLACE conflict forever — a tie-break can only order writes it can compare
-    ///    honestly. On `friends.devices_updated_at` this is permanent: the guard
-    ///    `WHERE devices_updated_at < ?` never passes again.
-    ///
-    /// Clamping toward now rather than rejecting keeps a peer whose clock is a few seconds fast
-    /// working normally.
+    /// - GRDB binds `UInt64` through a trapping `Int64(_:)`, so a value above `Int64.max` would
+    ///   crash the process.
+    /// - A far-future timestamp would win every REPLACE conflict, and permanently block the
+    ///   `WHERE devices_updated_at < ?` guard on `friends`.
     private func clampFutureTimestamp(_ sentAt: UInt64) -> UInt64 {
         min(sentAt, UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)
     }
 
-    /// A discard is data loss the app chose deliberately, and §3.3 rule 5 requires it be logged as a
-    /// security-relevant event rather than being the quiet path.
+    /// A discard is deliberate data loss, so it goes to the security log.
     ///
-    /// - Note: the hook is passed at construction rather than set afterwards. A detached
-    ///   `Task { await inbox.setOnDiscard … }` from the initializer leaves a window in which the
-    ///   store is reachable with no hook, and a `discard` in that window is data loss with no record
-    ///   — precisely the quiet path rule 5 forbids.
+    /// - Note: the hook is passed at construction so no `discard` can run before it is wired.
     private static func discardLogger(_ logger: ObscuraLogger) -> @Sendable ([Int64], String) -> Void {
         { ids, reason in
             logger.log("INBOX DISCARD \(ids.count) row(s) reason=\"\(reason)\" ids=\(ids)")

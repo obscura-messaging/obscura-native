@@ -11,7 +11,7 @@ import kotlinx.coroutines.withContext
  * One stored entry. `data` and `localMetadata` are opaque strings the kit never parses.
  *
  * `sentAt` and `authorDeviceId` are carried because the app's merge needs them — REPLACE is a total
- * order on `(sentAt, authorDeviceId)` (`KIT_API.md` §8.2). They are metadata in columns beside the
+ * order on `(sentAt, authorDeviceId)`. They are metadata in columns beside the
  * payload, not fields the kit reads out of it.
  *
  * `localMetadata` is app-owned local-only bookkeeping. It is persisted beside the entry and is
@@ -26,10 +26,7 @@ data class StoredEntry(
 )
 
 /**
- * Raw storage for application entries (`KIT_API.md` §8.1).
- *
- * The other half of the thin kit's app-facing surface: `InboxStore` is how messages arrive,
- * this is where the app keeps what it made of them. Together they are the whole data path.
+ * Raw storage for application entries.
  *
  * The API is `put` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before
  * writing. This store has no schema parser, query layer, merge engine, or expiry policy: the app
@@ -45,9 +42,7 @@ class EntryStore internal constructor(
     /**
      * Write an entry, replacing any existing one with the same `(model, id)`.
      *
-     * Blind by design — see the class doc. `data` is stored verbatim; the kit does not validate it
-     * as JSON, because validating a shape it may not read is a boundary violation dressed as
-     * defensiveness (SPEC §0.4).
+     * `data` is stored verbatim and not validated as JSON: the kit may not read its shape.
      */
     suspend fun put(model: String, entry: StoredEntry) = withContext(dispatcher) {
         db.modelEntryQueries.insertEntry(

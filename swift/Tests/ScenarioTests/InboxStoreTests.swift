@@ -2,7 +2,7 @@ import XCTest
 import GRDB
 @testable import ObscuraKit
 
-/// The durable inbox (`KIT_API.md` §3).
+/// The durable inbox.
 ///
 /// Mirrors `ObscuraKit-Kotlin`'s `InboxStoreTest` so both kits enforce the
 /// same durable-inbox contract.
@@ -34,13 +34,10 @@ final class InboxStoreTests: XCTestCase {
         )
     }
 
-    // MARK: - §3.3 rule 8: idempotence
+    // MARK: - Idempotence
 
-    /// The rule the whole design leans on. Persist-then-ack **guarantees** redelivery: the ack is
-    /// best-effort and its failure is swallowed, so the server's per-connection cursor re-sends on
-    /// the next connection. That is correct behaviour — losing the message would be worse.
-    /// `envelope_id UNIQUE` with `INSERT OR IGNORE` is the inbox
-    /// deduplication boundary (§3.3 rule 8).
+    /// A failed ack means the envelope is redelivered on the next connection. `envelope_id UNIQUE`
+    /// with `INSERT OR IGNORE` is the inbox deduplication boundary.
     func testRedeliveredEnvelopeDoesNotCreateASecondRow() async throws {
         let inbox = try makeInbox()
 
@@ -92,7 +89,7 @@ final class InboxStoreTests: XCTestCase {
         }
     }
 
-    // MARK: - §3.3 rule 3: peek is side-effect free
+    // MARK: - Peek is side-effect free
 
     /// The crash-safety property, stated as a test because it reads like a bug otherwise: draining
     /// twice without consuming returns the same rows. An app that dies between peek and consume
@@ -140,7 +137,7 @@ final class InboxStoreTests: XCTestCase {
                              "rowid reuse would make drain order go backwards; AUTOINCREMENT prevents it")
     }
 
-    // MARK: - §3.3 rules 2, 4, 5: removal
+    // MARK: - Removal
 
     func testConsumeIsIdempotentAndAcceptsASubset() async throws {
         let inbox = try makeInbox()
@@ -160,7 +157,7 @@ final class InboxStoreTests: XCTestCase {
     /// **The 500-id chunking, which the source calls out as load-bearing and nothing tested.**
     /// Each id binds one SQL variable and SQLite caps that at 999 on older builds, so an unchunked
     /// `consume` of a large `peek` throws "too many SQL variables" — precisely when a backlog exists,
-    /// which is the one situation in which the drain must not stall (§3.5). The app chooses the batch
+    /// which is the one situation in which the drain must not stall. The app chooses the batch
     /// size, so this is reachable by an app that simply drains efficiently.
     ///
     /// 1200 crosses the 999 cap and spans three chunks, so it also proves the loop does not stop
@@ -211,9 +208,8 @@ final class InboxStoreTests: XCTestCase {
     }
 
     /// A discard is data loss the app chose — the server's copy is already gone, so nothing else
-    /// holds these bytes. §3.3 rule 5 requires it be logged as a security-relevant event, and this
-    /// pins that the hook actually fires. It is the entire reason discard is a separate method from
-    /// consume rather than a flag: the SQL is identical, the accountability is not.
+    /// holds these bytes. It must be logged as a security-relevant event; this pins that the hook
+    /// fires.
     func testDiscardRemovesRowsAndReportsThemForTheSecurityLog() async throws {
         let box = DiscardBox()
         let inbox = try makeInbox { ids, reason in box.record(ids: ids, reason: reason) }
@@ -238,7 +234,7 @@ final class InboxStoreTests: XCTestCase {
                       "an empty discard is not a data-loss event and must not read as one")
     }
 
-    // MARK: - §3.3 rule 7: depth
+    // MARK: - Depth
 
     func testDepthReflectsWhatIsWaiting() async throws {
         let inbox = try makeInbox()
@@ -256,7 +252,7 @@ final class InboxStoreTests: XCTestCase {
         XCTAssertEqual(depth, 2)
     }
 
-    // MARK: - §3.1: the record
+    // MARK: - The record
 
     func testEveryFieldSurvivesARoundTripIncludingOpaquePayloadBytes() async throws {
         let inbox = try makeInbox()
@@ -275,7 +271,7 @@ final class InboxStoreTests: XCTestCase {
         XCTAssertEqual(row.payload, payload)
     }
 
-    /// An unknown arm has no AppEntry to derive from, so those columns are null (§4.1). The row
+    /// An unknown arm has no AppEntry to derive from, so those columns are null. The row
     /// still exists, which is the point — the message is preserved rather than destroyed.
     func testAnUnknownArmIsStoredWithNilAppEntryFields() async throws {
         let inbox = try makeInbox()
@@ -302,11 +298,10 @@ final class InboxStoreTests: XCTestCase {
         XCTAssertNil(row.sentAt)
     }
 
-    // MARK: - §3.3 rule 2 carve-out
+    // MARK: - Device-wipe carve-out
 
-    /// A device wipe must be able to destroy decrypted plaintext. Note it takes
-    /// no selector: destroying the whole store is what keeps this a security operation rather than
-    /// "drop the oldest when things get tight", which is the policy §3.4 refuses to add.
+    /// A device wipe must be able to destroy decrypted plaintext. It takes no selector so it cannot
+    /// become an eviction policy.
     func testWipeDestroysEverything() async throws {
         let inbox = try makeInbox()
         for i in 0..<3 { try await inbox.put(record("env_\(i)")) }

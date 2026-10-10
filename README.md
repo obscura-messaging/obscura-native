@@ -17,8 +17,8 @@ do not copy each other's architecture or promise broader feature parity.
 
 ## Contract boundary
 
-Read [`docs/NATIVE_CONTRACT.md`](docs/NATIVE_CONTRACT.md) and
-[`docs/KIT_API.md`](docs/KIT_API.md) before changing either platform.
+Read [`docs/KIT_API.md`](docs/KIT_API.md), the kit contract, before changing
+either platform.
 
 The native layers own authentication, transport, Signal sessions,
 friends/devices, durable inbox receipt, opaque entry storage, and
@@ -59,6 +59,3 @@ the platform guidance before running them.
 Change client schemas and vectors under `protocol/` and run both platform
 conformance suites in the same change. For transport changes, update
 `obscura-proto`, bump the root `proto/` pin, and regenerate both bindings.
-
-The original repositories and import mapping are recorded in
-[`docs/HISTORY_IMPORT.md`](docs/HISTORY_IMPORT.md).

@@ -133,7 +133,7 @@ final class DeviceLinkTests: XCTestCase {
         ))
 
         if case .valid = DeviceLink.validateLinkCode(code) {
-            // Expected: clamp toward now rather than reject, as SPEC §2.4 does elsewhere.
+            // Expected: treat as fresh rather than reject.
         } else {
             XCTFail("A future-dated code must validate, not trap and not be rejected")
         }

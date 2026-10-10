@@ -14,12 +14,8 @@
 
 **`InMemorySignalProtocolStore` is fine for tests but not production.** Sessions are lost on process exit. Use `PersistentSignalStore` (GRDB-backed) which implements all 6 libsignal protocol interfaces with SQLite persistence.
 
-**Signal sessions are keyed on the DEVICE UUID — never on `registrationId`.** `ProtocolAddress` is
-`(deviceUUID, 1)`; the inbound session comes from `Envelope.sender_device_id`; prekey bundles are
-selected by device UUID with **no** fallback to an arbitrary bundle. This is normative in
-`NATIVE_CONTRACT.md` §0.10.
-
-`registrationId` is Signal protocol metadata, not an address.
+**`ProtocolAddress` is `(deviceUUID, 1)`.** Session addressing rules are in
+[`docs/KIT_API.md`](../../docs/KIT_API.md).
 `TwoDeviceSendTests` covers live two-device fan-out across a gateway reconnect;
 it does not reconstruct a client or prove cold-start session persistence.
 

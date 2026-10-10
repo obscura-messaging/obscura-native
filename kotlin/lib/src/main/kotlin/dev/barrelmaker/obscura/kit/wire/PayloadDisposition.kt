@@ -3,11 +3,8 @@ package dev.barrelmaker.obscura.kit.wire
 import obscura.client.v1.Client.ClientMessage.PayloadCase
 
 /**
- * What a payload arm is allowed to do on receipt (`KIT_API.md` §4).
- *
- * Every arm MUST be classified, because **the classification is what makes SPEC §0.9 checkable
- * rather than aspirational**. "Never ack before persisting" is not a rule the code can follow until
- * something says, per arm, *what persisting means for this one*.
+ * What a payload arm is allowed to do on receipt. Every arm is classified so persist-then-ack has
+ * a defined meaning for each one.
  */
 internal enum class PayloadDisposition {
     /** Application content. Goes in the inbox; the app drains it. Ack only after the row commits. */
@@ -21,17 +18,9 @@ internal enum class PayloadDisposition {
 }
 
 /**
- * The §4 classification table, as code.
- *
- * An arm this kit has never heard of is **inboxed unparsed** (§4.1). Leaving it
- * unacked would turn an unsupported sender into an unbounded retry:
- *
- * > any authenticated user may send to any device → a never-acked message is never deleted and
- * > redelivers forever → the server's queue caps at 1000 per device and evicts **oldest-first,
- * > silently** → a stranger looping unknown arms pushes the recipient's real undelivered mail off
- * > the back of the queue.
- *
- * Refusing to ack is reserved for transient local failures that can succeed on a later attempt.
+ * An unknown arm is inboxed unparsed. Leaving it unacked would let any sender fill the server's
+ * per-device queue, which evicts oldest-first, and push real mail out. Refusing to ack is reserved
+ * for transient local failures.
  */
 internal fun payloadDisposition(arm: PayloadCase): PayloadDisposition = when (arm) {
     // The app's entire data path.
@@ -43,8 +32,7 @@ internal fun payloadDisposition(arm: PayloadCase): PayloadDisposition = when (ar
     PayloadCase.DEVICE_ANNOUNCE,
     PayloadCase.DEVICE_LINK_APPROVAL -> PayloadDisposition.KIT_INTERNAL
 
-    // Typing indicators. The contract makes them in-memory only, and §4 permits acking without
-    // persistence — the ONLY class for which that is allowed.
+    // Typing indicators are in-memory only: the one class acked without persistence.
     PayloadCase.TYPING_SIGNAL -> PayloadDisposition.DROPPABLE
 
     // Unknown or future arm, and PAYLOAD_NOT_SET. Inbox it unparsed rather than destroy it.
