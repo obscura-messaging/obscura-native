@@ -1,148 +1,133 @@
 # ObscuraKit (Swift)
 
-The **native iOS platform layer** for the Obscura app (`obscura-pix`). Not a general-purpose
-framework; one consumer, no API-stability obligation.
-
-The kit contract, including the boundary and current known gaps, is
-[`docs/KIT_API.md`](../docs/KIT_API.md).
-
-No Notification Service Extension exists; the remaining work is documented in
+Swift package for the `obscura-pix` iOS bridge. Behaviour is defined by
+[`docs/KIT_API.md`](../docs/KIT_API.md); this file covers only Swift specifics.
+No Notification Service Extension exists yet; see
 [`docs/NSE_PREREQUISITES.md`](docs/NSE_PREREQUISITES.md).
 
-## What it does
+## Build and test
 
-Encryption, device fan-out, and a durable inbox. The app names the recipients, supplies opaque
-bytes, and decides what those bytes mean.
-
-```swift
-// Send: the caller names the audience. The kit resolves none of its own.
-try await client.send(
-    to: [bobUserId], modelKey: "story", entryId: "story_123", payload: jsonBytes)
-
-// Receive: peek → decide → write → consume. An ack is a DELETE, so the row is the only copy
-// until the app takes it.
-for row in try await client.inbox.peek(limit: 100) {
-    try await client.entries.put(model: row.modelKey!, entry: merged(row))
-}
-try await client.inbox.consume(ids)
-```
-
-The developer never touches protobufs, Signal sessions, or WebSocket frames — and the kit never
-touches the meaning of a payload.
-
-## Architecture
-
-```
-YOUR APP
-  ↕
-ObscuraClient (facade)
-  ↕
-Layer 3: Inbox + entry store + Infrastructure (friends, devices)
-  ↕
-Layer 2: Signal Protocol (encrypt/decrypt, sessions, keys)
-  ↕
-Layer 1: Transport (WebSocket + REST, protobuf frames)
-  ↕
-Storage: GRDB/SQLite (SQLCipher encrypted at rest)
-```
-
-Friends and Devices are infrastructure — they are how the kit addresses devices and resolves a
-sender's display name. They are **not** how it picks an audience; the caller does that. Everything
-else (messages, stories, profiles, settings) is application content the kit stores as opaque bytes.
-
-## API
-
-```swift
-// Auth
-try await client.register(username, password)
-let scenario = try await client.login(username, password) // LoginScenario; see docs/KIT_API.md
-try await client.connect()
-
-// Friends
-try await client.befriend(userId)
-try await client.acceptFriend(userId)
-let friends = await client.getFriends()
-
-// Aggregate friend events are payload-free wake-ups; pull canonical rows after each one.
-for await event in client.observeEvents() {
-    if case .friendsChanged = event {
-        render(await client.getFriends())
-    }
-}
-let debugLines = client.getDebugLog() // debug output is pull-only, never a live event
-
-// Entries — send, receive, store. modelKey and payload are opaque to the kit.
-try await client.send(to: [userId], modelKey: "story", entryId: id, payload: bytes)
-let rows = try await client.inbox.peek(limit: 100)
-try await client.inbox.consume(rows.map(\.id))
-try await client.entries.put(model: "story", entry: entry)
-let all = try await client.entries.all(model: "story")
-
-// StoredEntry.localMetadata is an optional opaque local-only sidecar. It is persisted by
-// EntryStore but never serialized into AppEntry or sent to another device.
-
-// Ephemeral signals (typing indicators — not persisted, dropped rather than inboxed)
-await client.sendTyping(to: [userId], contextId: contextId, state: .started)
-for await who in client.observeTyping(contextId: contextId).values { ... }
-
-// Device linking (QR/code approval, enforced for new devices)
-let code = client.generateLinkCode()
-try await existingClient.validateAndApproveLink(code)
-```
-
-## What works
-
-The offline unit suite covers wire conformance; scenario tests exercise a
-server. Both jobs run on macOS because GRDB's bundled SQLCipher requires
-`CommonCrypto` (see `docs/PITFALLS.md`).
-
-The two kits prove the shared wire mappings with
-`../protocol/conformance/wire.json`. No test runs the two implementations directly against
-each other, so broader behavioral interoperability is not claimed.
-
-- Register, login, friend handshake, encrypted messaging
-- Entries: send to a caller-named audience, receive into a durable inbox, store and read back
-- Persist-then-ack: a failed durable write skips the ack, so the server redelivers
-- Dedupe while pending: `envelope_id UNIQUE` + `INSERT OR IGNORE`
-- Offline/reconnect: the server queues, and the inbox absorbs the duplicates that produces
-- Attachments: encrypt, upload, download, decrypt — the bytes path, kept
-- Device linking: QR/code generation, validation, approval flow
-- Ephemeral signals: caller-addressed typed STARTED/STOPPED indicators, in-memory only
-- Self-sync: own *other* devices get your content too, and the sending device does not
-- One current pre-release schema owned by `ObscuraSchema`
-- Cross-platform: the **wire format** interoperates with Android
-
-## What doesn't work yet
-
-- Group-targeted sync has no server test
-- Entry expiry is not implemented on either platform
-- A linked device learns the friend graph at link time only, not afterwards
-
-## Build & Test
+macOS only: GRDB's bundled SQLCipher needs `CommonCrypto`, so the package does
+not build on Linux. Needs Xcode 16+ (tools 6.0); targets macOS 13 and iOS 16.
 
 ```bash
-./dev.sh build
-./dev.sh test
-./dev.sh test --filter CoreFlowTests
+just swift-build                                 # bootstrap libsignal, then ./dev.sh build
+just swift-unit                                  # UnitTests target, offline
+just swift-integration http://localhost:3000     # ScenarioTests target, needs a server
+cd swift && ./dev.sh test --filter CoreFlowTests # one suite (after a first just run)
 ```
 
-Requires macOS 13+, Xcode 16+. `dev.sh` sets `LIBRARY_PATH` for the vendored libsignal Rust FFI.
+- `dev.sh` runs `xcrun swift` with `LIBRARY_PATH` pointing at the libsignal
+  FFI. It needs `vendored/libsignal`, which only
+  `scripts/bootstrap-libsignal.sh [host|ios-sim|ios-device]` creates (the
+  `just` recipes run it for `host`).
+- libsignal is pinned to v0.40.0. Newer releases require Kyber prekeys in every
+  `PreKeyBundle`, and the server has none. Changing the pin means updating
+  `LIBSIGNAL_REF` in the bootstrap script and `.github/workflows/swift.yml`.
+- Protobuf bindings in `Sources/ObscuraKit/Proto/` are generated and checked in;
+  regenerate with `scripts/gen-proto.sh`. Generated types are `internal`.
+- `ScenarioTests` default to `https://obscura.barrelmaker.dev`
+  (`OBSCURA_TEST_API` overrides) and fail, not skip, without a server. Server
+  setup: [`CONTRIBUTING.md`](../CONTRIBUTING.md#integration-tests).
+- The `Dockerfile` predates the macOS-only requirement and does not build the
+  package.
 
-## Dependencies
+## Facade
 
-- `signalapp/libsignal` v0.40.0 — Signal Protocol (vendored, Rust FFI)
-- `apple/swift-protobuf` — protobuf codegen
-- `groue/GRDB.swift` — SQLite persistence + ValueObservation (SQLCipher fork)
-- `CryptoKit` — SHA-256, HMAC (system)
-- `URLSessionWebSocketTask` — WebSocket (system)
+```swift
+let client = try ObscuraClient(apiURL: url)                       // in-memory
+let client = try ObscuraClient(apiURL: url, dataDirectory: dir,   // file-backed
+                               userId: userId, keychainAccessGroup: nil)
 
-## Docs
+try await client.send(to: userIds, modelKey: m, entryId: id, sentAt: t, payload: data)
+try await client.inbox.peek(limit: 50); try await client.inbox.consume(ids)
+try await client.inbox.discard(ids, reason: r); try await client.inbox.depth()
+try await client.entries.put(model: m, entry: StoredEntry(id:data:sentAt:authorDeviceId:localMetadata:))
+try await client.entries.all(model: m); try await client.entries.erase(model: m, id: id)
+try await client.uploadAttachment(data)   // (id, contentKey, nonce)
+try await client.downloadDecryptedAttachment(id: id, contentKey: k, nonce: n)
+await client.sendTyping(to: userIds, contextId: c, state: .started)
+for await names in client.observeTyping(contextId: c).values { }
+await client.processPendingMessages(timeout: 25)
+for await event in client.observeEvents() { }   // ObscuraEvent
+```
 
-- [docs/CLIENT_API.md](docs/CLIENT_API.md) — Auth, friends, devices, and device linking
-- [docs/MESSAGE_FLOW.md](docs/MESSAGE_FLOW.md) — Send/receive data flow diagrams
-- [docs/PITFALLS.md](docs/PITFALLS.md) — Gotchas that waste hours
+- The file-backed client stores everything in `dataDirectory/obscura.sqlite`
+  with file protection `completeUntilFirstUserAuthentication`. It is
+  SQLCipher-encrypted only when `userId` is passed; the key is created in the
+  Keychain (`keychainAccessGroup` shares it with an extension).
+- `ObscuraEvent`: `friendsChanged`, `connectionChanged`, `authChanged`,
+  `messageReceived(model:)`, `typingChanged`, `authFailed(reason:)`
+  (token refresh exhausted).
+- `befriend(_:username:)`, `acceptFriend(_:)`, `addFriendByCode(_:)` (strips
+  soft hyphens, accepts URL-safe Base64), `friendCode()` (Base64 of
+  `{"u", "n"}`).
+- Typing: sends throttled to one per 2 s per context and state; received state
+  expires after 5 s, and signals older than 5 s are ignored.
+- Kit methods sleep between server calls: `rateLimitDelay()` (100 ms,
+  `SERVER_REQUEST_DELAY_MS`) and `authRateLimitDelay()` (1000 ms,
+  `AUTH_REQUEST_DELAY_MS`), both in `Network/Constants.swift`.
+- Set `logger` (`ObscuraLogger`) to receive security events: decrypt and ack
+  failures, identity-key changes, token refresh failures, frame parse errors.
+  The default is `PrintLogger`.
 
-## Server
+## Auth and devices
 
-- **API:** https://obscura.barrelmaker.dev
-- **Server Repo:** https://github.com/obscura-messaging/obscura-server
+```swift
+switch try await client.login(username, password) {
+case .existingDevice: try await client.connect()
+case .newDevice: try await client.loginAndProvision(username, password, deviceName: name)
+case .deviceMismatch: try await client.wipeDevice(); try await client.loginAndProvision(username, password, deviceName: name)
+case .invalidCredentials: showError()
+}
+```
+
+- `AuthState`: `.loggedOut`, `.pendingApproval`, `.authenticated`. Swift cannot
+  yet leave `.pendingApproval` (see known gaps in `KIT_API.md`).
+- **Linking.** The new device shows `generateLinkCode()` (Base58 JSON
+  `{deviceId, challenge, timestamp}`, valid 5 minutes; a future timestamp counts
+  as fresh). The existing device calls `validateAndApproveLink(_:)`, which sends
+  `DEVICE_LINK_APPROVAL` then `DEVICE_ANNOUNCE`.
+- **Sessions.** Set `sessionStorage` (e.g. `UserDefaultsSessionStorage`) before
+  `register`/`login`; the kit saves on becoming authenticated and on connect.
+  A token refresh only calls `onSessionChanged`: call `persistSession()` there,
+  because refresh tokens are single-use and a stale stored one gets a 401.
+  `restorePersistedSession()` restores, refreshes and connects; it throws when
+  nothing usable is stored.
+- `logout()` disconnects and forgets credentials; local data and stored
+  session stay. `fullLogout()` also stops background tasks, clears typing
+  state and clears `sessionStorage`. `wipeDevice()` is `logout()` plus deleting
+  all local kit data.
+- `ensureConnected()` is safe on every foreground resume: it connects only when
+  authenticated and fully disconnected.
+
+## Code map (`Sources/ObscuraKit/`)
+
+| Path | Role |
+|---|---|
+| `ObscuraClient.swift` | Facade and envelope loop (decrypt, route, persist, ack). |
+| `Network/` | `APIClient`, `GatewayConnection`, pacing constants. |
+| `Messaging/Messenger.swift` | Signal encrypt/decrypt and session building. |
+| `Stores/` | GRDB-backed inbox, entries, friends, devices. |
+| `Storage/ObscuraSchema.swift` | The one schema migration. |
+| `Crypto/` | `PersistentSignalStore`, attachment AES-GCM, database key. |
+| `Devices/DeviceLink.swift` | Link codes. |
+| `Wire/` | `WireCodec`, payload disposition, typing. |
+
+## Pitfalls
+
+- **Schema.** `ObscuraSchema` is the pre-release baseline. Until the first
+  public release, change it in place and require clearing app data; after
+  release, add migrations and never edit an applied one.
+- **Reactive layer.** Store observation uses GRDB `ValueObservation`. Do not
+  add Combine, `@Published`, or a second mechanism.
+- **Tests use `ObscuraTestClient`,** a thin wrapper over `ObscuraClient`. Keep
+  them in step when a facade signature changes. Adversarial wire tests send
+  raw protobuf through `sendRaw`.
+- **Buffered wake-ups.** `waitForMessage()` (internal, tests only) reads a
+  1000-entry buffer filled by the envelope loop. Do not replace it with a fresh
+  `AsyncStream` subscription; messages processed before the subscription would
+  be missed.
+- **Disconnect clients** at the end of a test so the envelope loop stops.
+- **Compare secrets** with `constantTimeEqual`, never `Data ==`.
+- `ProtocolAddress` is always `(deviceUUID, 1)`.

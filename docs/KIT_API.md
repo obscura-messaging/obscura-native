@@ -20,11 +20,11 @@ general-purpose data layer.
 > **If the kit reads it, it is a field in `client.proto`. If it is not in
 > `client.proto`, the kit MUST NOT read it.**
 
-**The kit owns** transport (REST, gateway WebSocket, ack, offline send queue);
-the Signal protocol; device provisioning, linking and takeover; the friend graph
-(to address devices and label senders); the durable inbox and opaque entry store,
-which the push path writes with the app closed; attachment encryption and
-transfer; and the push-wake path.
+**The kit owns** transport (REST, gateway WebSocket, ack); the Signal protocol;
+device provisioning, linking and takeover; the friend graph (to address devices
+and label senders); the durable inbox, which the push path writes with the app
+closed; the opaque entry store; attachment encryption and transfer; and the
+push-wake path.
 
 **The app owns** model schemas and payload parsing, validation, audience
 resolution, merge, expiry, queries/filters/sorting, and notification policy and
@@ -81,9 +81,10 @@ stored as the friend's name once accepted.
 ## Future-timestamp clamp
 
 An incoming timestamp more than 60 s past local wall-clock is clamped to
-`now + 60s` before it is stored (`clampFutureTimestamp`, called from the inbox
-write), so it cannot win every REPLACE conflict. Implementation tests cover it,
-not vectors. Local writes may exceed the ceiling; receivers clamp them again.
+`now + 60s` before it is stored (`clampFutureTimestamp`, applied to inbox
+`sentAt` and `DEVICE_ANNOUNCE` timestamps), so it cannot win every REPLACE
+conflict. Implementation tests cover it, not vectors. Local writes may exceed
+the ceiling; receivers clamp them again.
 
 ## Wire encoding
 
@@ -198,9 +199,14 @@ send(recipientUserIds, modelKey, entryId, sentAt, payloadBytes)
 
 The only app payload send. The kit resolves each named user's devices, adds the
 sender's other devices, excludes the sending device, encrypts per device and
-uploads one envelope per device. It MUST NOT broaden or substitute recipients; a
-recipient without usable keys is skipped or reported. The caller validates size
-and schema. A successful return does not prove every device received it.
+uploads one envelope per device. It MUST NOT broaden or substitute recipients.
+The sender's own id and duplicates in `recipientUserIds` are ignored. The sender
+gets no inbox row; the app writes its own copy to the entry store. The caller
+validates size and schema.
+
+Each recipient is attempted independently. `send` throws only when every named
+recipient failed; a partial failure is logged, and a successful return does not
+prove every device received it.
 
 ## Attachments
 
@@ -239,10 +245,18 @@ Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
 
 ## Known gaps
 
-- Swift cannot receive `DEVICE_LINK_APPROVAL`.
+- Swift cannot receive `DEVICE_LINK_APPROVAL`, so a Swift device added to an
+  account that already has a device stays `pendingApproval` and never imports
+  the approver's device list or friends.
+- Kotlin skips the link challenge check when the approval's
+  `challenge_response` is empty or this process has generated no link code, so
+  a device on the account can approve without having seen the code.
+- Link codes are not cross-platform: Kotlin encodes Base64 JSON
+  `{d, c, t}`, Swift encodes Base58 JSON `{deviceId, challenge, timestamp}`.
 - No kit cross-checks `sender_id` against the device owner (risk: mislabelled,
   never forged, messages).
 - Linked devices do not learn friendships created after linking.
-- Device announcements have no replay protection.
+- A `DEVICE_ANNOUNCE` is ordered only by its sender-declared (clamped)
+  timestamp: last writer wins, with no other freshness check.
 - Partial-recipient send failures are invisible to the app.
 - Consumed inbox envelope ids have no durable tombstone.
