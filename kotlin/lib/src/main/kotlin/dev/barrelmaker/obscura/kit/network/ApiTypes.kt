@@ -87,8 +87,7 @@ enum class LoginScenario {
     EXISTING_DEVICE,     // Authenticated as the stored local device
     NEW_DEVICE,          // No local device; call loginAndProvision()
     DEVICE_MISMATCH,     // Server rejected the stored local device; wipeDevice() then loginAndProvision()
-    INVALID_CREDENTIALS,
-    USER_NOT_FOUND
+    INVALID_CREDENTIALS
 }
 
 data class ProvisionResponse(val token: String, val refreshToken: String?, val deviceId: String)

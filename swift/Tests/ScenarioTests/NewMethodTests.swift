@@ -97,6 +97,10 @@ final class NewMethodTests: XCTestCase {
         let fresh = try ObscuraClient(apiURL: TestServer.apiURL)
         let wrongPassword = try await fresh.login(alice.username, alice.password + "x")
         XCTAssertEqual(wrongPassword, .invalidCredentials)
+        await rateLimitDelay()
+
+        let unknownUser = try await fresh.login("test_none_\(Int.random(in: 100000...999999))", alice.password)
+        XCTAssertEqual(unknownUser, .invalidCredentials)
         XCTAssertEqual(fresh.authState, .loggedOut)
         XCTAssertNil(fresh.userId)
     }

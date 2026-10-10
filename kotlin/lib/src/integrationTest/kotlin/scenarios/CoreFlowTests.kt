@@ -62,6 +62,7 @@ class CoreFlowTests {
         val fresh = ObscuraClient(ObscuraConfig(API))
         assertEquals(LoginScenario.NEW_DEVICE, fresh.login(username, TEST_PASSWORD))
         assertEquals(LoginScenario.INVALID_CREDENTIALS, fresh.login(username, TEST_PASSWORD + "x"))
+        assertEquals(LoginScenario.INVALID_CREDENTIALS, fresh.login(uniqueName("login_none"), TEST_PASSWORD))
         assertEquals(AuthState.LOGGED_OUT, fresh.authState.value)
         assertNull(fresh.userId)
     }

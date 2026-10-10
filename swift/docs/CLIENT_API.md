@@ -31,7 +31,7 @@ switch try await client.login(username, password) {
 case .existingDevice: try await client.connect()
 case .newDevice: try await client.loginAndProvision(username, password)  // .pendingApproval if another device can approve
 case .deviceMismatch: try await client.wipeDevice(); try await client.loginAndProvision(username, password)
-case .invalidCredentials, .userNotFound: break  // show an error
+case .invalidCredentials: break  // show an error
 }
 
 // Lightweight account-only calls (no Signal keys, no device)
