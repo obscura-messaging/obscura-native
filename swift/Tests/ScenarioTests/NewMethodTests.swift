@@ -67,6 +67,38 @@ final class NewMethodTests: XCTestCase {
         XCTAssertNotNil(device2.deviceId)
         XCTAssertNotEqual(device2.deviceId, alice.deviceId, "Different device IDs")
         XCTAssertTrue(device2.client.hasSession)
+        XCTAssertEqual(device2.client.authState, .pendingApproval, "Alice's first device can approve it")
+    }
+
+    func testLoginAndProvisionAuthenticatesSoleDevice() async throws {
+        let username = "test_\(Int.random(in: 100000...999999))"
+        let password = "testpass123456"
+        _ = try await ObscuraClient.registerAccount(username, password, apiURL: TestServer.apiURL)
+        await authRateLimitDelay()
+
+        let device = try ObscuraClient(apiURL: TestServer.apiURL)
+        try await device.loginAndProvision(username, password, deviceName: "Only Device")
+        XCTAssertEqual(device.authState, .authenticated, "No other device exists to approve it")
+    }
+
+    // MARK: - login
+
+    func testLoginScenarios() async throws {
+        let alice = try await ObscuraTestClient.register()
+        let aliceUserId = alice.userId!
+        await rateLimitDelay()
+
+        let scenario = try await alice.client.login(alice.username, alice.password)
+        XCTAssertEqual(scenario, .existingDevice)
+        XCTAssertEqual(alice.client.authState, .authenticated)
+        XCTAssertEqual(alice.userId, aliceUserId)
+        await rateLimitDelay()
+
+        let fresh = try ObscuraClient(apiURL: TestServer.apiURL)
+        let wrongPassword = try await fresh.login(alice.username, alice.password + "x")
+        XCTAssertEqual(wrongPassword, .invalidCredentials)
+        XCTAssertEqual(fresh.authState, .loggedOut)
+        XCTAssertNil(fresh.userId)
     }
 
     // MARK: - AttachmentCrypto unit test

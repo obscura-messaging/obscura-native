@@ -7,7 +7,6 @@ import dev.barrelmaker.obscura.kit.crypto.toBase64
 import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
 import dev.barrelmaker.obscura.kit.network.GatewayConnection
 import dev.barrelmaker.obscura.kit.network.HttpException
-import dev.barrelmaker.obscura.kit.network.LoginResult
 import dev.barrelmaker.obscura.kit.network.LoginScenario
 import dev.barrelmaker.obscura.kit.network.ProvisionDeviceRequest
 import dev.barrelmaker.obscura.kit.stores.DeviceIdentityData
@@ -79,75 +78,49 @@ internal class AuthManager(
     }
 
     /**
-     * Login with scenario detection.
-     * Returns LoginResult so the app knows what to show:
-     * - EXISTING_DEVICE → authenticated, data preserved
-     * - NEW_DEVICE → need to call loginAndProvision()
-     * - DEVICE_MISMATCH → server rejected the local device; wipeDevice() + loginAndProvision()
-     * - INVALID_CREDENTIALS → wrong password
-     * - USER_NOT_FOUND → need to register()
+     * Only [LoginScenario.EXISTING_DEVICE] changes client state. Every other outcome leaves the
+     * client logged out so the app can choose between loginAndProvision(), register() and an error.
      */
-    suspend fun login(username: String, password: String): LoginResult {
+    suspend fun login(username: String, password: String): LoginScenario {
         val identity = devices.getIdentity()
 
-        // Try login with local deviceId if we have one
         if (identity?.deviceId != null) {
             try {
                 val result = api.loginWithDevice(username, password, identity.deviceId)
                 val token = result.token
+                // The server answers an unknown deviceId with a user-scoped token rather than an error.
+                val deviceId = result.deviceId ?: api.getDeviceId(token) ?: return LoginScenario.DEVICE_MISMATCH
                 api.token = token
                 session.refreshToken = result.refreshToken
                 session.userId = api.getUserId(token)
-                session.deviceId = result.deviceId ?: api.getDeviceId(token)
+                session.deviceId = deviceId
                 session.username = username
 
-                messenger.mapDevice(session.deviceId!!, session.userId!!)
+                messenger.mapDevice(deviceId, session.userId!!)
 
                 setAuthState(AuthState.AUTHENTICATED)
                 delay(config.authRateLimitDelayMs)
-
-                return LoginResult(
-                    scenario = LoginScenario.EXISTING_DEVICE,
-                    token = token,
-                    refreshToken = result.refreshToken,
-                    deviceId = session.deviceId,
-                    userId = session.userId
-                )
+                return LoginScenario.EXISTING_DEVICE
             } catch (e: HttpException) {
-                // Device login failed — check why
-                if (e.statusCode == 401 || e.statusCode == 403) {
-                    // Could be wrong password or a server-rejected local device.
-                    // Try login without deviceId to distinguish
-                } else if (e.statusCode == 404) {
-                    return LoginResult(scenario = LoginScenario.USER_NOT_FOUND)
-                } else {
-                    throw e
+                // The user-scoped login below classifies 401/403.
+                when (e.statusCode) {
+                    401, 403 -> Unit
+                    404 -> return LoginScenario.USER_NOT_FOUND
+                    else -> throw e
                 }
             }
         }
 
-        // No local device, or device login failed — try without deviceId
         try {
-            val result = api.loginWithDevice(username, password, null)
-            // Login succeeded but we either had no local device or it was rejected
-            val scenario = if (identity?.deviceId != null) {
-                LoginScenario.DEVICE_MISMATCH // had local device but server rejected it
-            } else {
-                LoginScenario.NEW_DEVICE // no local device
-            }
-
-            return LoginResult(
-                scenario = scenario,
-                token = result.token,
-                userId = api.getUserId(result.token)
-            )
+            api.loginWithDevice(username, password, null)
         } catch (e: HttpException) {
             return when (e.statusCode) {
-                404 -> LoginResult(scenario = LoginScenario.USER_NOT_FOUND)
-                401, 403 -> LoginResult(scenario = LoginScenario.INVALID_CREDENTIALS)
+                401, 403 -> LoginScenario.INVALID_CREDENTIALS
+                404 -> LoginScenario.USER_NOT_FOUND
                 else -> throw e
             }
         }
+        return if (identity?.deviceId != null) LoginScenario.DEVICE_MISMATCH else LoginScenario.NEW_DEVICE
     }
 
     suspend fun loginAndProvision(username: String, password: String, deviceName: String = "Device 2") {
@@ -184,15 +157,18 @@ internal class AuthManager(
             deviceId = requireNotNull(session.deviceId) { "deviceId not set - loginAndProvision failed to provision device" },
         ))
 
-        // Record the pending device locally; approval later reconciles the full account list.
+        // Approval later reconciles the full account list.
         devices.addOwnDevice(OwnDeviceData(
             deviceId = requireNotNull(session.deviceId),
             deviceName = deviceName,
         ))
 
-        // Device is provisioned on the server but NOT approved by an existing device yet.
-        // The app must call generateLinkCode(), display it, and wait for approval.
-        setAuthState(AuthState.PENDING_APPROVAL)
+        // Wait for DEVICE_LINK_APPROVAL only if another device exists to send it.
+        val serverDevices = api.listDevices()
+        val hasApprover = (0 until serverDevices.length()).any {
+            serverDevices.getJSONObject(it).getString("deviceId") != session.deviceId
+        }
+        setAuthState(if (hasApprover) AuthState.PENDING_APPROVAL else AuthState.AUTHENTICATED)
         delay(config.authRateLimitDelayMs)
     }
 

@@ -66,7 +66,7 @@ else (messages, stories, profiles, settings) is application content the kit stor
 ```swift
 // Auth
 try await client.register(username, password)
-let scenario = try await client.loginSmart(username, password) // .existingDevice, .newDevice, etc.
+let scenario = try await client.login(username, password) // LoginScenario; see KIT_API.md §10
 try await client.connect()
 
 // Friends

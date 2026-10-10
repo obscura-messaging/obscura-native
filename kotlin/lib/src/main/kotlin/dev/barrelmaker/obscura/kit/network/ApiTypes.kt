@@ -84,19 +84,11 @@ data class UploadDeviceKeysRequest(
 data class AuthResponse(val token: String, val refreshToken: String?, val deviceId: String?)
 
 enum class LoginScenario {
-    EXISTING_DEVICE,     // Local device matches server — continue with data
-    NEW_DEVICE,          // No local device — need to provision + link
-    DEVICE_MISMATCH,     // Local device rejected by server; re-provision
-    INVALID_CREDENTIALS, // Wrong password
-    USER_NOT_FOUND       // User doesn't exist — need to register
+    EXISTING_DEVICE,     // Authenticated as the stored local device
+    NEW_DEVICE,          // No local device; call loginAndProvision()
+    DEVICE_MISMATCH,     // Server rejected the stored local device; wipeDevice() then loginAndProvision()
+    INVALID_CREDENTIALS,
+    USER_NOT_FOUND
 }
-
-data class LoginResult(
-    val scenario: LoginScenario,
-    val token: String? = null,
-    val refreshToken: String? = null,
-    val deviceId: String? = null,
-    val userId: String? = null
-)
 
 data class ProvisionResponse(val token: String, val refreshToken: String?, val deviceId: String)

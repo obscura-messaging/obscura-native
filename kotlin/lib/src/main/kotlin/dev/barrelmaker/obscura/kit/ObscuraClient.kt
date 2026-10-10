@@ -13,7 +13,7 @@ import dev.barrelmaker.obscura.kit.messaging.Messenger
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.network.GatewayConnection
 import dev.barrelmaker.obscura.kit.network.GatewayState
-import dev.barrelmaker.obscura.kit.network.LoginResult
+import dev.barrelmaker.obscura.kit.network.LoginScenario
 import dev.barrelmaker.obscura.kit.network.UploadDeviceKeysRequest
 import dev.barrelmaker.obscura.kit.wire.TypingTracker
 import dev.barrelmaker.obscura.kit.wire.WireCodec
@@ -323,10 +323,8 @@ class ObscuraClient(
     suspend fun register(username: String, password: String) {
         authManager.register(username, password)
     }
-    suspend fun login(username: String, password: String): LoginResult {
-        val result = authManager.login(username, password)
-        return result
-    }
+    suspend fun login(username: String, password: String): LoginScenario =
+        authManager.login(username, password)
     suspend fun loginAndProvision(username: String, password: String, deviceName: String = "Device 2") =
         authManager.loginAndProvision(username, password, deviceName)
 

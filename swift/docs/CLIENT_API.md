@@ -26,11 +26,13 @@ File-backed clients restore Signal identity from the database on init. After `re
 // Register new user — creates account + device + Signal keys
 try await client.register(username, password)
 
-// Login existing user
-try await client.login(username, password)
-
-// Login with specific device (device-scoped token for messaging)
-try await client.login(username, password, deviceId: savedDeviceId)
+// Login; only .existingDevice authenticates (see docs/KIT_API.md §10)
+switch try await client.login(username, password) {
+case .existingDevice: try await client.connect()
+case .newDevice: try await client.loginAndProvision(username, password)  // .pendingApproval if another device can approve
+case .deviceMismatch: try await client.wipeDevice(); try await client.loginAndProvision(username, password)
+case .invalidCredentials, .userNotFound: break  // show an error
+}
 
 // Lightweight account-only calls (no Signal keys, no device)
 let (token, refreshToken, userId) = try await ObscuraClient.registerAccount(username, password)

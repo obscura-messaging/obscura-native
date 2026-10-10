@@ -375,6 +375,29 @@ it.
 
 ---
 
+## 10. Login
+
+Both kits expose `login(username, password)` returning one of five outcomes
+(Kotlin `LoginScenario.EXISTING_DEVICE`, Swift `.existingDevice`, and so on):
+
+| Outcome | Meaning | Client state after |
+|---|---|---|
+| `existingDevice` | The stored local device logged in | Authenticated, device-scoped session set |
+| `newDevice` | No stored local device | Unchanged (logged out) |
+| `deviceMismatch` | The server no longer recognises the stored device | Unchanged (logged out) |
+| `invalidCredentials` | The user-scoped login returned 401 or 403 | Unchanged (logged out) |
+| `userNotFound` | A login returned 404 | Unchanged (logged out) |
+
+Any other HTTP status is thrown. The current server answers an unknown username
+with 401, so it surfaces as `invalidCredentials`. After `newDevice` the app calls
+`loginAndProvision`; after `deviceMismatch` it calls `wipeDevice` first.
+`loginAndProvision` leaves the client in `pendingApproval` when the server lists
+another device on the account that can approve the link, and `authenticated`
+otherwise. `register` and `loginAndProvision` both store
+the new device as the local identity that `login` checks.
+
+---
+
 ## 11. Protocol status and live gaps
 
 These constraints affect compatibility work:

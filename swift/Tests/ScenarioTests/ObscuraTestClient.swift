@@ -51,25 +51,6 @@ public class ObscuraTestClient {
         return ObscuraTestClient(client: client, username: name, password: password)
     }
 
-    /// Login an existing user.
-    public static func login(
-        _ username: String,
-        _ password: String = {
-            #if DEBUG
-            return "testpass123456"
-            #else
-            fatalError("ObscuraTestClient must not be used in release builds")
-            #endif
-        }(),
-        deviceId: String? = nil,
-        apiURL: String = ProcessInfo.processInfo.environment["OBSCURA_TEST_API"] ?? "https://obscura.barrelmaker.dev"
-    ) async throws -> ObscuraTestClient {
-        let client = try ObscuraClient(apiURL: apiURL)
-        try await client.login(username, password, deviceId: deviceId)
-        await rateLimitDelay()
-        return ObscuraTestClient(client: client, username: username, password: password)
-    }
-
     /// Login and provision a new device (device linking).
     public static func loginAndProvision(
         _ username: String,

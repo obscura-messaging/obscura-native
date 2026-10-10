@@ -98,4 +98,17 @@ class DeviceLinkFlowTests {
 
         device1.disconnect(); device2.disconnect(); carol.disconnect()
     }
+
+    @Test @Order(4)
+    fun `loginAndProvision authenticates a sole device`() = runBlocking {
+        need()
+
+        val username = uniqueName("dlf_sole")
+        ObscuraClient(ObscuraConfig(API)).api.registerUser(username, TEST_PASSWORD)
+
+        val device = ObscuraClient(ObscuraConfig(API, deviceName = "Only Device"))
+        device.loginAndProvision(username, TEST_PASSWORD, "Only Device")
+        assertEquals(AuthState.AUTHENTICATED, device.authState.value,
+            "With no other device to approve it, the new device must be AUTHENTICATED")
+    }
 }
