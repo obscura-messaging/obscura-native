@@ -1,37 +1,22 @@
-# Shared conformance vectors
+# Wire conformance vectors
 
-`wire.json` is the executable cross-kit contract for payload-arm names,
-typed typing signals, and representative app payload bytes in `client.proto`.
-Both kit suites load the same file and must produce equivalent wire messages.
+`wire.json` is normative for the cases it covers. Both kits load it in their
+unit suites (`WireConformanceTest.kt`, `WireConformanceTests.swift`) and check
+their `WireCodec` against it.
 
-This directory contains only behavior that both kits must independently
-implement. Application-owned routing and merge are tested in `obscura-pix`, not
-duplicated as kit conformance engines.
-
-## Rules
-
-- `wire.json` is normative for the cases it covers.
-- Add a vector when changing cross-platform encoding.
-- Update both kit test suites in the same change.
-- Keep application model fixtures out of this directory.
-- Use strict JSON with no comments or trailing commas.
-
-The file has three arrays:
-
-| Array | Purpose |
+| Array | Checks |
 |---|---|
-| `messageTypes` | Proto payload-arm to app kind mappings. |
-| `typingStates` | `TypingSignal.state` mappings. |
-| `roundTrip` | Value-preserving `AppEntry` encode/decode cases. |
+| `messageTypes` | `ClientMessage.payload` arm ↔ app-facing kind |
+| `typingStates` | `TypingSignal.state` ↔ app-facing state |
+| `roundTrip` | `AppEntry` encode/decode preserves values (JSON compared by value, not bytes) |
 
-Round-trip assertions compare values rather than serialized bytes. Model data is
-JSON, where object key order is not meaningful, and Signal authenticates the
-payload without requiring a canonical JSON encoding.
+`validate.py` (`just protocol-vectors`) checks only well-formedness: strict
+JSON, required keys, no unregistered files, and that each file is referenced
+from `docs/KIT_API.md`. A new vector file must be registered in `validate.py`.
 
-## Enforcement
+Rules:
 
-- This repository runs `python3 conformance/validate.py` to validate JSON
-  structure, required fields, and non-empty mapping values.
-- Each kit runs the shared cases against its own codec; those suites verify the
-  semantic wire-to-app mappings.
-- A behavior change updates `wire.json` and both kit suites together.
+- Change a cross-platform encoding → add or update a vector and both kit suites
+  in the same change.
+- Keep application model fixtures out; app routing and merge are tested in
+  `obscura-pix`.

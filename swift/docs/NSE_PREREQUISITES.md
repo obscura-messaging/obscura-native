@@ -1,43 +1,38 @@
 # Notification Service Extension prerequisites
 
-**Status:** no NSE exists. The current server sends a content-free background
-APNs notification, which cannot launch an NSE. iOS must use an app background
-handler unless the server payload changes to an NSE-compatible notification.
-APNs/FCM token forwarding, push capabilities, and the background handler are
-also not implemented in `obscura-pix`.
+No NSE exists, and iOS push is not active. The server sends a content-free
+background notification (`content-available: 1`), which cannot launch an NSE.
+`obscura-pix` does not yet forward the APNs token or handle the background
+wake.
 
-## Dormant shared-storage plumbing
+## Already in place (unverified on device)
 
-- `SharedContainer` prefers the App Group container for the SQLCipher database.
-- The kit receives the App Group keychain access group for the database key.
-- `KeychainSession` stores the access token, refresh token, user ID, device ID,
-  and username in the shared group.
-- The app falls back to private storage when the App Group is unavailable and
-  logs that condition.
+- `obscura-pix` `SharedContainer` prefers the App Group container for the
+  SQLCipher database and falls back, with a log line, to private storage.
+- `ObscuraClient(apiURL:dataDirectory:userId:keychainAccessGroup:)` stores the
+  database key in a shared keychain group.
+- `obscura-pix` `KeychainSession` stores the access and refresh tokens, user
+  ID, device ID and username in that group.
 
-These paths compile but have not been exercised by an extension on a signed
-device.
-
-## Before enabling iOS push
+## To enable push with the app's background handler
 
 1. Enable Push Notifications and Background Modes → Remote notifications.
-2. Forward APNs/FCM tokens through `pushTokenReceived`.
-3. Handle the content-free wake in the app delegate, call
-   `processPendingMessages`, and post generic local copy when appropriate.
+2. Forward the APNs token through `pushTokenReceived` to `registerPushToken`.
+3. On the wake, call `processPendingMessages` and post generic local copy.
 
-## Additional NSE requirements
+## To add an NSE
 
-1. Replace the current background payload with a privacy-reviewed
-   NSE-compatible contract.
-2. Add an NSE target with the same App Group entitlement and provisioning.
+1. Replace the background payload with a privacy-reviewed NSE-compatible one
+   (server change).
+2. Add the NSE target with the same App Group entitlement and provisioning.
 3. Migrate existing private-container databases and keychain items, or require
    a wipe when shared storage first becomes available.
-4. Support concurrent database access, including WAL/pool semantics.
-5. Ensure only one process owns the gateway drain at a time.
-6. Restore the shared session, call `processPendingMessages`, set generic copy
-   on the incoming notification, and complete it through the NSE content
-   handler. Do not post a second local notification.
+4. Support concurrent database access from two processes (WAL, pooling).
+5. Ensure only one process drains the gateway at a time.
+6. In the NSE: restore the shared session, call `processPendingMessages`, set
+   generic copy on the incoming notification, and complete it through the
+   content handler. Do not post a second notification.
 
-Verify App Group provisioning, keychain access while locked, token refresh,
-database concurrency, and delivery on physical hardware before calling the NSE
-path supported.
+Before calling it supported, verify on physical hardware: App Group
+provisioning, keychain access while locked, token refresh, database
+concurrency and delivery.

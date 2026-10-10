@@ -1,67 +1,61 @@
 # Contributing
 
-## Workflow
-
-Never commit directly to `main`. Create a branch, open a pull request, and let
-the required CI jobs finish before merging.
-
-`obscura-native` owns the Native kit. Changes that affect the app-facing API
-land here first; `obscura-pix` then updates its gitlink to the merged Native
-commit in a separate pull request.
-
-Read [`docs/KIT_API.md`](docs/KIT_API.md) before changing cross-platform behavior.
-Kotlin and Swift share wire behavior, not implementation architecture.
+Never commit to `main`. Branch, open a pull request, and merge only after CI is
+green. App-facing API changes land here first; `obscura-pix` then bumps its
+gitlink to the merged commit in its own pull request.
 
 ## Prerequisites
 
-Install [`just`](https://github.com/casey/just), JDK 21, Python 3, and
-[`buf`](https://buf.build/docs/installation). Swift work additionally requires
-macOS, Xcode 16+, Rust stable, and `protoc`.
+| For | Install |
+|---|---|
+| Everything | [`just`](https://github.com/casey/just), Python 3, [`buf`](https://buf.build/docs/installation), JDK 21 (pinned in [`.java-version`](.java-version)) |
+| Swift | macOS, Xcode 16+, `rustup` (stable), `protoc` |
+| Regenerating Swift protobufs | `protoc-gen-swift` (`brew install swift-protobuf`) |
 
-On macOS:
-
-```bash
-brew install just buf protobuf
-```
-
-JDK 21 is pinned in [`.java-version`](.java-version). Gradle recipes reject
-other Java versions and automatically locate JDK 21 through `java_home` on
-macOS.
-
-## Setup
+Gradle recipes run through `scripts/run-with-java-21.sh`, which rejects any
+other Java version. On macOS it finds JDK 21 with `java_home` when `JAVA_HOME`
+is unset.
 
 ```bash
-git clone --recurse-submodules https://github.com/obscura-messaging/obscura-native.git
-cd obscura-native
-just setup
-just doctor
+just setup          # init submodules
+just doctor         # check Kotlin/protocol tools
+just doctor-swift   # check Swift tools (macOS)
 ```
 
-For Swift development:
-
-```bash
-just doctor-swift
-```
-
-The first Swift build or test fetches the pinned libsignal commit and builds
-its host FFI. Later runs reuse that output.
+The first Swift build fetches libsignal at the commit pinned in
+`swift/scripts/bootstrap-libsignal.sh` (tag v0.40.0) and builds its FFI into
+`swift/vendored/`. Later runs reuse it.
 
 ## Checks
 
 ```bash
-just protocol-check
-just kotlin-check
-just swift-unit       # macOS
-just check            # every fast gate on macOS
+just protocol-check   # buf lint + protocol/conformance/validate.py
+just kotlin-check     # protocol-check, unit tests, coverage floor, mavenLocal publish
+just swift-unit       # Swift UnitTests target (macOS)
+just check            # all of the above (macOS)
+just --list           # every recipe
 ```
 
-Integration suites require an explicit local server and fail before running if
-it is unavailable:
+CI runs these same recipes.
+
+## Integration tests
 
 ```bash
-just kotlin-integration http://localhost:3000
-just swift-integration http://localhost:3000
+just kotlin-integration http://localhost:3000   # :lib:integrationTest
+just swift-integration http://localhost:3000    # Swift ScenarioTests
 ```
 
-The CI workflows use these same recipes. Infrastructure setup remains in
-GitHub Actions because it is runner-specific.
+Both fail fast unless `<api>/openapi.yaml` answers. To run a server the way CI
+does, start [`obscura-server`](https://github.com/obscura-messaging/obscura-server)
+with `docker compose`, then:
+
+- **Raise the rate limits.** Set `OBSCURA_RATE_LIMIT_PER_SECOND=1000`,
+  `OBSCURA_RATE_LIMIT_BURST=2000`, `OBSCURA_RATE_LIMIT_AUTH_PER_SECOND=1000`
+  and `OBSCURA_RATE_LIMIT_AUTH_BURST=2000`. The defaults (10/s burst 20; auth
+  1/s burst 3) trip partway through the suites with HTTP 429.
+- **Create the bucket.** The server never creates its S3 bucket. In a fresh
+  MinIO, create `test-bucket` or every attachment test fails.
+- **Drop client pacing.** Set `AUTH_REQUEST_DELAY_MS=0` (both kits) and
+  `SERVER_REQUEST_DELAY_MS=0` (Swift). The defaults pace for production limits.
+
+See `.github/workflows/kotlin.yml` and `swift.yml` for the exact setup.

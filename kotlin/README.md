@@ -1,149 +1,134 @@
-# ObscuraKit-Kotlin
+# ObscuraKit (Kotlin)
 
-The **native Android/JVM platform layer** for the Obscura app (`obscura-pix`). It is not a
-general-purpose framework, it has exactly one consumer, and it owes API stability to no one.
+Kotlin/JVM kit for the `obscura-pix` Android bridge. Behaviour is defined by
+[`docs/KIT_API.md`](../docs/KIT_API.md); this file covers only Kotlin specifics.
 
-Read [`CLAUDE.md`](CLAUDE.md) before changing anything. The kit contract, including the
-boundary between kit and app, is [`docs/KIT_API.md`](../docs/KIT_API.md).
-
-*(`obscura-client-web` is a throwaway proof-of-concept. It is **not** a reference implementation and
-must not be treated as a porting target.)*
-
-## Quick Start
-
-```kotlin
-val client = ObscuraClient(ObscuraConfig(apiUrl = "https://obscura.barrelmaker.dev"))
-client.register("alice", "mypassword123!")
-client.connect()
-
-// Befriend someone (the code is base64 JSON, QR-friendly — see FriendCode.kt)
-client.addFriendByCode(theirCode)
-
-// SEND: the caller names the recipients. The kit fans out to every device of every
-// listed userId plus this user's own other devices, and resolves no audience of its
-// own. `payload` is opaque bytes the kit never parses.
-client.send(
-    recipientUserIds = listOf(friendUserId),
-    modelKey = "pix",
-    entryId = java.util.UUID.randomUUID().toString(),
-    payload = """{"caption":"hello"}""".toByteArray(),
-)
-
-// RECEIVE: a durable inbox, drained by the app. peek / consume / discard / depth,
-// and there is no insert — the kit is the only writer.
-for (row in client.inbox.peek(limit = 50)) {
-    // Sender identity comes from transport/session metadata, never from the payload.
-    // row.payload is the bytes we sent above.
-    handle(row)
-}
-client.inbox.consume(processedIds)
-
-// STORE: a blind key/value table for whatever the app made of them. No merge,
-// expiry, or query API — the app decides who wins.
-client.entries.put(
-    "pix",
-    StoredEntry(
-        id = entryId,
-        data = json,
-        sentAt = t,
-        authorDeviceId = d,
-        localMetadata = """{"uploadState":"complete"}""", // local-only; never sent
-    ),
-)
-client.entries.all("pix")
-
-// Aggregate friend changes are payload-free wake-ups. Pull canonical rows after each wake.
-client.friendsChanged.collect {
-    render(client.getFriends())
-}
-val debugLines = client.getDebugLog() // pull-only; never emitted as live events
-
-// Ephemeral typing indicators (not persisted, auto-expire after 3s)
-client.sendTyping(listOf(friendUserId), contextId, TypingState.STARTED)
-client.observeTyping(contextId)  // Flow<List<String>>
-```
-
-See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for auth and device linking, and
-[docs/FRIEND_CODE.md](docs/FRIEND_CODE.md) for the friend-code format.
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│  obscura-pix (merge, audience, all app semantics)    │
-├──────────────────────────────────────────────────────┤
-│  ObscuraClient facade                                │
-╞══════════════════════════════════════════════════════╡
-│  Durable boundary: inbox + entries + friends/devices │
-│                    payload bytes stay opaque          │
-╞══════════════════════════════════════════════════════╡
-│  Encrypted messaging: Signal + client.proto          │
-╞══════════════════════════════════════════════════════╡
-│  Transport: WebSocket + REST (blind relay server)    │
-╞══════════════════════════════════════════════════════╡
-│  SQLDelight (Signal keys, friends, inbox, entries)   │
-└──────────────────────────────────────────────────────┘
-```
-
-## What this kit does
-
-The unit suite runs without a network. The integration suite exercises the
-public facade against a configured `obscura-server`.
-
-- **Signal Protocol** — identity, prekeys, sessions, encrypt/decrypt, addressed by device UUID.
-- **Persist-then-ack receive loop** — the kit acks only what it has durably written.
-- **The durable inbox** — `peek` / `consume` / `discard` / `depth`.
-- **The entry store** — `put` / `all` / `erase` over opaque JSON.
-- **Friend graph** — request/accept, with device lists learned from DEVICE_ANNOUNCE.
-- **Login** — `login()` returns a `LoginScenario`; only `EXISTING_DEVICE` authenticates.
-- **Device provisioning and linking** — `loginAndProvision()` → `PENDING_APPROVAL` (when another device can approve) →
-  QR/link-code approval, which carries the own-device list and friends export.
-- **Transport** — REST + gateway WebSocket with auto-reconnect and token refresh; the offline queue
-  is the server's, not ours.
-- **Attachment crypto** — upload/download with an AES key shipped over Signal.
-- **Push-wake drain** — `processPendingMessages(timeoutMs)` returns a processed-envelope count.
-- **Ephemeral signals** — typing indicators, in memory only, throttled to 2s and expiring after 3s.
-
-What the kit must not do (merge, queries, expiry, audience resolution, notifications) is listed in
-[`docs/KIT_API.md`](../docs/KIT_API.md).
-
-## Build & Test
+## Build and test
 
 ```bash
-export JAVA_HOME=/path/to/jdk-21
-
-./gradlew :lib:test                              # fast, no network
-./gradlew :lib:integrationTest                   # server-dependent
-./gradlew :lib:koverHtmlReport                   # coverage report
+just kotlin-unit                                # ./gradlew :lib:test, no network
+just kotlin-integration http://localhost:3000   # ./gradlew :lib:integrationTest
+just kotlin-coverage                            # Kover report, lib/build/reports/kover/
+just kotlin-publish-local                       # publishToMavenLocal, as the app consumes it
 ```
 
-The integration suite targets `https://obscura.barrelmaker.dev` by default but honors
-`OBSCURA_TEST_API` — CI points it at a containerized `obscura-server` (rate limits disabled) so the
-suite runs on every PR without touching prod. Each integration test is gated on
-`assumeTrue(checkServer())`, so it skips-not-fails when no server is reachable. It also needs the
-server *correctly configured*: seed the MinIO `test-bucket` and raise the auth rate limit, or you
-get ~63 environmental failures (HTTP 429/500) that are not code failures.
+- Published as `dev.barrelmaker.obscura.kit:obscura-kit:0.1.0`.
+- Kotlin is pinned to the version React Native uses in `obscura-pix`
+  (`gradle/libs.versions.toml`). A newer compiler produces a library the app
+  cannot read; bump only with a pix RN upgrade.
+- `:lib:koverVerify` enforces a unit-suite floor (48% lines, 40% instructions).
+  Integration tests are excluded unless `-Pkover.includeIntegration=true`.
+- Integration tests default to `https://obscura.barrelmaker.dev`; set
+  `OBSCURA_TEST_API` to change it. Each test calls `assumeTrue(checkServer())`,
+  so with no server they skip rather than fail. Server setup:
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md#integration-tests).
 
-**A non-void `@Test` is silently ignored by JUnit 5.** If a test body ends in `assertThrows(...)`,
-add a trailing `Unit`.
+## Facade
 
-## Docs
+```kotlin
+val client = ObscuraClient(
+    ObscuraConfig(apiUrl = "https://obscura.barrelmaker.dev", databasePath = "obscura.db"),
+    externalDriver = null,             // or an encrypted AndroidSqliteDriver
+    sessionStorage = NoOpSessionStorage,
+)
 
-- [Authentication](docs/AUTHENTICATION.md) — register, login, device linking, session restore
-- [Friend codes](docs/FRIEND_CODE.md) — the QR/paste format
-- [`docs/knowledge/`](docs/knowledge) — hard-won lessons; read before touching the codebase
+client.send(recipientUserIds, modelKey, entryId, sentAt, payload)   // payload: ByteArray
+client.inbox.peek(50); client.inbox.consume(ids); client.inbox.discard(ids, reason); client.inbox.depth()
+client.entries.put(model, StoredEntry(id, data, sentAt, authorDeviceId, localMetadata))
+client.entries.all(model); client.entries.erase(model, id)
+client.uploadAttachment(bytes); client.downloadDecryptedAttachment(id, contentKey, nonce)
+client.sendTyping(recipientUserIds, contextId, TypingState.STARTED); client.observeTyping(contextId)
+client.processPendingMessages(timeoutMs)
+client.friendsChanged.collect { render(client.getFriends()) }
+```
 
-## Dependencies
+- `ObscuraConfig.apiUrl` must be HTTPS; plain HTTP is accepted only for
+  `localhost`, `127.0.0.1` and `[::1]`. `databasePath = null` is in-memory.
+- An app-supplied `SqlDriver` must create `ObscuraDatabase.Schema` itself; the
+  kit creates the schema only for its own JDBC driver.
+- `connectionState` and `authState` are `StateFlow`s.
+- `incomingMessages` is a wake-up `Channel` with one consumer (the app or a
+  test). A full channel drops wake-ups; the inbox still has the data.
+- Typing: sends are throttled to one per 2 s per context and state; received
+  state expires after 3 s.
 
-- `org.signal:libsignal-client` — Signal Protocol
-- `com.google.protobuf:protobuf-kotlin` — wire format
-- `app.cash.sqldelight:sqlite-driver` — persistence
-- `com.squareup.okhttp3:okhttp` — HTTP + WebSocket
-- `org.jetbrains.kotlinx:kotlinx-coroutines-core` — async
-- `org.jetbrains.kotlinx:kotlinx-serialization-json` — JSON in the crypto/backup helpers
-- `org.json:json` — JSON parsing
+## Auth and devices
 
-## Server
+```kotlin
+when (client.login(username, password)) {
+    LoginScenario.EXISTING_DEVICE -> client.connect()
+    LoginScenario.NEW_DEVICE -> client.loginAndProvision(username, password, deviceName)
+    LoginScenario.DEVICE_MISMATCH -> { client.wipeDevice(); client.loginAndProvision(username, password, deviceName) }
+    LoginScenario.INVALID_CREDENTIALS -> showError()
+}
+```
 
-- **API:** https://obscura.barrelmaker.dev
-- **Spec:** https://obscura.barrelmaker.dev/openapi.yaml
+- `register` creates the account, a Signal identity with 100 one-time prekeys,
+  and the device, and ends `AUTHENTICATED`.
+- **Linking.** The new device (`PENDING_APPROVAL`) connects and shows
+  `generateLinkCode()`. The existing device calls
+  `validateAndApproveLink(code)`, which sends `DEVICE_LINK_APPROVAL` (challenge
+  response, own-device list, friends export) and then announces devices. The
+  new device accepts an approval only from its own account while
+  `PENDING_APPROVAL`, compares the challenge in constant time (see the known
+  gaps in `KIT_API.md`), imports both lists, and becomes `AUTHENTICATED`.
+- **Link code:** Base64 JSON `{"d": deviceId, "c": base64(16-byte challenge),
+  "t": epochMillis}`. Valid for 5 minutes; rejected if more than 60 s in the
+  future.
+- **Sessions.** `connect()` refreshes tokens in the background and persists the
+  rotated refresh token through `SessionStorage`. `restorePersistedSession()`
+  restores, refreshes and connects. `restoreSession(token, refreshToken,
+  userId, deviceId, username)` restores without storage.
+- `logout()` disconnects, forgets credentials and clears `SessionStorage`;
+  local data stays. `fullLogout()` also stops all background jobs and typing
+  state. `wipeDevice()` logs out and deletes all local kit data.
+- `takeoverDevice()` replaces this device's identity and prekeys on the server
+  and drops its sessions with accepted friends' devices.
+- The gateway reconnects with backoff 1 s doubling to a 30 s cap. REST calls
+  retry HTTP 429/503 twice, honouring `Retry-After` up to 10 s.
+
+## Friend codes
+
+`friendCode()` returns standard Base64 of `{"u": userId, "n": username}`.
+`addFriendByCode(code)` strips whitespace and soft hyphens (`U+00AD`, added by
+iOS share sheets), accepts the URL-safe alphabet, rejects an empty `u` or `n`,
+then calls `befriend`. The code is not secret; identity is pinned by the Signal
+session on first contact.
+
+## Code map (`lib/src/main/kotlin/dev/barrelmaker/obscura/kit/`)
+
+| Path | Role |
+|---|---|
+| `ObscuraClient.kt` | Facade and receive loop (decrypt, route, persist, ack). |
+| `network/` | `APIClient` (REST), `GatewayConnection` (WebSocket). |
+| `messaging/Messenger.kt` | Signal encrypt/decrypt and session building. |
+| `managers/` | Auth, devices, friendships, sends, attachments. |
+| `stores/` | SQLDelight-backed inbox, entries, friends, devices. |
+| `wire/` | `WireCodec`, payload disposition, typing tracker. |
+| `crypto/` | Signal store, attachment AES-GCM, link codes, UUID codec. |
+
+## Pitfalls
+
+- **Messenger confinement.** `Messenger` and each store run on
+  `Dispatchers.Default.limitedParallelism(1)`. Keep HTTP off the `Messenger`
+  dispatcher: the receive path shares it, so a slow request stalls
+  decrypt, persist and ack for everyone.
+- **One send path.** Every send goes through `Messenger.queueMessage`, which
+  builds a session from the peer's prekey bundle on first contact.
+  `Messenger.addressFor` is the only `SignalProtocolAddress` constructor; send
+  and receive must build identical addresses or the session splits.
+- **JUnit 5 ignores a non-void `@Test`.** A body ending in `assertThrows(...)`
+  needs a trailing `Unit`.
+- **`runBlocking`, not `runTest`, for real I/O.** `runTest` uses virtual time,
+  so `withTimeout` expires before OkHttp's callbacks fire.
+- **Fan-out in tests.** `befriend`, `send` and friends go to every device of
+  the target. With several devices connected, drain every device's
+  `incomingMessages`, or a stale `FRIEND_REQUEST` answers the next
+  `waitForMessage()`.
+- **Facade-only tests.** Integration tests drive `ObscuraClient`. Raw protobuf
+  is allowed only in `AckSemanticsTests` and `FriendGraphIntegrityTests`
+  (adversarial input). Check with
+  `rg -n "obscura\.v1\.|obscura\.client\.v1\.|ClientMessage\.newBuilder" lib/src/integrationTest`.
+- **Generated names.** The SQLDelight column `data` is `data_` in Kotlin.
+  `okio.ByteString` (WebSocket frames) and `com.google.protobuf.ByteString` are
+  different types.
