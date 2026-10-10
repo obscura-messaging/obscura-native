@@ -10,16 +10,21 @@ client.connect()
 
 `register()` creates the user account on the server, generates a Signal Protocol identity (keypair + 100 one-time prekeys), provisions the device, and authenticates. After this call, `authState` is `AUTHENTICATED` and you can start sending entries, draining the inbox, and befriending other users.
 
-`login()` restores an existing session on the same device:
+`login()` returns a `LoginScenario`. Only `EXISTING_DEVICE` authenticates; the
+other outcomes leave the client logged out (see `docs/KIT_API.md` §10):
 
 ```kotlin
-client.login("alice", "mypassword123!")
-client.connect()
+when (client.login("alice", "mypassword123!")) {
+    LoginScenario.EXISTING_DEVICE -> client.connect()
+    LoginScenario.NEW_DEVICE -> client.loginAndProvision("alice", "mypassword123!", "Alice's Phone")
+    LoginScenario.DEVICE_MISMATCH -> { client.wipeDevice(); client.loginAndProvision("alice", "mypassword123!", "Alice's Phone") }
+    LoginScenario.INVALID_CREDENTIALS, LoginScenario.USER_NOT_FOUND -> showError()
+}
 ```
 
 ## Adding a New Device
 
-Every new device **must be approved** by an existing device. There is no way to bypass this — `loginAndProvision()` puts the new device in `PENDING_APPROVAL` state until approval arrives.
+When the account already has a device, a new device **must be approved** by it: `loginAndProvision()` puts the new device in `PENDING_APPROVAL` until approval arrives. If no other device exists, nothing could approve it, so it becomes `AUTHENTICATED` directly.
 
 ### New device side
 
@@ -122,7 +127,7 @@ Signal keys, friend lists, inbox rows and stored entries persist in the database
 ## What You Can Rely On
 
 - **Password is the only required credential.** 12+ characters, that's it.
-- **Device linking is enforced.** `loginAndProvision()` → `PENDING_APPROVAL` → approval required. No shortcut.
+- **Device linking is enforced.** While another device exists, `loginAndProvision()` → `PENDING_APPROVAL` → approval required.
 - **Link codes expire.** 5 minutes by default. Each code has a unique random challenge.
 - **Challenge verification is constant-time.** No timing side-channel.
 - **Token refresh is automatic.** The library handles JWT expiry transparently.

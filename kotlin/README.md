@@ -116,7 +116,8 @@ public facade against a configured `obscura-server`.
   `envelope_id` while a row remains pending.
 - **The entry store** (§8.1) — `put` / `all` / `erase` over opaque JSON. Three methods, no fourth.
 - **Friend graph** — request/accept, with device lists learned from DEVICE_ANNOUNCE.
-- **Device provisioning and linking** — `loginAndProvision()` → `PENDING_APPROVAL` →
+- **Login** — `login()` returns a `LoginScenario`; only `EXISTING_DEVICE` authenticates (`KIT_API.md` §10).
+- **Device provisioning and linking** — `loginAndProvision()` → `PENDING_APPROVAL` (when another device can approve) →
   QR/link-code approval, which carries the own-device list and friends export.
 - **Transport** — REST + gateway WebSocket with auto-reconnect and token refresh; the offline queue
   is the server's, not ours.

@@ -4,6 +4,7 @@ import dev.barrelmaker.obscura.kit.AuthState
 import dev.barrelmaker.obscura.kit.ConnectionState
 import dev.barrelmaker.obscura.kit.ObscuraClient
 import dev.barrelmaker.obscura.kit.ObscuraConfig
+import dev.barrelmaker.obscura.kit.network.LoginScenario
 import dev.barrelmaker.obscura.kit.stores.FriendStatus
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -43,12 +44,26 @@ class CoreFlowTests {
 
         assertEquals(AuthState.AUTHENTICATED, client.authState.value)
 
-        client.login(username, TEST_PASSWORD)
+        assertEquals(LoginScenario.EXISTING_DEVICE, client.login(username, TEST_PASSWORD))
 
         assertEquals(AuthState.AUTHENTICATED, client.authState.value,
             "authState should remain AUTHENTICATED after login")
         assertEquals(originalUserId, client.userId,
             "userId should be the same after login")
+    }
+
+    @Test
+    fun `Login outcomes without a local device leave the client logged out`() = runBlocking {
+        assumeTrue(checkServer())
+
+        val username = uniqueName("login_out")
+        ObscuraClient(ObscuraConfig(API)).register(username, TEST_PASSWORD)
+
+        val fresh = ObscuraClient(ObscuraConfig(API))
+        assertEquals(LoginScenario.NEW_DEVICE, fresh.login(username, TEST_PASSWORD))
+        assertEquals(LoginScenario.INVALID_CREDENTIALS, fresh.login(username, TEST_PASSWORD + "x"))
+        assertEquals(AuthState.LOGGED_OUT, fresh.authState.value)
+        assertNull(fresh.userId)
     }
 
     @Test

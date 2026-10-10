@@ -5,24 +5,19 @@ import XCTest
 /// Multi-device account and fan-out coverage.
 final class MultiDeviceLinkingTests: XCTestCase {
 
-    // MARK: - 5.1: Second device registers same user
+    // MARK: - 5.1: Second device logs in to the same user
 
-    func testScenario5_1_SecondDeviceRegistration() async throws {
-        // Register Bob's first device
+    func testScenario5_1_SecondDeviceLogin() async throws {
         let bob1 = try await ObscuraTestClient.register()
         await rateLimitDelay()
 
-        // Bob's second device: login with same credentials, no deviceId (gets new device)
-        let bob2Username = bob1.username
-        let bob2 = try await ObscuraTestClient.login(bob2Username)
+        let bob2 = try ObscuraClient(apiURL: TestServer.apiURL)
+        let scenario = try await bob2.login(bob1.username, bob1.password)
         await rateLimitDelay()
 
-        // Both should have same userId
-        XCTAssertEqual(bob1.userId, bob2.userId, "Same user, same userId")
-
-        // But the second login doesn't auto-provision a device — needs explicit provisioning
-        // The deviceId might be nil for user-scoped token
-        XCTAssertNotNil(bob1.deviceId, "First device should have deviceId")
+        XCTAssertEqual(scenario, .newDevice, "A client with no local device must provision")
+        XCTAssertEqual(bob2.authState, .loggedOut)
+        XCTAssertNil(bob2.userId)
     }
 
     // MARK: - 5.4: Fan-out — message from Alice reaches both Bob devices

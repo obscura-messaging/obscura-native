@@ -16,14 +16,13 @@ public enum AuthState: String, Sendable {
     case loggedOut, authenticated, pendingApproval
 }
 
-/// Result of a login attempt — tells the app what to do next.
+/// Outcome of `ObscuraClient.login`.
 public enum LoginScenario: Sendable {
-    case existingDevice       // Known device, session restored. Call connect().
-    case newDevice            // New device, needs link approval from existing device.
-    case onlyDevice           // Lost local data but no other devices exist. Re-provision directly, no linking.
-    case deviceMismatch       // DB exists but stored device doesn't match server. Re-provision needed.
-    case invalidCredentials   // Wrong password.
-    case userNotFound         // Username doesn't exist.
+    case existingDevice       // Authenticated as the stored local device. Call connect().
+    case newDevice            // No local device. Call loginAndProvision().
+    case deviceMismatch       // Server rejected the stored local device. Call wipeDevice(), then loginAndProvision().
+    case invalidCredentials
+    case userNotFound
 }
 
 public struct MessageWakeEvent: Sendable {
@@ -538,9 +537,7 @@ public class ObscuraClient {
         let deviceToken = deviceResult.token
 
         self.token = deviceToken
-        // Use the DEVICE provision's refresh token, not the user-scoped one from
-        // registerUser above — refreshing a user-scoped token drops device scope
-        // and 403s the gateway. (Matches Kotlin `session.refreshToken = provResult.refreshToken`.)
+        // Refreshing the user-scoped token from registerUser would drop device scope and 403 the gateway.
         self.refreshToken = deviceResult.refreshToken
         self.deviceId = APIClient.extractDeviceId(deviceToken)
         await api.setToken(deviceToken)
@@ -551,15 +548,16 @@ public class ObscuraClient {
         // 5. Messenger
         self._messenger = Messenger(api: api, store: store)
 
-        // Link approval and DeviceAnnounce require a complete own-device registry.
-        await recordOwnDevice(deviceName: "ObscuraKit-device")
+        await recordProvisionedDevice(deviceName: "ObscuraKit-device")
 
         self._authState = .authenticated
     }
 
-    /// Record this device in the own-device registry. Insertion is idempotent.
-    private func recordOwnDevice(deviceName: String) async {
+    /// Store this device as the local identity `login` checks, and add it to the own-device
+    /// registry that link approval and DeviceAnnounce read. Both writes are idempotent.
+    private func recordProvisionedDevice(deviceName: String) async {
         guard let did = self.deviceId else { return }
+        await devices.storeIdentity(DeviceIdentity(deviceId: did))
         await devices.addOwnDevice(OwnDevice(deviceId: did, deviceName: deviceName))
     }
 
@@ -588,8 +586,7 @@ public class ObscuraClient {
         )
 
         self.token = deviceResult.token
-        // Device-scoped refresh token (was left as the user-scoped one from the
-        // preceding registerAccount/loginAccount) — see register() for why.
+        // Replace the user-scoped refresh token; see register().
         self.refreshToken = deviceResult.refreshToken
         self.deviceId = APIClient.extractDeviceId(deviceResult.token)
         await api.setToken(deviceResult.token)
@@ -597,103 +594,56 @@ public class ObscuraClient {
         let store = try initializeSignalStore(identity: identity, regId: regId, spkPrivate: spkPrivate, spkSig: spkSig, preKeyRecords: preKeyRecords)
         self._messenger = Messenger(api: api, store: store)
 
-        // Keep the own-device registry complete for linking and announcements.
-        await recordOwnDevice(deviceName: deviceName)
+        await recordProvisionedDevice(deviceName: deviceName)
 
         self._authState = .authenticated
     }
 
     // MARK: - Login
 
-    public func login(_ username: String, _ password: String, deviceId: String? = nil) async throws {
-        let result = try await api.loginWithDevice(username, password, deviceId: deviceId)
-        let token = result.token
+    /// Only `.existingDevice` changes client state. Every other outcome leaves the client
+    /// logged out so the app can choose between loginAndProvision(), register() and an error.
+    public func login(_ username: String, _ password: String) async throws -> LoginScenario {
+        let storedDeviceId = await devices.getIdentity()?.deviceId ?? ""
 
-        self.token = token
-        self.refreshToken = result.refreshToken
-        self.userId = APIClient.extractUserId(token)
-        self.username = username
-        self.deviceId = APIClient.extractDeviceId(token) ?? deviceId
-        await api.setToken(token)
-        self._authState = .authenticated
-    }
-
-    /// Smart login — returns a scenario telling the app what to do next.
-    /// File-backed clients: checks for existing DB + stored device identity.
-    ///
-    /// ```swift
-    /// let scenario = try await client.loginSmart(username, password)
-    /// switch scenario {
-    /// case .existingDevice: try await client.connect()
-    /// case .newDevice:      // show link code screen
-    /// case .invalidCredentials: // show error
-    /// }
-    /// ```
-    public func loginSmart(_ username: String, _ password: String) async throws -> LoginScenario {
-        let storedIdentity = await devices.getIdentity()
-
-        // Device-first (Android parity): a local device logs in with one
-        // device-scoped session. A competing user-scoped session can make token
-        // refresh drift to the wrong scope and produce a gateway 403.
-        if let identity = storedIdentity, !identity.deviceId.isEmpty {
+        if !storedDeviceId.isEmpty {
             do {
-                let deviceResult = try await api.loginWithDevice(username, password, deviceId: identity.deviceId)
-                self.token = deviceResult.token
-                self.refreshToken = deviceResult.refreshToken
-                self.userId = APIClient.extractUserId(deviceResult.token)
-                self.deviceId = identity.deviceId
+                let result = try await api.loginWithDevice(username, password, deviceId: storedDeviceId)
+                // The server answers an unknown deviceId with a user-scoped token rather than an error.
+                guard APIClient.extractDeviceId(result.token) != nil else { return .deviceMismatch }
+                self.token = result.token
+                self.refreshToken = result.refreshToken
+                self.userId = APIClient.extractUserId(result.token)
+                self.deviceId = storedDeviceId
                 self.username = username
-                await api.setToken(deviceResult.token)
+                await api.setToken(result.token)
 
-                // Restore messenger from persisted Signal store
                 if let store = persistentSignalStore, store.hasPersistedIdentity {
                     self.identityKeyPair = try? store.identityKeyPair(context: NullContext())
                     self.registrationId = try? store.localRegistrationId(context: NullContext())
                     self._messenger = Messenger(api: api, store: store)
-                    await _messenger?.mapDevice(identity.deviceId, userId: self.userId!)
+                    await _messenger?.mapDevice(storedDeviceId, userId: self.userId!)
                 }
                 self._authState = .authenticated
                 return .existingDevice
             } catch let error as APIClient.APIError {
-                // 404 → no such user. 401/403 → wrong password OR the device was
-                // rejected local device; fall through to a user-scoped login to distinguish.
+                // The user-scoped login below classifies 401/403.
                 if error.status == 404 { return .userNotFound }
                 if error.status != 401 && error.status != 403 { throw error }
                 await rateLimitDelay()
             }
         }
 
-        // No local device (or the device login was rejected) — user-scoped login
-        // to verify credentials and decide the scenario.
         do {
-            let result = try await api.loginWithDevice(username, password, deviceId: nil)
-            self.token = result.token
-            self.refreshToken = result.refreshToken
-            self.userId = APIClient.extractUserId(result.token)
-            self.username = username
-            await api.setToken(result.token)
+            _ = try await api.loginWithDevice(username, password, deviceId: nil)
         } catch let error as APIClient.APIError {
-            if error.status == 401 { return .invalidCredentials }
-            if error.status == 404 { return .userNotFound }
-            throw error
+            switch error.status {
+            case 401, 403: return .invalidCredentials
+            case 404: return .userNotFound
+            default: throw error
+            }
         }
-
-        // Credentials valid. A local device that got rejected above means it was
-        // Rejected local device → mismatch. Otherwise decide by the server's device count.
-        if let identity = storedIdentity, !identity.deviceId.isEmpty {
-            return .deviceMismatch
-        }
-
-        await rateLimitDelay()
-        let serverDevices = try await api.listDevices()
-        if serverDevices.count <= 1 {
-            // Only device (or none) — re-provision directly, no linking needed.
-            return .onlyDevice
-        } else {
-            // Multiple devices exist — need approval from an existing one.
-            self._authState = .pendingApproval
-            return .newDevice
-        }
+        return storedDeviceId.isEmpty ? .newDevice : .deviceMismatch
     }
 
     // MARK: - Login + Provision (device linking)
@@ -732,12 +682,13 @@ public class ObscuraClient {
         let store = try initializeSignalStore(identity: identity, regId: regId, spkPrivate: spkPrivate, spkSig: spkSig, preKeyRecords: preKeyRecords)
         self._messenger = Messenger(api: api, store: store)
 
-        await devices.storeIdentity(DeviceIdentity(deviceId: self.deviceId ?? ""))
+        await recordProvisionedDevice(deviceName: deviceName)
 
-        // Record the pending device locally; approval later reconciles the full account list.
-        await recordOwnDevice(deviceName: deviceName)
-
-        _authState = .authenticated
+        // Wait for DEVICE_LINK_APPROVAL only if another device exists to send it.
+        await rateLimitDelay()
+        let serverDevices = try await api.listDevices()
+        let hasApprover = serverDevices.contains { $0.deviceId != self.deviceId }
+        _authState = hasApprover ? .pendingApproval : .authenticated
         await rateLimitDelay()
     }
 
