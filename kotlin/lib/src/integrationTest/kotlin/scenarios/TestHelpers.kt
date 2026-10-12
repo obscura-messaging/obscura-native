@@ -119,7 +119,7 @@ suspend fun becomeFriends(a: ObscuraClient, b: ObscuraClient) {
 }
 
 /**
- * Send a message the way obscura-pix does, and assert it arrived.
+ * Send a message the way obscura-app does, and assert it arrived.
  *
  * The helper names the recipient by userId, carries a canonical conversation
  * id, and reads delivery from the receiver's inbox.
@@ -145,7 +145,7 @@ suspend fun ObscuraClient.hasReceived(content: String, timeoutMs: Long = 10_000)
 }
 
 /**
- * Send a `story` entry the way obscura-pix does: the caller names the recipient and the
+ * Send a `story` entry the way obscura-app does: the caller names the recipient and the
  * body is opaque payload bytes the kit never opens.
  */
 suspend fun ObscuraClient.sendStory(receiver: ObscuraClient, entryId: String, data: Map<String, Any?>) {

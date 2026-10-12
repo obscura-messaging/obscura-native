@@ -1,7 +1,7 @@
 # Contributing
 
 Never commit to `main`. Branch, open a pull request, and merge only after CI is
-green. App-facing API changes land here first; `obscura-pix` then bumps its
+green. App-facing API changes land here first; `obscura-app` then bumps its
 gitlink to the merged commit in its own pull request.
 
 ## Prerequisites

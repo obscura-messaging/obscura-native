@@ -16,7 +16,8 @@ defaults:
 jobs:
   # Fast PR gate. No network, no live server. <30s.
   # Compiles main + runs the pure-logic unit suite + smoke-publishes to
-  # mavenLocal so we know pix's resolution path still works.
+  # mavenLocal to smoke-test publication. The app validates its composite build
+  # separately when it bumps the pinned kit commit.
   lib-unit:
     name: Lib (unit tests + publish)
     runs-on: ubuntu-latest

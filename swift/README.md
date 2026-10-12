@@ -1,6 +1,6 @@
 # ObscuraKit (Swift)
 
-Swift package for the `obscura-pix` iOS bridge. Behaviour is defined by
+Swift package for the `obscura-app` iOS bridge. Behaviour is defined by
 [`docs/KIT_API.md`](../docs/KIT_API.md); this file covers only Swift specifics.
 No Notification Service Extension exists yet; see
 [`docs/NSE_PREREQUISITES.md`](docs/NSE_PREREQUISITES.md).

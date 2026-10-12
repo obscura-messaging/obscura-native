@@ -2,16 +2,16 @@
 
 No NSE exists, and iOS push is not active. The server sends a content-free
 background notification (`content-available: 1`), which cannot launch an NSE.
-`obscura-pix` does not yet forward the APNs token or handle the background
+`obscura-app` does not yet forward the APNs token or handle the background
 wake.
 
 ## Already in place (unverified on device)
 
-- `obscura-pix` `SharedContainer` prefers the App Group container for the
+- `obscura-app` `SharedContainer` prefers the App Group container for the
   SQLCipher database and falls back, with a log line, to private storage.
 - `ObscuraClient(apiURL:dataDirectory:userId:keychainAccessGroup:)` stores the
   database key in a shared keychain group.
-- `obscura-pix` `KeychainSession` stores the access and refresh tokens, user
+- `obscura-app` `KeychainSession` stores the access and refresh tokens, user
   ID, device ID and username in that group.
 
 ## To enable push with the app's background handler

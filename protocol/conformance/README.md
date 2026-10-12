@@ -19,4 +19,4 @@ Rules:
 - Change a cross-platform encoding → add or update a vector and both kit suites
   in the same change.
 - Keep application model fixtures out; app routing and merge are tested in
-  `obscura-pix`.
+  `obscura-app`.

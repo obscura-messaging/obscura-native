@@ -1,6 +1,6 @@
 # Obscura Native
 
-Native kits for [`obscura-pix`](https://github.com/obscura-messaging/obscura-pix),
+Native kits for [`obscura-app`](https://github.com/obscura-messaging/obscura-app),
 an end-to-end encrypted messenger. Each kit has one consumer, the app; neither
 is a general-purpose SDK.
 
