@@ -20,7 +20,7 @@ class InboxTests {
 
     // The inbox needs no schema; modelKey is an opaque namespace string.
 
-    /** Send an entry the way obscura-pix does: the caller names the recipient. */
+    /** Send an entry the way obscura-app does: the caller names the recipient. */
     private suspend fun sendStory(from: ObscuraClient, to: ObscuraClient, entryId: String, content: String) =
         from.send(
             recipientUserIds = listOf(to.userId!!),

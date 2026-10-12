@@ -1,6 +1,6 @@
 # ObscuraKit (Kotlin)
 
-Kotlin/JVM kit for the `obscura-pix` Android bridge. Behaviour is defined by
+Kotlin/JVM kit for the `obscura-app` Android bridge. Behaviour is defined by
 [`docs/KIT_API.md`](../docs/KIT_API.md); this file covers only Kotlin specifics.
 
 ## Build and test
@@ -13,9 +13,9 @@ just kotlin-publish-local                       # publishToMavenLocal, as the ap
 ```
 
 - Published as `dev.barrelmaker.obscura.kit:obscura-kit:0.1.0`.
-- Kotlin is pinned to the version React Native uses in `obscura-pix`
+- Kotlin is pinned to the version React Native uses in `obscura-app`
   (`gradle/libs.versions.toml`). A newer compiler produces a library the app
-  cannot read; bump only with a pix RN upgrade.
+  cannot read; bump only with an app React Native upgrade.
 - `:lib:koverVerify` enforces a unit-suite floor (48% lines, 40% instructions).
   Integration tests are excluded unless `-Pkover.includeIntegration=true`.
 - Integration tests default to `https://obscura.barrelmaker.dev`; set

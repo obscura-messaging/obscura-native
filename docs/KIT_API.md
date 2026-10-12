@@ -8,7 +8,7 @@ Normative for the Kotlin and Swift kits and their application bridges.
 | Transport (shared with the server) | [`obscura.proto`](https://github.com/obscura-messaging/obscura-proto/blob/main/obscura/v1/obscura.proto), [`TRANSPORT.md`](https://github.com/obscura-messaging/obscura-proto/blob/main/TRANSPORT.md) |
 | Client content (end-to-end) | [`client.proto`](../protocol/obscura/client/v1/client.proto) |
 | Kit behaviour and app-facing API | this document |
-| App model rules | [`DOMAIN_CONTRACT.md`](https://github.com/obscura-messaging/obscura-pix/blob/main/docs/DOMAIN_CONTRACT.md) |
+| App model rules | [`DOMAIN_CONTRACT.md`](https://github.com/obscura-messaging/obscura-app/blob/main/docs/DOMAIN_CONTRACT.md) |
 
 ## Kit boundary
 

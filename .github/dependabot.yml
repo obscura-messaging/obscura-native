@@ -2,13 +2,13 @@ version: 2
 updates:
 
   # ─── Gradle (the :lib module — pure JVM) ─────────────────
-  # The lib is the foundation that obscura-pix's Android build compiles
+  # The lib is the foundation that obscura-app's Android build compiles
   # against via a Gradle composite build (includeBuild). Bumps here are
-  # gated by this repo's CI AND pix's CI (which builds the kit from source
-  # on every run). If a kit bump breaks pix, we learn about it on the kit PR.
+  # gated by this repo's CI. The app's CI builds its pinned kit from source;
+  # app compatibility is checked in the app PR that bumps the kit gitlink.
   #
   # Two dependency families are NOT free to move and are blocked below,
-  # because the kit's Kotlin is pinned to obscura-pix's React-Native-pinned
+  # because the kit's Kotlin is pinned to obscura-app's React-Native-pinned
   # Kotlin (RN 0.86 -> Kotlin 2.1.20). A Kotlin 2.1 compiler cannot read a
   # library built with newer Kotlin, and several JetBrains/Square libraries
   # track the Kotlin release closely.
@@ -28,12 +28,12 @@ updates:
       # and tested end-to-end (verified painful with 0.72 — touched
       # auth surface). Block dependabot.
       - dependency-name: "org.signal:libsignal-client"
-      # Kotlin is pinned to obscura-pix's React-Native Kotlin (RN 0.86 ->
+      # Kotlin is pinned to obscura-app's React-Native Kotlin (RN 0.86 ->
       # 2.1.20). A Kotlin 2.1 compiler cannot read a library compiled with a
       # newer Kotlin (metadata mismatch), so bumping this makes the kit
-      # unconsumable by pix. A dependabot 2.1 -> 2.4 minor already caused
-      # exactly that (caught by pix's composite build). Bump by hand, in
-      # lockstep with a pix RN upgrade.
+      # unconsumable by the app. A dependabot 2.1 -> 2.4 minor already caused
+      # exactly that (caught by the app's composite build). Bump by hand, in
+      # lockstep with an app RN upgrade.
       #
       # NOTE the two patterns: dependabot tracks the Kotlin GRADLE PLUGIN
       # under its plugin id `org.jetbrains.kotlin.jvm` (and
@@ -57,19 +57,19 @@ updates:
       # the `app.cash.sqldelight` gradle plugin.
       - dependency-name: "app.cash.sqldelight:*"
       - dependency-name: "app.cash.sqldelight"
-      # OkHttp 5.5's Android artifact requires compileSdk 37, but Pix's
+      # OkHttp 5.5's Android artifact requires compileSdk 37, but the app's
       # React Native 0.86 / AGP 8.12 toolchain supports compileSdk 36.
-      # Move this only with the corresponding Pix Android toolchain upgrade.
+      # Move this only with the corresponding app Android toolchain upgrade.
       - dependency-name: "com.squareup.okhttp3:okhttp"
       # Future JUnit BOM majors require a deliberate migration; patches and
       # minors within the current 6.x line can flow automatically.
       - dependency-name: "org.junit:junit-bom"
         update-types: ["version-update:semver-major"]
-      # Gradle wrapper: pinned to obscura-pix's app wrapper (currently
-      # 8.14.5). Pix's wrapper is RN-gated and hand-bumped, so letting
-      # within-8.x minors flow freely here made the kit drift AHEAD of pix
-      # (kit 8.14.5 vs pix 8.14.3) even though the intent is to match pix.
-      # Gate ALL wrapper bumps and move this by hand in lockstep with pix's
+      # Gradle wrapper: pinned to obscura-app's wrapper (currently
+      # 8.14.5). The app's wrapper is RN-gated and hand-bumped, so letting
+      # within-8.x minors flow freely here made the kit drift AHEAD of the app
+      # (kit 8.14.5 vs app 8.14.3) even though the intent is to match the app.
+      # Gate ALL wrapper bumps and move this by hand in lockstep with the app's
       # Android wrapper.
       - dependency-name: "gradle"
       - dependency-name: "gradle-wrapper"
