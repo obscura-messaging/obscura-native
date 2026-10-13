@@ -194,7 +194,8 @@ no kit enforces a TTL in payload data.
 ## Send
 
 ```text
-send(recipientUserIds, modelKey, entryId, sentAt, payloadBytes)
+send(recipientUserIds, modelKey, entryId, sentAt, payloadBytes, acceptedDeviceIds = [])
+    -> SendReport { recipients, selfSync }
 ```
 
 The only app payload send. The kit resolves each named user's devices, adds the
@@ -204,9 +205,22 @@ The sender's own id and duplicates in `recipientUserIds` are ignored. The sender
 gets no inbox row; the app writes its own copy to the entry store. The caller
 validates size and schema.
 
-Each recipient is attempted independently. `send` throws only when every named
-recipient failed; a partial failure is logged, and a successful return does not
-prove every device received it.
+Each recipient is attempted independently in a scoped batch, never by flushing
+another caller's queue. Each result contains `userId`, nullable `deviceId`,
+`status` (`accepted`, `rejected`, `unknown`) and optional `error`. Device
+resolution or encryption failure is rejected; an HTTP failure or an invalid
+response leaves submission acceptance unknown. HTTP 200 alone is not acceptance:
+both kits decode the server's per-submission failures.
+
+`accepted` means queued by the server, not delivered or viewed. `acceptedDeviceIds`
+contains evidence retained by the caller from previous attempts; these devices
+are reported accepted without encrypting or submitting again. A missing device
+list produces a rejected user-level result, never empty-audience success.
+Self-sync outcomes are separate and cannot invalidate recipient acceptance.
+The app owns durable retries. Entry attempts are not retained in the kit's
+in-memory control-message queue. A retry is a new encrypted transport attempt
+of the same logical entry/version; app merge must remain idempotent. Neither
+kit parses the application payload or decides whether it has expired.
 
 ## Attachments
 

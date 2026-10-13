@@ -1,6 +1,9 @@
 package dev.barrelmaker.obscura.kit.managers
 
 import dev.barrelmaker.obscura.kit.messaging.Messenger
+import dev.barrelmaker.obscura.kit.SubmissionResult
+import dev.barrelmaker.obscura.kit.SubmissionStatus
+import dev.barrelmaker.obscura.kit.network.APIClient
 import obscura.client.v1.Client.ClientMessage
 
 /**
@@ -9,24 +12,59 @@ import obscura.client.v1.Client.ClientMessage
  */
 internal class MessageSender(
     private val messenger: Messenger,
-    private val authManager: AuthManager
+    private val authManager: AuthManager,
+    private val api: APIClient,
 ) {
     suspend fun sendToAllDevices(targetUserId: String, msg: ClientMessage) {
-        authManager.ensureFreshToken()
-        var deviceIds = messenger.getDeviceIdsForUser(targetUserId)
-        if (deviceIds.isEmpty()) {
-            messenger.fetchPreKeyBundles(targetUserId)
-            deviceIds = messenger.getDeviceIdsForUser(targetUserId)
+        val results = attemptToAllDevices(targetUserId, msg)
+        if (results.none { it.status == SubmissionStatus.ACCEPTED }) {
+            throw dev.barrelmaker.obscura.kit.ObscuraError.SendFailed(
+                results.joinToString { it.error ?: it.status.name }
+            )
+        }
+    }
+
+    suspend fun attemptToAllDevices(
+        targetUserId: String,
+        msg: ClientMessage,
+        acceptedDeviceIds: Set<String> = emptySet(),
+    ): List<SubmissionResult> {
+        val deviceIds = try {
+            authManager.ensureFreshToken()
+            val bundles = api.fetchPreKeyBundles(targetUserId)
+            (0 until bundles.length()).map { bundles.getJSONObject(it).getString("deviceId") }.distinct()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return listOf(SubmissionResult(targetUserId, null, SubmissionStatus.REJECTED, e.message ?: e.javaClass.simpleName))
         }
         if (deviceIds.isEmpty()) {
-            throw dev.barrelmaker.obscura.kit.ObscuraError.NoDevices(targetUserId)
+            return listOf(SubmissionResult(targetUserId, null, SubmissionStatus.REJECTED, "No devices found"))
         }
-        for (devId in deviceIds) {
-            messenger.queueMessage(devId, msg, targetUserId)
+        return attemptDevices(targetUserId, deviceIds, msg, acceptedDeviceIds)
+    }
+
+    suspend fun attemptDevices(
+        userId: String,
+        deviceIds: List<String>,
+        msg: ClientMessage,
+        acceptedDeviceIds: Set<String>,
+    ): List<SubmissionResult> {
+        val results = mutableListOf<SubmissionResult>()
+        val submissions = mutableListOf<xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest.Submission>()
+        for (deviceId in deviceIds.distinct()) {
+            if (deviceId in acceptedDeviceIds) {
+                results.add(SubmissionResult(userId, deviceId, SubmissionStatus.ACCEPTED))
+                continue
+            }
+            try {
+                submissions.add(messenger.prepareSubmission(deviceId, msg, userId))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                results.add(SubmissionResult(userId, deviceId, SubmissionStatus.REJECTED, e.message ?: e.javaClass.simpleName))
+            }
         }
-        val (sent, failed, _) = messenger.flushMessages()
-        if (sent == 0 && failed > 0) {
-            throw dev.barrelmaker.obscura.kit.ObscuraError.SendFailed("All $failed message submissions failed for $targetUserId")
-        }
+        return results + messenger.submit(userId, submissions)
     }
 }

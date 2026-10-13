@@ -139,27 +139,21 @@ class EntrySendTests {
         alice.disconnect(); bob.disconnect()
     }
 
-    /**
-     * A TOTAL failure is different in kind from a partial one and must reach the caller: the app
-     * would otherwise believe it sent something that reached nobody.
-     */
     @Test
-    fun `a send that reaches nobody throws`() = runBlocking {
+    fun `an unresolved recipient is reported rejected`() = runBlocking {
         assumeTrue(checkServer())
 
         val alice = registerAndConnect("nobody_a")
         val ghost = java.util.UUID.randomUUID().toString()
 
-        assertThrows(dev.barrelmaker.obscura.kit.ObscuraError.SendFailed::class.java) {
-            runBlocking {
-                alice.send(
-                    recipientUserIds = listOf(ghost),
-                    modelKey = "story",
-                    entryId = "story_nobody",
-                    payload = """{"content":"reaches no one"}""".toByteArray(),
-                )
-            }
-        }
+        val result = alice.send(
+            recipientUserIds = listOf(ghost),
+            modelKey = "story",
+            entryId = "story_nobody",
+            payload = """{"content":"reaches no one"}""".toByteArray(),
+        )
+        assertTrue(result.recipients.isNotEmpty())
+        assertTrue(result.recipients.all { it.status == dev.barrelmaker.obscura.kit.SubmissionStatus.REJECTED })
 
         alice.disconnect()
         Unit

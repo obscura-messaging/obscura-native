@@ -198,6 +198,19 @@ public actor Messenger {
     /// Encode a ClientMessage, encrypt it, wrap in EncryptedMessage, queue for sending
     /// Queue a message for batch sending. clientMessage is the protobuf payload.
     public func queueMessage(targetDeviceId: String, clientMessageData: Data, targetUserId: String? = nil) throws {
+        let submission = try prepareSubmission(
+            targetDeviceId: targetDeviceId, clientMessageData: clientMessageData, targetUserId: targetUserId
+        )
+        queue.append((submissionId: submission.submissionID, deviceId: submission.deviceID,
+                      message: submission.message, attempts: 0))
+    }
+
+    func prepareSubmission(
+        targetDeviceId: String, clientMessageData: Data, targetUserId: String? = nil
+    ) throws -> Obscura_V1_SendMessageRequest.Submission {
+        guard UUID(uuidString: targetDeviceId) != nil else {
+            throw MessengerError.invalidBundle("Invalid device UUID")
+        }
         // targetDeviceId IS the peer's device UUID — the address name slot (see addressFor).
         // The session must already exist (processServerBundle built it at the same (deviceUuid, 1)
         // address); encrypt throws if it does not. The owning userId is retained only so
@@ -223,8 +236,31 @@ public actor Messenger {
         let submissionId = uuidToBytes(UUID().uuidString)
         let deviceIdBytes = uuidToBytes(targetDeviceId)
 
-        queue.append((submissionId: submissionId, deviceId: deviceIdBytes,
-                      message: encMsgBytes, attempts: 0))
+        var submission = Obscura_V1_SendMessageRequest.Submission()
+        submission.submissionID = submissionId
+        submission.deviceID = deviceIdBytes
+        submission.message = encMsgBytes
+        return submission
+    }
+
+    func submit(
+        userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]
+    ) async throws -> [SubmissionResult] {
+        if submissions.isEmpty { return [] }
+        var request = Obscura_V1_SendMessageRequest()
+        request.messages = submissions
+        do {
+            let data = try await api.sendMessage(request.serializedData())
+            let response = try Obscura_V1_SendMessageResponse(serializedBytes: data)
+            return try submissionResults(userId: userId, submissions: submissions, response: response)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return submissions.map {
+                SubmissionResult(userId: userId, deviceId: uuidFromBytes($0.deviceID),
+                                 status: .unknown, error: "\(error)")
+            }
+        }
     }
 
     /// Send all queued messages in a single batch.
@@ -233,13 +269,6 @@ public actor Messenger {
     /// ``maxFlushAttempts``. The cap prevents one permanently invalid submission from blocking
     /// every later flush.
     ///
-    /// - Warning: a restored batch re-flushed alongside new submissions is **not** deduplicated
-    ///   server-side. `APIClient.sendMessage` derives its `Idempotency-Key` from a hash of the whole
-    ///   batch body, so changing the batch changes the key, and anything in the failed batch that
-    ///   DID reach the server is delivered a second time. The receiver absorbs that
-    ///   (`envelope_id UNIQUE` + `INSERT OR IGNORE`), which is why this is a warning and not a
-    ///   blocker — but a per-submission idempotency key is the real fix and it is a server contract
-    ///   change.
     public func flushMessages() async throws -> (sent: Int, failed: Int) {
         guard !queue.isEmpty else { return (0, 0) }
 
@@ -257,8 +286,10 @@ public actor Messenger {
 
         let data = try request.serializedData()
 
+        let results: [SubmissionResult]
         do {
-            try await api.sendMessage(data)
+            let response = try Obscura_V1_SendMessageResponse(serializedBytes: await api.sendMessage(data))
+            results = try submissionResults(userId: "", submissions: request.messages, response: response)
         } catch {
             let retryable = batch
                 .map { (submissionId: $0.submissionId, deviceId: $0.deviceId,
@@ -273,7 +304,8 @@ public actor Messenger {
             throw error
         }
 
-        return (sent: batch.count, failed: 0)
+        let sent = results.filter { $0.status == .accepted }.count
+        return (sent: sent, failed: batch.count - sent)
     }
 
     // MARK: - Helpers
@@ -292,5 +324,6 @@ public actor Messenger {
 
     public enum MessengerError: Error {
         case invalidBundle(String)
+        case invalidResponse(String)
     }
 }
