@@ -269,6 +269,7 @@ public class ObscuraClient {
     // callers arrive from multiple concurrent tasks.
     private let refreshLock = NSLock()
     private var refreshInFlight: Task<Bool, Error>?
+    private var consecutiveRefreshFailures = 0
 
     // Reconnection state (matches JS client)
     private var shouldReconnect = false
@@ -406,22 +407,45 @@ public class ObscuraClient {
         _authState = .authenticated
     }
 
-    /// Ensure the current token is fresh; refresh if expiring within buffer.
-    /// Returns true if a valid token is available after the call.
+    /// Ensure the access token is fresh, refreshing it when it expires within the buffer.
     @discardableResult
-    public func ensureFreshToken() async -> Bool {
-        guard let token = token else { return false }
-        guard let payload = APIClient.decodeJWT(token),
-              let exp = payload["exp"] as? Double else { return false }
-        let now = Date().timeIntervalSince1970
-        guard (exp - now) <= Self.tokenExpiryBufferSeconds else { return true }
-        do {
-            return try await refreshTokenNow()
-        } catch {
-            if Self.isCancellation(error) { return false }
-            logger.tokenRefreshFailed(attempt: 1, error: "\(error)")
-            return false
+    public func ensureFreshToken() async -> TokenStatus {
+        guard let token else { return .rejected }
+        if let exp = APIClient.decodeJWT(token)?["exp"] as? Double,
+           exp - Date().timeIntervalSince1970 > Self.tokenExpiryBufferSeconds {
+            return .fresh
         }
+        return await refresh()
+    }
+
+    /// Exchange the refresh token for a new pair. A 401/403 (or no refresh token at all) means the
+    /// session is over: sign out and forget it. Anything else (offline, timeout, 5xx) keeps it.
+    private func refresh() async -> TokenStatus {
+        do {
+            guard try await refreshTokenNow() else { return await rejectSession("no refresh token") }
+            consecutiveRefreshFailures = 0
+            return .fresh
+        } catch {
+            if Self.isCancellation(error) { return .unavailable }
+            consecutiveRefreshFailures += 1
+            logger.tokenRefreshFailed(attempt: consecutiveRefreshFailures, error: "\(error)")
+            if let apiError = error as? APIClient.APIError, [401, 403].contains(apiError.status) {
+                return await rejectSession("refresh token rejected: \(error)")
+            }
+            return .unavailable
+        }
+    }
+
+    private func rejectSession(_ reason: String) async -> TokenStatus {
+        emitAuthFailed(reason)
+        sessionStorage?.clear()
+        try? await logout()
+        return .rejected
+    }
+
+    /// 5 s doubling to a 5 min cap.
+    private static func retryDelayMs(_ failures: Int) -> UInt64 {
+        min(5_000 << UInt64(min(failures - 1, 6)), 300_000)
     }
 
     /// Refresh the access token using the (single-use) refresh token, update
@@ -1313,8 +1337,9 @@ public class ObscuraClient {
         sessionStorage?.save(data)
     }
 
-    /// Restore kit-owned session state from storage and connect. Application schemas are not part
-    /// of persisted kit state.
+    /// Restore kit-owned session state from storage and connect. Throws when nothing usable is
+    /// stored or the refresh token is rejected (which signs out and clears storage). When the server
+    /// cannot be reached the session is restored, still authenticated, and not connected.
     public func restorePersistedSession() async throws {
         guard let storage = sessionStorage, let saved = storage.load(),
               let token = saved["token"] as? String, !token.isEmpty,
@@ -1332,11 +1357,14 @@ public class ObscuraClient {
             registrationId: regId
         )
 
-        // Refresh token and connect
-        let fresh = await ensureFreshToken()
-        guard fresh else {
-            storage.clear()
-            throw ObscuraError.notAuthenticated
+        // Refresh token and connect. A rejected refresh token has already signed out and cleared
+        // storage; an unavailable server keeps the session so the app still opens offline.
+        switch await ensureFreshToken() {
+        case .fresh: break
+        case .rejected: throw ObscuraError.notAuthenticated
+        case .unavailable:
+            logger.log("session restored offline; connect deferred")
+            return
         }
 
         try await connect()
@@ -1765,33 +1793,18 @@ public class ObscuraClient {
 
     // MARK: - Internal: Token Refresh
 
+    /// Refresh ahead of expiry for as long as the session lasts. A failed refresh is retried with
+    /// backoff; only a rejection ends the loop, because only a rejection ends the session.
     private func startTokenRefresh() {
         tokenRefreshTask = Task { [weak self] in
-            var consecutiveFailures = 0
             while !Task.isCancelled {
-                guard let self = self, let token = self.token else {
-                    try? await Task.sleep(nanoseconds: 30_000_000_000)
-                    continue
-                }
-
-                let delayMs = self.getTokenRefreshDelay(token)
-                try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
-
-                if self.refreshToken != nil {
-                    do {
-                        _ = try await self.refreshTokenNow()
-                        consecutiveFailures = 0
-                    } catch {
-                        if Self.isCancellation(error) { continue }
-                        consecutiveFailures += 1
-                        self.logger.tokenRefreshFailed(attempt: consecutiveFailures, error: "\(error)")
-                        if consecutiveFailures >= 3 {
-                            self.emitAuthFailed("token refresh failed after \(consecutiveFailures) attempts: \(error)")
-                            self._authState = .loggedOut
-                            break
-                        }
-                    }
-                }
+                guard let self = self, let token = self.token else { return }
+                let delayMs = self.consecutiveRefreshFailures == 0
+                    ? self.getTokenRefreshDelay(token)
+                    : Self.retryDelayMs(self.consecutiveRefreshFailures)
+                try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                if Task.isCancelled { return }
+                if await self.refresh() == .rejected { return }
             }
         }
     }

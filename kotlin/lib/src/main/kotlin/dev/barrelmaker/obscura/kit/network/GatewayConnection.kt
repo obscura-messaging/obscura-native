@@ -69,7 +69,7 @@ class GatewayConnection(
     val preKeyStatus = Channel<PreKeyStatus>(capacity = 10)
 
     /** Called before reconnect to ensure token is fresh. Set by ObscuraClient. */
-    var ensureFreshToken: (suspend () -> Boolean) = { true }
+    var ensureFreshToken: (suspend () -> Unit) = {}
 
     suspend fun connect() {
         if (_state.value == GatewayState.CONNECTED || _state.value == GatewayState.CONNECTING) return

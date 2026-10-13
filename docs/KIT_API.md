@@ -294,6 +294,14 @@ Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
 `pendingApproval` if another device can approve the link, else `authenticated`.
 `register` and `loginAndProvision` store the device `login` checks.
 
+**Token refresh.** `ensureFreshToken()` returns `fresh`, `rejected` or
+`unavailable`. Only a refresh the server refuses (401/403), or a session with no
+refresh token, is `rejected`: the kit signs out (auth state logged out) and
+clears its stored session. A network or server failure is `unavailable` and changes
+nothing; the background refresh retries with backoff (5 s doubling to 5 min).
+`restorePersistedSession` therefore keeps an offline session authenticated and
+unconnected rather than discarding it.
+
 ## Known gaps
 
 - Swift cannot receive `DEVICE_LINK_APPROVAL`, so a Swift device added to an
