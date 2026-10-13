@@ -1,8 +1,11 @@
 package dev.barrelmaker.obscura.kit.network
 
+import dev.barrelmaker.obscura.kit.ConnectionState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -12,15 +15,25 @@ import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString.Companion.toByteString
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
-/** The gateway against a local server that can end the WebSocket from its side. */
 class GatewayConnectionTest {
     private val server = MockWebServer().apply { start() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val gateway = GatewayConnection(APIClient(server.url("/").toString().trimEnd('/')).apply { token = "t" }, scope)
+    private val logs = Collections.synchronizedList(mutableListOf<String>())
+    private val beforeConnectCalls = AtomicInteger()
+    private val gateway = GatewayConnection(
+        APIClient(server.url("/").toString().trimEnd('/')) { "t" },
+        scope,
+        beforeConnect = { beforeConnectCalls.incrementAndGet() },
+        log = { logs += it },
+    )
 
     @AfterEach fun close() {
         scope.cancel()
@@ -36,15 +49,41 @@ class GatewayConnectionTest {
     }
 
     @Test
-    fun `a close the server initiates is noticed and followed by a reconnect`() = runBlocking {
-        enqueueGateway { it.close(1000, "taken over") }
+    fun `connect returns once open and concurrent callers share one attempt`() = runBlocking {
+        enqueueGateway()
+
+        List(3) { async { gateway.connect() } }.awaitAll()
+
+        assertEquals(ConnectionState.CONNECTED, gateway.state.value)
+        assertEquals(2, server.requestCount)
+        assertEquals(1, beforeConnectCalls.get())
+        gateway.connect()
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `a server close is followed by one reconnect, refreshing first`() = runBlocking {
+        enqueueGateway { it.close(1000, "going away") }
         enqueueGateway()
 
         gateway.connect()
-        withTimeout(5_000) { gateway.state.first { it == GatewayState.RECONNECTING } }
-        withTimeout(5_000) { gateway.state.first { it == GatewayState.CONNECTED } }
+        withTimeout(5_000) { gateway.state.first { it == ConnectionState.RECONNECTING } }
+        withTimeout(5_000) { gateway.state.first { it == ConnectionState.CONNECTED } }
+        delay(1_500)
 
         assertEquals(4, server.requestCount)
+        assertEquals(2, beforeConnectCalls.get())
+    }
+
+    @Test
+    fun `a failed connect throws and does not reconnect`() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(500).build())
+
+        assertTrue(runCatching { gateway.connect() }.isFailure)
+        delay(1_500)
+
+        assertEquals(ConnectionState.DISCONNECTED, gateway.state.value)
+        assertEquals(1, server.requestCount)
     }
 
     @Test
@@ -56,7 +95,23 @@ class GatewayConnectionTest {
         gateway.disconnect()
         delay(1_500)
 
-        assertEquals(GatewayState.DISCONNECTED, gateway.state.value)
+        assertEquals(ConnectionState.DISCONNECTED, gateway.state.value)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `an undecodable frame is logged and the socket stays open`() = runBlocking {
+        enqueueGateway { it.send(byteArrayOf(-1, -1, -1).toByteString()) }
+
+        gateway.connect()
+        withTimeout(5_000) { while (logs.none { it.contains("undecodable frame") }) delay(10) }
+
+        assertEquals(ConnectionState.CONNECTED, gateway.state.value)
+    }
+
+    @Test
+    fun `ack without a socket throws`() {
+        val error = runCatching { gateway.ack(com.google.protobuf.ByteString.EMPTY) }.exceptionOrNull()
+        assertTrue(error is IllegalStateException)
     }
 }

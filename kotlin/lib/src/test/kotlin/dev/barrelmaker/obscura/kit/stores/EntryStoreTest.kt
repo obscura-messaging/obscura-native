@@ -9,10 +9,6 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 
-/**
- * Raw entry storage. The store writes what it is given and returns it unchanged; the blind-overwrite
- * tests are the ones that would catch merge logic added here.
- */
 class EntryStoreTest {
 
     private lateinit var store: EntryStore
@@ -52,12 +48,6 @@ class EntryStoreTest {
         assertNull(all[0].localMetadata)
     }
 
-    /**
-     * `put` is a blind upsert: an older write replaces a newer one,
-     * because by the time a write reaches this class the app has already decided who wins.
-     *
-     * Merge policy must not be duplicated here or overrule the app's decision.
-     */
     @Test
     fun `put is blind — an older write overwrites a newer one`() = runBlocking {
         store.put("pix", entry("pix_1", data = """{"v":"new"}""", sentAt = 9_000))
@@ -81,11 +71,6 @@ class EntryStoreTest {
         assertEquals(emptyList<String>(), store.all("profile").map { it.id })
     }
 
-    /**
-     * `data` is opaque. The kit stores the string it is handed and returns it byte-for-byte — it does
-     * not parse, re-serialize, validate or normalise. Re-serializing would reorder keys and change
-     * the bytes the app hashed or compared.
-     */
     @Test
     fun `data is stored verbatim, including content the kit cannot parse`() = runBlocking {
         val notJson = """this is not json at all {{{"""
@@ -108,11 +93,6 @@ class EntryStoreTest {
         assertEquals(emptyList<StoredEntry>(), store.all("neverSeen"))
     }
 
-    /**
-     * The merge metadata has to survive the round trip, because it IS the app's merge input: REPLACE
-     * is a total order on `(sentAt, authorDeviceId)`. A store that dropped or rewrote either
-     * would make the app's tie-break silently non-deterministic across devices.
-     */
     @Test
     fun `merge metadata round-trips exactly`() = runBlocking {
         store.put("pix", entry("p", sentAt = 1_700_000_000_123, device = "device_zzz"))
@@ -178,10 +158,6 @@ class EntryStoreTest {
         assertEquals(1, store.all("directMessage").size)
     }
 
-    /**
-     * The guarantee `erase` exists for: the erased content is not recoverable from the database
-     * files. WAL mode is the hard case, because a deleted page otherwise lingers in `-wal`.
-     */
     @Test
     fun `erased content is not recoverable from the database or its WAL`(@TempDir dir: File) = runBlocking {
         val path = File(dir, "erase.db")

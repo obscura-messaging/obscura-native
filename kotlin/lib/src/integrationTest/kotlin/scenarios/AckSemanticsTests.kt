@@ -4,41 +4,24 @@ import com.google.protobuf.ByteString
 import dev.barrelmaker.obscura.kit.ObscuraClient
 import dev.barrelmaker.obscura.kit.ObscuraLogger
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
-import kotlinx.coroutines.delay
+import dev.barrelmaker.obscura.kit.messaging.Messenger
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.Assertions.*
-import org.junit.jupiter.api.Assumptions.assumeTrue
-import org.junit.jupiter.api.BeforeAll
-import org.junit.jupiter.api.Test
-import org.signal.libsignal.protocol.SessionCipher
-import org.signal.libsignal.protocol.SignalProtocolAddress
 import obscura.client.v1.Client.ClientMessage
 import obscura.client.v1.Client.EncryptedMessage
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Test
+import org.signal.libsignal.protocol.SessionCipher
+import org.signal.libsignal.protocol.message.CiphertextMessage
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * On the server an ACK is a DELETE: gateway AckBatcher -> message_service.delete_batch ->
- * `DELETE FROM messages WHERE id = ANY($1) AND device_id = $2` (message_repo.rs:155). No
- * tombstone. And the MessagePump keeps a per-connection monotonic cursor
- * (message_pump.rs:62), so an unacked message is NOT re-sent on the same connection — it comes
- * back only on a NEW connection, where a fresh pump starts its cursor at None and re-fetches
- * every row still in the table. Therefore:
- *
- *   - a message that was ACKED is deleted and never reappears;
- *   - a message that was NOT acked reappears on the next reconnect.
- *
- * Reconnect-then-observe-redelivery is thus an exact probe for "is it still on the server?".
- *
- * The test delivers Alice a genuinely undecryptable envelope — a real Signal ciphertext with a
- * corrupted MAC, so it parses as a valid EncryptedMessage and fails specifically at the
- * cryptographic decrypt step, not earlier — confirms the decrypt failed, then reconnects Alice
- * and asserts the envelope is redelivered (i.e. still on the server).
+ * An ack deletes the server copy, and an unacked message is redelivered only on a new connection.
+ * So a message that fails to decrypt must come back after a reconnect.
  */
 class AckSemanticsTests {
 
-    /** Counts decrypt failures the kit reports, so the test can observe them without the UI. */
     private class CountingLogger : ObscuraLogger {
         val decryptFailures = AtomicInteger(0)
         override fun log(message: String) {}
@@ -47,134 +30,48 @@ class AckSemanticsTests {
         override fun tokenRefreshFailed(attempt: Int, reason: String) {}
         override fun preKeyReplenishFailed(reason: String) {}
         override fun identityChanged(address: String) {}
-        override fun sessionEstablishFailed(userId: String, reason: String) {}
         override fun databaseError(store: String, operation: String, reason: String) {}
     }
 
-    companion object {
-        private var serverUp = false
-
-        @BeforeAll @JvmStatic fun setup() { serverUp = checkServer() }
-    }
-
-    private fun need() = assumeTrue(serverUp)
-
-    /**
-     * Build a genuinely undecryptable submission from Bob to Alice: a real Signal ciphertext
-     * for Alice's device with its MAC byte flipped. This is an authentic "cannot decrypt" case
-     * — the outer EncryptedMessage proto is well-formed, so the failure lands at the Signal
-     * decrypt step (bad MAC).
-     */
-    private fun sendCorruptCiphertext(bob: ObscuraClient, aliceUserId: String, aliceDeviceId: String) {
-        // Signal sessions are keyed by device UUID at address
-        // `(aliceDeviceId, 1)`, matching production encryption.
-        val addr = SignalProtocolAddress(aliceDeviceId, 1)
-        require(bob.signalStore.containsSession(addr)) {
-            "bob has no Signal session at $addr — send a warmup message first"
-        }
-
-        val plaintext = ClientMessage.newBuilder()
-            .setAppEntry(
-                obscura.client.v1.Client.AppEntry.newBuilder()
-                    .setModel("corrupt")
-                    .setId("corrupt-${UUID.randomUUID()}")
-                    .setTimestamp(System.currentTimeMillis())
-                    .setData(ByteString.copyFromUtf8("this will be corrupted"))
-            )
-            .setTimestamp(System.currentTimeMillis())
-            .build()
-            .toByteArray()
-
-        // Encrypt a real ciphertext, then flip the last byte (the MAC) so decryption fails.
-        val ciphertext = SessionCipher(bob.signalStore, addr).encrypt(plaintext)
-        val bytes = ciphertext.serialize().copyOf()
-        bytes[bytes.size - 1] = (bytes[bytes.size - 1].toInt() xor 0xFF).toByte()
-
-        val encMsg = EncryptedMessage.newBuilder()
+    /** A real ciphertext for [deviceId] with its MAC corrupted, so it fails at the Signal decrypt. */
+    private suspend fun sendCorruptCiphertext(sender: ObscuraClient, deviceId: String) {
+        val address = Messenger.addressFor(deviceId)
+        val plaintext = ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry { model = "corrupt" }).build()
+        val ciphertext = SessionCipher(sender.signalStore, address).encrypt(plaintext.toByteArray())
+        val bytes = ciphertext.serialize().also { it[it.size - 1] = (it[it.size - 1].toInt() xor 0xFF).toByte() }
+        val encrypted = EncryptedMessage.newBuilder()
             .setType(
-                if (ciphertext.type == 3) EncryptedMessage.Type.TYPE_PREKEY_MESSAGE
+                if (ciphertext.type == CiphertextMessage.PREKEY_TYPE) EncryptedMessage.Type.TYPE_PREKEY_MESSAGE
                 else EncryptedMessage.Type.TYPE_ENCRYPTED_MESSAGE
             )
             .setContent(ByteString.copyFrom(bytes))
             .build()
-
         val submission = SendMessageRequest.Submission.newBuilder()
             .setSubmissionId(UuidCodec.uuidToBytes(UUID.randomUUID()))
-            .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(aliceDeviceId)))
-            .setMessage(ByteString.copyFrom(encMsg.toByteArray()))
+            .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(deviceId)))
+            .setMessage(encrypted.toByteString())
             .build()
-
-        val request = SendMessageRequest.newBuilder().addMessages(submission).build()
-        runBlocking { bob.api.sendMessage(request.toByteArray()) }
+        sender.api.sendMessage(SendMessageRequest.newBuilder().addMessages(submission).build().toByteArray())
     }
 
     @Test
     fun `a decrypt failure is not acked and redelivers after reconnect`() = runBlocking {
-        need()
-
-        val aliceLogger = CountingLogger()
-
-        // Alice + Bob, friends. Alice carries the counting logger so we can see decrypt failures.
-        val alice = registerAndConnect("f2_alice").also { it.logger = aliceLogger }
-        val bob = registerAndConnect("f2_bob")
+        requireServer()
+        val logger = CountingLogger()
+        val alice = registerAndConnect("ack_alice").also { it.logger = logger }
+        val bob = registerAndConnect("ack_bob")
         becomeFriends(bob, alice)
-        delay(500)
+        sendAndVerify(bob, alice, "warmup")
+        assertEquals(0, logger.decryptFailures.get())
 
-        // Warmup: a normal Bob -> Alice message. Establishes the Bob->Alice Signal session and
-        // proves the delivery plumbing works before we corrupt anything.
-        sendAndVerify(bob, alice, "warmup ok")
-        val warm = alice.waitForMessage(15_000)
-        assertEquals("warmup ok", warm.content(), "warmup message should decrypt fine")
-        assertEquals(0, aliceLogger.decryptFailures.get(), "warmup must not have failed to decrypt")
-        delay(500)
+        sendCorruptCiphertext(bob, alice.deviceId!!)
+        eventually(message = "first decrypt failure") { logger.decryptFailures.get() == 1 }
 
-        // Deliver the poison envelope.
-        val failsBefore = aliceLogger.decryptFailures.get()
-        sendCorruptCiphertext(bob, alice.userId!!, alice.deviceId!!)
-
-        // Wait for Alice's envelope loop to receive it and fail to decrypt.
-        val deadline = System.currentTimeMillis() + 15_000
-        while (aliceLogger.decryptFailures.get() == failsBefore && System.currentTimeMillis() < deadline) {
-            delay(100)
-        }
-        val failsAfterDelivery = aliceLogger.decryptFailures.get()
-        println("decrypt failures after delivering poison: $failsAfterDelivery (was $failsBefore)")
-        assertTrue(
-            failsAfterDelivery > failsBefore,
-            "PRECONDITION: the corrupt envelope must actually reach Alice and fail to DECRYPT " +
-                "(so this proves ack-on-failure, not a delivery problem)."
-        )
-
-        // Give the kit a beat to fire its ack for that envelope.
-        delay(1_000)
-
-        // Reconnect Alice. A fresh MessagePump starts its cursor at None and re-fetches every row
-        // still in the messages table. If the poison envelope was NOT acked, it is still there and
-        // Alice will fail to decrypt it a SECOND time. If the kit acked the failure, the row
-        // was deleted and nothing comes back.
-        val failsBeforeReconnect = aliceLogger.decryptFailures.get()
         alice.disconnect()
-        delay(1_000)
         alice.connect()
-
-        val reconnectDeadline = System.currentTimeMillis() + 12_000
-        while (aliceLogger.decryptFailures.get() == failsBeforeReconnect &&
-            System.currentTimeMillis() < reconnectDeadline) {
-            delay(200)
-        }
-        val redelivered = aliceLogger.decryptFailures.get() > failsBeforeReconnect
-        println("after reconnect: redelivered=$redelivered " +
-            "(failures ${failsBeforeReconnect} -> ${aliceLogger.decryptFailures.get()})")
-        println("alice debugLog (newest last):")
-        alice.debugLog.take(14).reversed().forEach { println("  $it") }
+        eventually(message = "redelivery") { logger.decryptFailures.get() == 2 }
+        assertEquals(1L, alice.inbox.depth(), "only the warmup is stored")
 
         alice.disconnect(); bob.disconnect()
-
-        assertTrue(
-            redelivered,
-            "the undecryptable message must remain on the server after a decrypt failure — " +
-                "it should redeliver on reconnect and fail to decrypt again. It did not, which means " +
-                "Kotlin acked (=DELETEd) a message it never decrypted. Data loss."
-        )
     }
 }

@@ -1,68 +1,44 @@
 package dev.barrelmaker.obscura.kit.stores
 
-import dev.barrelmaker.obscura.kit.Friend
+import app.cash.sqldelight.coroutines.asFlow
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 enum class FriendStatus(val value: String) {
     PENDING_SENT("pending_sent"),
     PENDING_RECEIVED("pending_received"),
-    ACCEPTED("accepted")
+    ACCEPTED("accepted"),
 }
 
-data class FriendData(
-    val userId: String,
-    val username: String,
-    val status: FriendStatus,
-)
+data class FriendData(val userId: String, val username: String, val status: FriendStatus)
 
-/** The one mapping from a stored friend row. */
-internal fun Friend.toFriendData() = FriendData(
-    userId = user_id,
-    username = username,
-    status = FriendStatus.entries.find { it.value == status } ?: FriendStatus.PENDING_SENT,
-)
+internal class FriendStore(db: ObscuraDatabase) {
+    private val dispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val queries = db.friendQueries
 
-/** Friend graph: who the user knows and the friendship state. Devices live in [DeviceStore]. */
-class FriendStore internal constructor(private val db: ObscuraDatabase) {
-    private val dispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1)
+    /** Emits once on collection and after every change to the friend table. */
+    val changes: Flow<Unit> = queries.selectAll(::friend).asFlow().map { }
 
     suspend fun add(userId: String, username: String, status: FriendStatus) = withContext(dispatcher) {
-        val now = System.currentTimeMillis()
-        db.friendQueries.insert(userId, username, status.value, now, now)
+        queries.insert(userId, username, status.value)
     }
 
-    /** The stored record for [userId], or null if this user is not in the friend graph at all. */
     suspend fun get(userId: String): FriendData? = withContext(dispatcher) {
-        db.friendQueries.selectById(userId).executeAsOneOrNull()?.toFriendData()
+        queries.selectById(userId, ::friend).executeAsOneOrNull()
     }
 
-    /**
-     * Move an EXISTING record to [status], keeping its username.
-     *
-     * Deliberately separate from [add]: `add` writes a caller-supplied username, and the only
-     * usernames a peer can supply are attacker-chosen. A status change
-     * driven by an inbound message must never be able to carry a name with it.
-     */
+    suspend fun getAll(): List<FriendData> = withContext(dispatcher) { queries.selectAll(::friend).executeAsList() }
+
+    /** Changes the status only. A status change driven by a peer must never carry a name with it. */
     suspend fun updateStatus(userId: String, status: FriendStatus) = withContext(dispatcher) {
-        db.friendQueries.updateStatus(status.value, System.currentTimeMillis(), userId)
+        queries.updateStatus(status.value, userId)
     }
 
-    suspend fun getAccepted(): List<FriendData> = withContext(dispatcher) {
-        db.friendQueries.selectByStatus(FriendStatus.ACCEPTED.value).executeAsList().map { it.toFriendData() }
-    }
+    suspend fun remove(userId: String) = withContext(dispatcher) { queries.deleteById(userId) }
 
-    suspend fun getAll(): List<FriendData> = withContext(dispatcher) {
-        db.friendQueries.selectAll().executeAsList().map { it.toFriendData() }
-    }
-
-    suspend fun remove(userId: String) = withContext(dispatcher) {
-        db.friendQueries.deleteById(userId)
-    }
-
-    suspend fun clear() = withContext(dispatcher) {
-        db.friendQueries.deleteAll()
-    }
+    private fun friend(userId: String, username: String, status: String) =
+        FriendData(userId, username, FriendStatus.entries.first { it.value == status })
 }

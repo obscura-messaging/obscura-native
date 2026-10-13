@@ -38,7 +38,7 @@ class SubmissionResultsTest {
         assertEquals(listOf(true, false), decoded.map { it.deviceMissing })
         assertEquals("Device not found", results[0].error)
         assertNull(results[1].error)
-        assertEquals(UuidCodec.bytesToUuid(b.deviceId.toByteArray()).toString(), results[1].deviceId)
+        assertEquals(UuidCodec.uuidString(b.deviceId), results[1].deviceId)
     }
 
     @Test
@@ -75,7 +75,7 @@ class SubmissionResultsTest {
         server.start()
         try {
             val messenger = Messenger(SignalStore(newInMemoryDatabase()),
-                APIClient("http://127.0.0.1:${server.address.port}").apply { token = "unit-test" })
+                APIClient("http://127.0.0.1:${server.address.port}") { "unit-test" })
             assertEquals(SubmissionStatus.REJECTED, messenger.submit("user", listOf(a)).single().result.status)
             val b = submission()
             response = byteArrayOf()

@@ -3,24 +3,11 @@ package dev.barrelmaker.obscura.kit.wire
 import dev.barrelmaker.obscura.kit.TypingState
 import obscura.client.v1.Client
 
-/**
- * Single source of truth for translating the `ClientMessage.payload` arm to
- * the app-facing message kind.
- *
- * Keeping every mapping here prevents call-site drift. The shared
- * `protocol/conformance/wire.json` vectors pin cross-platform behavior.
- */
-object WireCodec {
-
-    // ─── ClientMessage.payload oneof → app string ────────────────────────────
-
-    /**
-     * The app-facing message-type string: the set `payload` oneof arm's field
-     * name, upper-snake (which the generated [Client.ClientMessage.PayloadCase]
-     * already is). An unset payload maps to "".
-     */
-    fun decodeType(case: Client.ClientMessage.PayloadCase): String =
-        if (case == Client.ClientMessage.PayloadCase.PAYLOAD_NOT_SET) "" else case.name
+/** Payload arm and typing state <-> app-facing forms. Pinned by `protocol/conformance/wire.json`. */
+internal object WireCodec {
+    /** The inbox `kind`: the arm's upper-snake name, `UNKNOWN` for an unset or unknown arm. */
+    fun kind(case: Client.ClientMessage.PayloadCase): String =
+        if (case == Client.ClientMessage.PayloadCase.PAYLOAD_NOT_SET) "UNKNOWN" else case.name
 
     fun decodeTypingState(state: Client.TypingState): TypingState? = when (state) {
         Client.TypingState.TYPING_STATE_STARTED -> TypingState.STARTED

@@ -37,5 +37,4 @@ internal fun decodeSubmissionResults(
 internal fun unknownSubmission(userId: String, submission: SendMessageRequest.Submission, error: String) =
     Submitted(SubmissionResult(userId, deviceIdOf(submission), SubmissionStatus.UNKNOWN, error))
 
-private fun deviceIdOf(submission: SendMessageRequest.Submission) =
-    UuidCodec.bytesToUuid(submission.deviceId.toByteArray()).toString()
+private fun deviceIdOf(submission: SendMessageRequest.Submission) = checkNotNull(UuidCodec.uuidString(submission.deviceId))

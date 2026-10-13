@@ -6,12 +6,6 @@ import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
-/**
- * AttachmentCrypto is AES-256-GCM over JCE. These tests pin the
- * encrypt -> decrypt round-trip and verify the authentication tag is
- * actually enforced — without AEAD checks, a tampered attachment would
- * decrypt to garbage that the app might still render.
- */
 class AttachmentCryptoTest {
 
     @Test
@@ -32,9 +26,6 @@ class AttachmentCryptoTest {
 
     @Test
     fun `encrypt produces fresh key and nonce each call (CSPRNG)`() {
-        // If two calls produce identical key+nonce, the CSPRNG is broken
-        // and any attacker who recovered one key would decrypt every
-        // future attachment.
         val a = AttachmentCrypto.encrypt("hi".toByteArray())
         val b = AttachmentCrypto.encrypt("hi".toByteArray())
         assertNotEquals(a.contentKey.toList(), b.contentKey.toList())
@@ -63,7 +54,6 @@ class AttachmentCryptoTest {
     @Test
     fun `decrypt of tampered ciphertext throws (AEAD check)`() {
         val enc = AttachmentCrypto.encrypt("important".toByteArray())
-        // Flip one bit in the ciphertext middle (skip the auth tag area).
         val tampered = enc.ciphertext.copyOf()
         tampered[0] = (tampered[0].toInt() xor 0x01).toByte()
         assertThrows(Exception::class.java) {

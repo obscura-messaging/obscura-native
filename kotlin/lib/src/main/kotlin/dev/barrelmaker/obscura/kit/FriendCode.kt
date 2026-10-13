@@ -1,39 +1,26 @@
 package dev.barrelmaker.obscura.kit
 
-import dev.barrelmaker.obscura.kit.crypto.toBase64
 import dev.barrelmaker.obscura.kit.crypto.fromBase64
+import dev.barrelmaker.obscura.kit.crypto.toBase64
 import org.json.JSONObject
 
-/**
- * Friend code: base64-encoded JSON with userId + username.
- * This string gets QR-encoded or shared as text.
- *
- * Format: Base64({"u": userId, "n": username})
- * Short keys keep the QR code small (fewer modules = easier to scan).
- *
- * The code is just a pointer — the actual key exchange happens via Signal
- * when befriend() is called. The code itself doesn't need to be secret.
- */
-object FriendCode {
-
+/** Base64 of `{"u": userId, "n": username}`. A pointer to a user, not a secret. */
+internal object FriendCode {
     data class Decoded(val userId: String, val username: String)
 
-    fun encode(userId: String, username: String): String {
-        val json = JSONObject().apply {
-            put("u", userId)
-            put("n", username)
-        }
-        return json.toString().toByteArray().toBase64()
-    }
+    fun encode(userId: String, username: String): String =
+        JSONObject().put("u", userId).put("n", username).toString().toByteArray().toBase64()
 
+    /** Whitespace and soft hyphens (added by share sheets) are ignored; URL-safe Base64 is accepted. */
     fun decode(code: String): Decoded {
-        val normalized = code.trim()
-            .replace('-', '+')
-            .replace('_', '/')
-        val json = JSONObject(String(normalized.fromBase64()))
-        val userId = json.optString("u", "")
-        val username = json.optString("n", "")
-        require(userId.isNotEmpty() && username.isNotEmpty()) { "Invalid friend code" }
-        return Decoded(userId, username)
+        val cleaned = code.filterNot { it.isWhitespace() || it == '\u00AD' }.replace('-', '+').replace('_', '/')
+        val json = try {
+            JSONObject(String(cleaned.fromBase64()))
+        } catch (e: Exception) {
+            throw IllegalArgumentException("Invalid friend code", e)
+        }
+        val decoded = Decoded(json.optString("u"), json.optString("n"))
+        require(decoded.userId.isNotEmpty() && decoded.username.isNotEmpty()) { "Invalid friend code" }
+        return decoded
     }
 }

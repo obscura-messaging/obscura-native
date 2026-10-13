@@ -12,13 +12,6 @@ import org.junit.jupiter.api.Test
 import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.ecc.Curve
 
-/**
- * SignalKeyUtils generates the prekey material every device uploads at
- * provision/takeover time. A bad signed-prekey signature would make every
- * peer reject the bundle, so we verify the signature actually validates
- * against the identity key — plus the id bookkeeping and JSON shape the
- * server expects. Pure JVM crypto, no network.
- */
 class SignalKeyUtilsTest {
 
     private lateinit var store: SignalStore

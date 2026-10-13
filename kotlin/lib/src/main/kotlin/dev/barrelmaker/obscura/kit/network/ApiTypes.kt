@@ -1,93 +1,51 @@
 package dev.barrelmaker.obscura.kit.network
 
+import dev.barrelmaker.obscura.kit.crypto.fromBase64Url
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class SignedPreKeyJson(val keyId: Int, val publicKey: String, val signature: String) {
-    fun toJson() = JSONObject().apply {
-        put("keyId", keyId)
-        put("publicKey", publicKey)
-        put("signature", signature)
-    }
+internal data class SignedPreKeyJson(val keyId: Int, val publicKey: String, val signature: String) {
+    fun toJson(): JSONObject = JSONObject().put("keyId", keyId).put("publicKey", publicKey).put("signature", signature)
 }
 
-data class OneTimePreKeyJson(val keyId: Int, val publicKey: String) {
-    fun toJson() = JSONObject().apply {
-        put("keyId", keyId)
-        put("publicKey", publicKey)
-    }
+internal data class OneTimePreKeyJson(val keyId: Int, val publicKey: String) {
+    fun toJson(): JSONObject = JSONObject().put("keyId", keyId).put("publicKey", publicKey)
 }
 
-fun List<OneTimePreKeyJson>.toJsonArray() = JSONArray(map { it.toJson() })
-
-data class RegisterUserRequest(val username: String, val password: String) {
-    fun toJson() = JSONObject().apply {
-        put("username", username)
-        put("password", password)
-    }
-}
-
-data class LoginRequest(val username: String, val password: String, val deviceId: String? = null) {
-    fun toJson() = JSONObject().apply {
-        put("username", username)
-        put("password", password)
-        if (deviceId != null) put("deviceId", deviceId)
-    }
-}
-
-data class RefreshTokenRequest(val refreshToken: String) {
-    fun toJson() = JSONObject().apply {
-        put("refreshToken", refreshToken)
-    }
-}
-
-data class LogoutRequest(val refreshToken: String) {
-    fun toJson() = JSONObject().apply {
-        put("refreshToken", refreshToken)
-    }
-}
-
-data class ProvisionDeviceRequest(
-    val name: String,
+/** The key material a device publishes, at provisioning and on every prekey upload. */
+internal data class DeviceKeys(
     val identityKey: String,
     val registrationId: Int,
     val signedPreKey: SignedPreKeyJson,
-    val oneTimePreKeys: List<OneTimePreKeyJson>
+    val oneTimePreKeys: List<OneTimePreKeyJson>,
 ) {
-    fun toJson() = JSONObject().apply {
-        put("name", name)
-        put("identityKey", identityKey)
-        put("registrationId", registrationId)
-        put("signedPreKey", signedPreKey.toJson())
-        put("oneTimePreKeys", oneTimePreKeys.toJsonArray())
+    fun toJson(): JSONObject = JSONObject()
+        .put("identityKey", identityKey)
+        .put("registrationId", registrationId)
+        .put("signedPreKey", signedPreKey.toJson())
+        .put("oneTimePreKeys", JSONArray(oneTimePreKeys.map { it.toJson() }))
+}
+
+/** [deviceId] is present only for a device-scoped token. */
+internal data class AuthResponse(val token: String, val refreshToken: String, val deviceId: String?) {
+    companion object {
+        fun from(json: JSONObject) = AuthResponse(
+            token = json.getString("token"),
+            refreshToken = json.getString("refreshToken"),
+            deviceId = json.optString("deviceId").ifEmpty { null },
+        )
     }
 }
 
-data class UploadDeviceKeysRequest(
-    val identityKey: String,
-    val registrationId: Int,
-    val signedPreKey: SignedPreKeyJson,
-    val oneTimePreKeys: List<OneTimePreKeyJson>
-) {
-    fun toJson() = JSONObject().apply {
-        put("identityKey", identityKey)
-        put("registrationId", registrationId)
-        put("signedPreKey", signedPreKey.toJson())
-        put("oneTimePreKeys", oneTimePreKeys.toJsonArray())
+/** The claims this kit reads from an access token. It never verifies the signature; the server does. */
+internal object Jwt {
+    fun userId(token: String): String = requireNotNull(claims(token)?.optString("sub")?.ifEmpty { null }) {
+        "access token has no subject"
     }
+
+    /** Expiry in epoch seconds, or null when the token has none or cannot be read. */
+    fun expiresAt(token: String): Long? = claims(token)?.optLong("exp")?.takeIf { it > 0 }
+
+    private fun claims(token: String): JSONObject? =
+        runCatching { JSONObject(String(token.split(".")[1].fromBase64Url())) }.getOrNull()
 }
-
-// ============================================================
-// API response types
-// ============================================================
-
-data class AuthResponse(val token: String, val refreshToken: String?, val deviceId: String?)
-
-enum class LoginScenario {
-    EXISTING_DEVICE,     // Authenticated as the stored local device
-    NEW_DEVICE,          // No local device; call loginAndProvision()
-    DEVICE_MISMATCH,     // Server rejected the stored local device; wipeDevice() then loginAndProvision()
-    INVALID_CREDENTIALS
-}
-
-data class ProvisionResponse(val token: String, val refreshToken: String?, val deviceId: String)

@@ -4,15 +4,6 @@ CREATE TABLE IF NOT EXISTS SignalLocalIdentity (
     registration_id INTEGER NOT NULL
 );
 
-selectLocalIdentity:
-SELECT * FROM SignalLocalIdentity WHERE id = 1;
-
-insertLocalIdentity:
-INSERT OR REPLACE INTO SignalLocalIdentity(id, identity_key_pair, registration_id) VALUES (1, ?, ?);
-
-deleteLocalIdentity:
-DELETE FROM SignalLocalIdentity;
-
 CREATE TABLE IF NOT EXISTS SignalIdentity (
     address TEXT NOT NULL PRIMARY KEY,
     identity_key BLOB NOT NULL
@@ -38,17 +29,24 @@ CREATE TABLE IF NOT EXISTS SignalSenderKey (
     record BLOB NOT NULL
 );
 
--- Identity
+selectLocalIdentity:
+SELECT * FROM SignalLocalIdentity WHERE id = 1;
+
+insertLocalIdentity:
+INSERT OR REPLACE INTO SignalLocalIdentity(id, identity_key_pair, registration_id) VALUES (1, ?, ?);
+
+deleteLocalIdentity:
+DELETE FROM SignalLocalIdentity;
+
 selectIdentityByAddress:
 SELECT identity_key FROM SignalIdentity WHERE address = ?;
 
 insertIdentity:
 INSERT OR REPLACE INTO SignalIdentity(address, identity_key) VALUES (?, ?);
 
-selectAllIdentities:
-SELECT * FROM SignalIdentity;
+deleteAllIdentities:
+DELETE FROM SignalIdentity;
 
--- PreKey
 selectPreKey:
 SELECT record FROM SignalPreKey WHERE id = ?;
 
@@ -64,9 +62,14 @@ SELECT COUNT(*) FROM SignalPreKey;
 highestPreKeyId:
 SELECT MAX(id) FROM SignalPreKey;
 
--- SignedPreKey
+deleteAllPreKeys:
+DELETE FROM SignalPreKey;
+
 selectSignedPreKey:
 SELECT record FROM SignalSignedPreKey WHERE id = ?;
+
+selectAllSignedPreKeys:
+SELECT record FROM SignalSignedPreKey;
 
 insertSignedPreKey:
 INSERT OR REPLACE INTO SignalSignedPreKey(id, record) VALUES (?, ?);
@@ -74,7 +77,9 @@ INSERT OR REPLACE INTO SignalSignedPreKey(id, record) VALUES (?, ?);
 deleteSignedPreKey:
 DELETE FROM SignalSignedPreKey WHERE id = ?;
 
--- Session
+deleteAllSignedPreKeys:
+DELETE FROM SignalSignedPreKey;
+
 selectSession:
 SELECT record FROM SignalSession WHERE address = ?;
 
@@ -84,28 +89,17 @@ INSERT OR REPLACE INTO SignalSession(address, record) VALUES (?, ?);
 deleteSession:
 DELETE FROM SignalSession WHERE address = ?;
 
-selectAllSessions:
-SELECT * FROM SignalSession;
+deleteSessionsByPrefix:
+DELETE FROM SignalSession WHERE address LIKE ?;
 
--- SenderKey
+deleteAllSessions:
+DELETE FROM SignalSession;
+
 selectSenderKey:
 SELECT record FROM SignalSenderKey WHERE address = ?;
 
 insertSenderKey:
 INSERT OR REPLACE INTO SignalSenderKey(address, record) VALUES (?, ?);
-
--- Cleanup
-deleteAllSignalData:
-DELETE FROM SignalIdentity;
-
-deleteAllPreKeys:
-DELETE FROM SignalPreKey;
-
-deleteAllSignedPreKeys:
-DELETE FROM SignalSignedPreKey;
-
-deleteAllSessions:
-DELETE FROM SignalSession;
 
 deleteAllSenderKeys:
 DELETE FROM SignalSenderKey;

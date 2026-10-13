@@ -1,227 +1,137 @@
 package dev.barrelmaker.obscura.kit.crypto
 
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
-import org.signal.libsignal.protocol.*
-import org.signal.libsignal.protocol.util.KeyHelper
-import org.signal.libsignal.protocol.ecc.Curve
-import org.signal.libsignal.protocol.ecc.ECKeyPair
+import org.signal.libsignal.protocol.IdentityKey
+import org.signal.libsignal.protocol.IdentityKeyPair
+import org.signal.libsignal.protocol.InvalidKeyIdException
+import org.signal.libsignal.protocol.NoSessionException
+import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.groups.state.SenderKeyRecord
-import org.signal.libsignal.protocol.groups.state.SenderKeyStore
-import org.signal.libsignal.protocol.state.*
+import org.signal.libsignal.protocol.state.IdentityKeyStore
+import org.signal.libsignal.protocol.state.KyberPreKeyRecord
+import org.signal.libsignal.protocol.state.PreKeyRecord
+import org.signal.libsignal.protocol.state.SessionRecord
+import org.signal.libsignal.protocol.state.SignalProtocolStore
+import org.signal.libsignal.protocol.state.SignedPreKeyRecord
+import org.signal.libsignal.protocol.util.KeyHelper
+import java.security.MessageDigest
 import java.util.UUID
 
-/**
- * SQLDelight-backed implementation of all Signal protocol store interfaces.
- * This is the Kotlin equivalent of IndexedDBStore.js.
- */
-class SignalStore(
-    private val db: ObscuraDatabase
-) : SignalProtocolStore {
+/** All libsignal store interfaces over SQLite. The server has no Kyber prekeys. */
+internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStore {
+    private val queries = db.signalKeyQueries
 
-    private var identityKeyPair: IdentityKeyPair? = null
-    private var localRegistrationId: Int = 0
+    @Volatile private var localIdentity: Pair<IdentityKeyPair, Int>? =
+        queries.selectLocalIdentity().executeAsOneOrNull()?.let { IdentityKeyPair(it.identity_key_pair) to it.registration_id.toInt() }
 
-    /** Callback when a contact's identity key changes (safety number changed). */
-    var onIdentityChanged: ((address: String, oldKey: ByteArray?, newKey: ByteArray) -> Unit)? = null
+    /** Called with the address whose identity key changed (a peer reinstalled or re-keyed). */
+    var onIdentityChanged: (String) -> Unit = {}
 
-    init {
-        // Restore local identity from SQLite if it exists
-        val saved = db.signalKeyQueries.selectLocalIdentity().executeAsOneOrNull()
-        if (saved != null) {
-            identityKeyPair = IdentityKeyPair(saved.identity_key_pair)
-            localRegistrationId = saved.registration_id.toInt()
-        }
-    }
-
-    /**
-     * Initialize with an existing identity or generate a new one.
-     */
-    fun initialize(keyPair: IdentityKeyPair, registrationId: Int) {
-        this.identityKeyPair = keyPair
-        this.localRegistrationId = registrationId
-        db.signalKeyQueries.insertLocalIdentity(keyPair.serialize(), registrationId.toLong())
-    }
-
-    /**
-     * Generate fresh identity and registration ID.
-     */
     fun generateIdentity(): Pair<IdentityKeyPair, Int> {
-        val keyPair = IdentityKeyPair.generate()
-        val registrationId = KeyHelper.generateRegistrationId(false)
-        initialize(keyPair, registrationId)
-        return Pair(keyPair, registrationId)
+        val identity = IdentityKeyPair.generate() to KeyHelper.generateRegistrationId(false)
+        queries.insertLocalIdentity(identity.first.serialize(), identity.second.toLong())
+        localIdentity = identity
+        return identity
     }
 
-    override fun getIdentityKeyPair(): IdentityKeyPair {
-        return identityKeyPair ?: throw IllegalStateException("Identity not initialized")
+    /** Delete every key, session and identity, this device's included. */
+    fun clear() {
+        db.transaction {
+            queries.deleteLocalIdentity()
+            queries.deleteAllIdentities()
+            queries.deleteAllPreKeys()
+            queries.deleteAllSignedPreKeys()
+            queries.deleteAllSessions()
+            queries.deleteAllSenderKeys()
+        }
+        localIdentity = null
     }
 
-    override fun getLocalRegistrationId(): Int {
-        return localRegistrationId
-    }
+    override fun getIdentityKeyPair(): IdentityKeyPair = checkNotNull(localIdentity) { "Identity not initialized" }.first
+    override fun getLocalRegistrationId(): Int = checkNotNull(localIdentity) { "Identity not initialized" }.second
 
     override fun saveIdentity(address: SignalProtocolAddress, identityKey: IdentityKey): IdentityKeyStore.IdentityChange {
-        val addressStr = "${address.name}.${address.deviceId}"
-        val existing = db.signalKeyQueries.selectIdentityByAddress(addressStr).executeAsOneOrNull()
-        db.signalKeyQueries.insertIdentity(addressStr, identityKey.serialize())
-        val replaced = existing != null && !java.security.MessageDigest.isEqual(existing, identityKey.serialize())
-        if (replaced) {
-            onIdentityChanged?.invoke(addressStr, existing!!, identityKey.serialize())
+        val key = address.key()
+        val existing = queries.selectIdentityByAddress(key).executeAsOneOrNull()
+        queries.insertIdentity(key, identityKey.serialize())
+        if (existing == null || MessageDigest.isEqual(existing, identityKey.serialize())) {
+            return IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED
         }
-        return if (replaced) IdentityKeyStore.IdentityChange.REPLACED_EXISTING else IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED
+        onIdentityChanged(key)
+        return IdentityKeyStore.IdentityChange.REPLACED_EXISTING
     }
 
-    /**
-     * Signal's policy for an unverified contact: a changed identity key (reinstall, takeover) is
-     * accepted, not refused. [saveIdentity] records the new key and reports the change through
-     * [onIdentityChanged], so the app can show that the safety number changed. Refusing it would
-     * leave the peer permanently unreachable, with no way to recover.
-     */
+    // An unverified contact's changed identity is accepted and reported; refusing it would leave the
+    // peer unreachable with no way to recover.
     override fun isTrustedIdentity(
         address: SignalProtocolAddress,
         identityKey: IdentityKey,
-        direction: IdentityKeyStore.Direction
+        direction: IdentityKeyStore.Direction,
     ): Boolean = true
 
-    override fun getIdentity(address: SignalProtocolAddress): IdentityKey? {
-        val addressStr = "${address.name}.${address.deviceId}"
-        val stored = db.signalKeyQueries.selectIdentityByAddress(addressStr).executeAsOneOrNull()
-            ?: return null
-        return IdentityKey(stored)
-    }
+    override fun getIdentity(address: SignalProtocolAddress): IdentityKey? =
+        queries.selectIdentityByAddress(address.key()).executeAsOneOrNull()?.let(::IdentityKey)
 
-    override fun loadPreKey(preKeyId: Int): PreKeyRecord {
-        val record = db.signalKeyQueries.selectPreKey(preKeyId.toLong()).executeAsOneOrNull()
+    override fun loadPreKey(preKeyId: Int): PreKeyRecord =
+        queries.selectPreKey(preKeyId.toLong()).executeAsOneOrNull()?.let(::PreKeyRecord)
             ?: throw InvalidKeyIdException("No prekey with id: $preKeyId")
-        return PreKeyRecord(record)
-    }
 
-    override fun storePreKey(preKeyId: Int, record: PreKeyRecord) {
-        db.signalKeyQueries.insertPreKey(preKeyId.toLong(), record.serialize())
-    }
+    override fun storePreKey(preKeyId: Int, record: PreKeyRecord) = queries.insertPreKey(preKeyId.toLong(), record.serialize())
+    override fun containsPreKey(preKeyId: Int): Boolean = queries.selectPreKey(preKeyId.toLong()).executeAsOneOrNull() != null
+    override fun removePreKey(preKeyId: Int) = queries.deletePreKey(preKeyId.toLong())
 
-    override fun containsPreKey(preKeyId: Int): Boolean {
-        return db.signalKeyQueries.selectPreKey(preKeyId.toLong()).executeAsOneOrNull() != null
-    }
+    fun getPreKeyCount(): Long = queries.countPreKeys().executeAsOne()
+    fun getHighestPreKeyId(): Long = queries.highestPreKeyId().executeAsOne().MAX ?: 0L
 
-    override fun removePreKey(preKeyId: Int) {
-        db.signalKeyQueries.deletePreKey(preKeyId.toLong())
-    }
-
-    fun getPreKeyCount(): Long {
-        return db.signalKeyQueries.countPreKeys().executeAsOne()
-    }
-
-    fun getHighestPreKeyId(): Long {
-        return db.signalKeyQueries.highestPreKeyId().executeAsOne().MAX ?: 0L
-    }
-
-    override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord {
-        val record = db.signalKeyQueries.selectSignedPreKey(signedPreKeyId.toLong()).executeAsOneOrNull()
+    override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord =
+        queries.selectSignedPreKey(signedPreKeyId.toLong()).executeAsOneOrNull()?.let(::SignedPreKeyRecord)
             ?: throw InvalidKeyIdException("No signed prekey with id: $signedPreKeyId")
-        return SignedPreKeyRecord(record)
+
+    override fun loadSignedPreKeys(): List<SignedPreKeyRecord> =
+        queries.selectAllSignedPreKeys().executeAsList().map(::SignedPreKeyRecord)
+
+    override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) =
+        queries.insertSignedPreKey(signedPreKeyId.toLong(), record.serialize())
+
+    override fun containsSignedPreKey(signedPreKeyId: Int): Boolean =
+        queries.selectSignedPreKey(signedPreKeyId.toLong()).executeAsOneOrNull() != null
+
+    override fun removeSignedPreKey(signedPreKeyId: Int) = queries.deleteSignedPreKey(signedPreKeyId.toLong())
+
+    override fun loadSession(address: SignalProtocolAddress): SessionRecord =
+        queries.selectSession(address.key()).executeAsOneOrNull()?.let(::SessionRecord) ?: SessionRecord()
+
+    override fun loadExistingSessions(addresses: List<SignalProtocolAddress>): List<SessionRecord> = addresses.map {
+        queries.selectSession(it.key()).executeAsOneOrNull()?.let(::SessionRecord)
+            ?: throw NoSessionException("No session for: ${it.key()}")
     }
 
-    override fun loadSignedPreKeys(): List<SignedPreKeyRecord> {
-        // Not frequently needed; return empty for now
-        return emptyList()
-    }
-
-    override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) {
-        db.signalKeyQueries.insertSignedPreKey(signedPreKeyId.toLong(), record.serialize())
-    }
-
-    override fun containsSignedPreKey(signedPreKeyId: Int): Boolean {
-        return db.signalKeyQueries.selectSignedPreKey(signedPreKeyId.toLong()).executeAsOneOrNull() != null
-    }
-
-    override fun removeSignedPreKey(signedPreKeyId: Int) {
-        db.signalKeyQueries.deleteSignedPreKey(signedPreKeyId.toLong())
-    }
-
-    override fun loadSession(address: SignalProtocolAddress): SessionRecord {
-        val addressStr = "${address.name}.${address.deviceId}"
-        val record = db.signalKeyQueries.selectSession(addressStr).executeAsOneOrNull()
-            ?: return SessionRecord()
-        return SessionRecord(record)
-    }
-
-    override fun loadExistingSessions(addresses: List<SignalProtocolAddress>): List<SessionRecord> {
-        return addresses.map { address ->
-            val addressStr = "${address.name}.${address.deviceId}"
-            val record = db.signalKeyQueries.selectSession(addressStr).executeAsOneOrNull()
-                ?: throw NoSessionException("No session for: $addressStr")
-            SessionRecord(record)
-        }
-    }
-
-    // Messenger pins every address to `<deviceUuid>.1`, so this kit has no sub-device
-    // sessions. libsignal still requires the method.
+    // Every address is `<deviceUuid>.1`, so there are no sub-device sessions.
     override fun getSubDeviceSessions(name: String): List<Int> = emptyList()
 
-    override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) {
-        val addressStr = "${address.name}.${address.deviceId}"
-        db.signalKeyQueries.insertSession(addressStr, record.serialize())
-    }
+    override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) =
+        queries.insertSession(address.key(), record.serialize())
 
-    override fun containsSession(address: SignalProtocolAddress): Boolean {
-        val addressStr = "${address.name}.${address.deviceId}"
-        return db.signalKeyQueries.selectSession(addressStr).executeAsOneOrNull() != null
-    }
+    override fun containsSession(address: SignalProtocolAddress): Boolean =
+        queries.selectSession(address.key()).executeAsOneOrNull() != null
 
-    override fun deleteSession(address: SignalProtocolAddress) {
-        val addressStr = "${address.name}.${address.deviceId}"
-        db.signalKeyQueries.deleteSession(addressStr)
-    }
+    override fun deleteSession(address: SignalProtocolAddress) = queries.deleteSession(address.key())
 
-    /** Every session with every peer. Used when this device's own identity changes. */
-    fun deleteAllSessions() {
-        db.signalKeyQueries.deleteAllSessions()
-    }
+    fun deleteAllSessions() = queries.deleteAllSessions()
 
-    override fun deleteAllSessions(name: String) {
-        val allSessions = db.signalKeyQueries.selectAllSessions().executeAsList()
-        allSessions
-            .filter { it.address.startsWith("$name.") }
-            .forEach { db.signalKeyQueries.deleteSession(it.address) }
-    }
+    override fun deleteAllSessions(name: String) = queries.deleteSessionsByPrefix("$name.%")
 
-    override fun storeSenderKey(
-        sender: SignalProtocolAddress,
-        distributionId: UUID,
-        record: SenderKeyRecord
-    ) {
-        val key = "${sender.name}.${sender.deviceId}::$distributionId"
-        db.signalKeyQueries.insertSenderKey(key, record.serialize())
-    }
+    override fun storeSenderKey(sender: SignalProtocolAddress, distributionId: UUID, record: SenderKeyRecord) =
+        queries.insertSenderKey("${sender.key()}::$distributionId", record.serialize())
 
-    override fun loadSenderKey(
-        sender: SignalProtocolAddress,
-        distributionId: UUID
-    ): SenderKeyRecord? {
-        val key = "${sender.name}.${sender.deviceId}::$distributionId"
-        val record = db.signalKeyQueries.selectSenderKey(key).executeAsOneOrNull()
-            ?: return null
-        return SenderKeyRecord(record)
-    }
+    override fun loadSenderKey(sender: SignalProtocolAddress, distributionId: UUID): SenderKeyRecord? =
+        queries.selectSenderKey("${sender.key()}::$distributionId").executeAsOneOrNull()?.let(::SenderKeyRecord)
 
-    override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord {
-        throw InvalidKeyIdException("Kyber not implemented")
-    }
+    override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord = throw InvalidKeyIdException("No Kyber prekeys")
+    override fun loadKyberPreKeys(): List<KyberPreKeyRecord> = emptyList()
+    override fun storeKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) = throw UnsupportedOperationException("No Kyber prekeys")
+    override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean = false
+    override fun markKyberPreKeyUsed(kyberPreKeyId: Int) = throw UnsupportedOperationException("No Kyber prekeys")
 
-    override fun loadKyberPreKeys(): List<KyberPreKeyRecord> {
-        return emptyList()
-    }
-
-    override fun storeKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) {
-        // Not implemented — Kyber is post-quantum, not yet used
-    }
-
-    override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean {
-        return false
-    }
-
-    override fun markKyberPreKeyUsed(kyberPreKeyId: Int) {
-        // Not implemented
-    }
+    private fun SignalProtocolAddress.key() = "$name.$deviceId"
 }

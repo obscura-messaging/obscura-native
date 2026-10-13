@@ -11,14 +11,6 @@ import org.signal.libsignal.protocol.ecc.Curve
 import org.signal.libsignal.protocol.state.*
 import org.signal.libsignal.protocol.util.KeyHelper
 
-/**
- * Tier 1: Signal store unit tests — no server, in-memory DB.
- *
- * Proves the Signal Protocol integration is correctly wired:
- * identity persistence, prekey lifecycle, session storage.
- * LibSignalClient does the hard crypto — we test that we store and
- * retrieve it correctly.
- */
 class SignalStoreTests {
 
     private lateinit var store: SignalStore
@@ -31,8 +23,6 @@ class SignalStoreTests {
         store = SignalStore(db)
     }
 
-    // ─── Identity ─────────────────────────────────────────────────
-
     @Test
     fun `generateIdentity creates and persists keypair`() {
         val (keyPair, regId) = store.generateIdentity()
@@ -44,7 +34,6 @@ class SignalStoreTests {
 
     @Test
     fun `Identity survives store reload`() {
-        // Use a file-backed driver so we can prove persistence across instances
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ObscuraDatabase.Schema.create(driver)
         val db = ObscuraDatabase(driver)
@@ -52,7 +41,6 @@ class SignalStoreTests {
         val store1 = SignalStore(db)
         val (keyPair, regId) = store1.generateIdentity()
 
-        // Second instance reads from same DB — simulates restart
         val store2 = SignalStore(db)
         assertEquals(keyPair.serialize().toList(), store2.getIdentityKeyPair().serialize().toList(),
             "Identity keypair should survive store reload")
@@ -73,7 +61,7 @@ class SignalStoreTests {
     fun `saveIdentity — same key returns true but no change callback`() {
         store.generateIdentity()
         var callbackFired = false
-        store.onIdentityChanged = { _, _, _ -> callbackFired = true }
+        store.onIdentityChanged = { callbackFired = true }
 
         val remoteKey = IdentityKeyPair.generate()
         val address = SignalProtocolAddress("alice", 1)
@@ -87,7 +75,7 @@ class SignalStoreTests {
     fun `saveIdentity — different key fires onIdentityChanged`() {
         store.generateIdentity()
         var changedAddress: String? = null
-        store.onIdentityChanged = { addr, _, _ -> changedAddress = addr }
+        store.onIdentityChanged = { changedAddress = it }
 
         val key1 = IdentityKeyPair.generate()
         val key2 = IdentityKeyPair.generate()
@@ -107,7 +95,7 @@ class SignalStoreTests {
         val key2 = IdentityKeyPair.generate()
         val address = SignalProtocolAddress("alice", 1)
         val changes = mutableListOf<String>()
-        store.onIdentityChanged = { changed, _, _ -> changes += changed }
+        store.onIdentityChanged = { changes += it }
 
         store.saveIdentity(address, key1.publicKey)
         assertTrue(store.isTrustedIdentity(address, key2.publicKey, IdentityKeyStore.Direction.SENDING))
@@ -117,8 +105,6 @@ class SignalStoreTests {
         assertEquals(key2.publicKey, store.getIdentity(address))
         assertEquals(listOf("alice.1"), changes)
     }
-
-    // ─── PreKeys ──────────────────────────────────────────────────
 
     @Test
     fun `Prekey store-load round trip`() {
@@ -176,8 +162,6 @@ class SignalStoreTests {
         assertEquals(50L, store.getHighestPreKeyId())
     }
 
-    // ─── Signed PreKeys ───────────────────────────────────────────
-
     @Test
     fun `Signed prekey store-load round trip`() {
         val (identity, _) = store.generateIdentity()
@@ -199,8 +183,6 @@ class SignalStoreTests {
         }
     }
 
-    // ─── Sessions ─────────────────────────────────────────────────
-
     @Test
     fun `Session store-load round trip`() {
         store.generateIdentity()
@@ -218,7 +200,6 @@ class SignalStoreTests {
         store.generateIdentity()
         val address = SignalProtocolAddress("nobody", 1)
         assertFalse(store.containsSession(address))
-        // Signal pattern: missing session returns empty record, not exception
         val loaded = store.loadSession(address)
         assertNotNull(loaded)
     }
@@ -237,11 +218,9 @@ class SignalStoreTests {
     @Test
     fun `deleteAllSessions removes all sessions for a user`() {
         store.generateIdentity()
-        // Bob has 3 devices
         store.storeSession(SignalProtocolAddress("bob", 1), SessionRecord())
         store.storeSession(SignalProtocolAddress("bob", 2), SessionRecord())
         store.storeSession(SignalProtocolAddress("bob", 3), SessionRecord())
-        // Alice has 1
         store.storeSession(SignalProtocolAddress("alice", 1), SessionRecord())
 
         store.deleteAllSessions("bob")
