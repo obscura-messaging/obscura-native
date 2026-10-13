@@ -44,8 +44,8 @@ final class SubmissionResultsTests: XCTestCase {
     func testScopedSubmitReadsHTTP200FailuresAndMalformedResponses() async throws {
         XCTAssertTrue(URLProtocol.registerClass(SubmissionResponseProtocol.self))
         defer { URLProtocol.unregisterClass(SubmissionResponseProtocol.self) }
-        let api = APIClient(baseURL: "https://submission-unit.invalid")
-        let messenger = Messenger(api: api, store: try PersistentSignalStore())
+        let api = try APIClient(baseURL: "https://submission-unit.invalid")
+        let messenger = Messenger(api: api, store: try signalStoreWithIdentity())
         let a = submission(1)
         let rejected = await messenger.submit(userId: "user", submissions: [a]).map(\.result)
         XCTAssertEqual(rejected.map(\.status), [.rejected])

@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import LibSignalClient
 @testable import ObscuraKit
 
@@ -16,6 +17,10 @@ final class FakeObscuraServer: @unchecked Sendable {
     private let lock = NSLock()
     private var devices: [String: FakeDevice] = [:]
     private var fetches: [String: Int] = [:]
+    private var metadataFetches: [String: Int] = [:]
+    private var metadataStatus = 200
+
+    func failOwnDirectory(status: Int) { lock.withLock { metadataStatus = status } }
 
     init() {
         Self.active = self
@@ -23,12 +28,14 @@ final class FakeObscuraServer: @unchecked Sendable {
     }
 
     func close() {
+        FakeServerProtocol.onOwnMetadata.withLock { $0 = nil }
         URLProtocol.unregisterClass(FakeServerProtocol.self)
         Self.active = nil
     }
 
     /// Bundle fetches made for `userId`, each of which consumed a prekey on every device.
     func bundleFetches(_ userId: String) -> Int { lock.withLock { fetches[userId] ?? 0 } }
+    func ownDirectoryFetches(_ userId: String) -> Int { lock.withLock { metadataFetches[userId] ?? 0 } }
 
     func register(_ userId: String, corruptBundle: Bool = false) async throws -> FakeDevice {
         let device = try await FakeDevice(userId: userId, corruptBundle: corruptBundle)
@@ -40,13 +47,26 @@ final class FakeObscuraServer: @unchecked Sendable {
 
     fileprivate func handle(_ request: URLRequest, body: Data) -> (Int, Data) {
         let path = request.url!.path
+        if request.httpMethod == "GET", path == "/v1/devices" {
+            let token = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") ?? ""
+            return lock.withLock {
+                let userId = APIClient.userId(token) ?? devices[token]?.userId ?? ""
+                metadataFetches[userId, default: 0] += 1
+                guard metadataStatus == 200 else { return (metadataStatus, Data("metadata failed".utf8)) }
+                let owned = devices.values.filter { $0.userId == userId }
+                return (200, try! JSONSerialization.data(withJSONObject: [
+                    "devices": owned.map { ["deviceId": $0.deviceId, "name": "test", "createdAt": "2026-01-01"] },
+                ]))
+            }
+        }
         if request.httpMethod == "GET", path.hasPrefix("/v1/users/") {
             return bundles(String(path.dropFirst("/v1/users/".count)))
         }
         if request.httpMethod == "POST", path == "/v1/messages" {
             let token = request.value(forHTTPHeaderField: "Authorization")!.replacingOccurrences(of: "Bearer ", with: "")
-            return accept(from: token, body)
+            return accept(from: APIClient.deviceId(token) ?? token, body)
         }
+        if request.httpMethod == "DELETE", path == "/v1/sessions" { return (200, Data()) }
         return (404, Data())
     }
 
@@ -64,7 +84,7 @@ final class FakeObscuraServer: @unchecked Sendable {
             let request = try! Obscura_V1_SendMessageRequest(serializedBytes: body)
             var response = Obscura_V1_SendMessageResponse()
             for submission in request.messages {
-                if let target = devices[uuidFromBytes(submission.deviceID)] {
+                if let target = devices[uuidString(submission.deviceID)!] {
                     target.mailbox.append((senderDeviceId, submission.message))
                 } else {
                     var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
@@ -79,9 +99,15 @@ final class FakeObscuraServer: @unchecked Sendable {
 }
 
 final class FakeServerProtocol: URLProtocol {
+    static let onOwnMetadata = Locked<(@Sendable () -> Void)?>(nil)
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == FakeObscuraServer.host }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if request.url?.path == "/v1/devices", request.httpMethod == "GET",
+           let held = Self.onOwnMetadata.withLock({ $0 }) {
+            held()
+            return
+        }
         let (status, data) = FakeObscuraServer.active!.handle(request, body: Self.body(of: request))
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!,
                             cacheStoragePolicy: .notAllowed)
@@ -113,46 +139,44 @@ struct Received {
     let baseKey: PublicKey?
 }
 
-/// A real Signal device: its own store, keys, directory and ``MessageSender``.
+/// A real Signal device: its own store, keys, directory and `MessageSender`.
 final class FakeDevice: @unchecked Sendable {
     let userId: String
     let deviceId = UUID().uuidString.lowercased()
+    let db: DatabaseQueue
     let store: PersistentSignalStore
     let directory: DeviceStore
     let messenger: Messenger
     let sender: MessageSender
-    let logger = RecordingLogger(delegate: NoOpLogger())
+    let logger = RecordingLogger(SilentLogger())
     fileprivate var mailbox: [(senderDeviceId: String, message: Data)] = []
-    private var unusedPreKeys: [(id: UInt32, publicKey: PublicKey)] = []
+    private var unusedPreKeys: [PreKeyRecord] = []
     private let corruptBundle: Bool
 
     init(userId: String, corruptBundle: Bool) async throws {
         self.userId = userId
         self.corruptBundle = corruptBundle
-        store = try PersistentSignalStore()
-        store.logger = logger
-        directory = try DeviceStore()
-        let api = APIClient(baseURL: FakeObscuraServer.baseURL)
+        db = try ObscuraDatabase.inMemory()
+        store = PersistentSignalStore(db: db, logger: logger)
+        directory = DeviceStore(db: db)
+        let api = try APIClient(baseURL: FakeObscuraServer.baseURL)
         messenger = Messenger(api: api, store: store)
-        sender = MessageSender(messenger: messenger, devices: directory, api: api, selfDeviceId: deviceId)
+        sender = MessageSender(messenger: messenger, devices: directory, api: api, logger: logger, selfDeviceId: deviceId)
         try rekey()
-        await api.setToken(deviceId)
+        api.setToken(deviceId)
     }
 
     var remainingPreKeys: Int { unusedPreKeys.count }
 
-    /// Replace this device's identity and prekeys, as a takeover does.
+    /// Replace this device's identity and prekeys, as a reinstall does. Drops every session.
     func rekey() throws {
-        let (identity, _) = store.generateIdentity()
-        let signedPreKey = PrivateKey.generate()
-        let signature = identity.privateKey.generateSignature(message: signedPreKey.publicKey.serialize())
-        try store.storeSignedPreKey(SignedPreKeyRecord(id: 1, timestamp: 0, privateKey: signedPreKey, signature: signature),
-                                    id: 1, context: NullContext())
-        unusedPreKeys = try (1...100).map { id in
-            let key = PrivateKey.generate()
-            try store.storePreKey(PreKeyRecord(id: UInt32(id), publicKey: key.publicKey, privateKey: key), id: UInt32(id), context: NullContext())
-            return (UInt32(id), key.publicKey)
-        }
+        let keys = try SignalKeys.generate()
+        try store.install(keys)
+        unusedPreKeys = keys.preKeys
+    }
+
+    func forgetSessions() throws {
+        try db.write { db in try db.execute(sql: "DELETE FROM signal_sessions") }
     }
 
     fileprivate func consumeBundle() -> [String: Any] {
@@ -181,8 +205,7 @@ final class FakeDevice: @unchecked Sendable {
         for (senderDeviceId, data) in delivered {
             let encrypted = try Obscura_Client_V1_EncryptedMessage(serializedBytes: data)
             let isPreKey = encrypted.type == .prekeyMessage
-            let plaintext = try await messenger.decrypt(senderDeviceUuid: senderDeviceId, content: encrypted.content,
-                                                        messageType: isPreKey ? 1 : 2)
+            let plaintext = try await messenger.decrypt(senderDeviceUuid: senderDeviceId, encrypted)
             received.append(Received(
                 message: try Obscura_Client_V1_ClientMessage(serializedBytes: Data(plaintext)),
                 type: encrypted.type,
@@ -194,7 +217,7 @@ final class FakeDevice: @unchecked Sendable {
 }
 
 extension FakeObscuraServer {
-    fileprivate func drain(_ device: FakeDevice) -> [(senderDeviceId: String, message: Data)] {
+    func drain(_ device: FakeDevice) -> [(senderDeviceId: String, message: Data)] {
         lock.withLock {
             defer { device.mailbox.removeAll() }
             return device.mailbox

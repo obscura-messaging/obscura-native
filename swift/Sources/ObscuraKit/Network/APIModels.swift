@@ -1,62 +1,51 @@
 import Foundation
 
-// MARK: - Auth
-
-public struct AuthResponse: Decodable {
-    public let token: String
-    public let refreshToken: String?
-    public let expiresAt: Double?
-    public let deviceId: String?
+struct AuthResponse: Decodable {
+    let token: String
+    let refreshToken: String?
 }
 
-// MARK: - Devices
-
-public struct DeviceResponse: Decodable {
-    public let deviceId: String
-    public let name: String
-    public let createdAt: String?
+struct SignedPreKeyUpload: Encodable {
+    let keyId: Int
+    let publicKey: String
+    let signature: String
 }
 
-public struct SignedPreKeyUpload: Encodable {
-    public let keyId: Int
-    public let publicKey: String
-    public let signature: String
+struct PreKeyUpload: Encodable {
+    let keyId: Int
+    let publicKey: String
 }
 
-public struct PreKeyUpload: Encodable {
-    public let keyId: Int
-    public let publicKey: String
+struct DeviceKeysUpload: Encodable {
+    let identityKey: String
+    let registrationId: Int
+    let signedPreKey: SignedPreKeyUpload
+    let oneTimePreKeys: [PreKeyUpload]
 }
 
-// MARK: - PreKey Bundles
+struct PreKeyBundleResponse: Decodable {
+    let deviceId: String
+    let registrationId: Int
+    let identityKey: String
+    let signedPreKey: SignedPreKeyData
+    let oneTimePreKey: PreKeyData?
 
-public struct PreKeyBundleResponse: Decodable {
-    public let deviceId: String
-    public let registrationId: Int
-    public let identityKey: String
-    public let signedPreKey: SignedPreKeyData
-    public let oneTimePreKey: PreKeyData?
-
-    public struct SignedPreKeyData: Decodable {
-        public let keyId: Int
-        public let publicKey: String
-        public let signature: String
+    struct SignedPreKeyData: Decodable {
+        let keyId: Int
+        let publicKey: String
+        let signature: String
     }
 
-    public struct PreKeyData: Decodable {
-        public let keyId: Int
-        public let publicKey: String
+    struct PreKeyData: Decodable {
+        let keyId: Int
+        let publicKey: String
     }
 }
 
-// MARK: - Attachments
-
-public struct AttachmentResponse: Decodable {
-    public let id: String
+struct AttachmentResponse: Decodable {
+    let id: String
 }
 
-// MARK: - Gateway
-
-public struct GatewayTicketResponse: Decodable {
-    public let ticket: String
+struct GatewayTicketResponse: Decodable {
+    let ticket: String
 }

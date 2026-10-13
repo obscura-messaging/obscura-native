@@ -19,9 +19,11 @@ final class FriendCodeTests: XCTestCase {
         XCTAssertEqual(decoded.username, "✨nolan✨")
     }
 
-    func testDecodeToleratesWhitespace() throws {
+    func testDecodeIgnoresWhitespaceAndSoftHyphensAnywhere() throws {
         let encoded = FriendCode.encode(userId: "uid", username: "alice")
-        let decoded = try FriendCode.decode("  \n\(encoded)\t  ")
+        let middle = encoded.index(encoded.startIndex, offsetBy: 6)
+        let mangled = "  \n" + encoded[..<middle] + "\u{00AD} \n\u{00AD}" + encoded[middle...] + "\t  "
+        let decoded = try FriendCode.decode(mangled)
         XCTAssertEqual(decoded.username, "alice")
     }
 
@@ -33,7 +35,7 @@ final class FriendCodeTests: XCTestCase {
     }
 
     func testDecodeRejectsEmptyString() {
-        XCTAssertThrowsError(try FriendCode.decode(""))
+        XCTAssertThrowsError(try FriendCode.decode("")) { XCTAssertEqual($0 as? ObscuraError, .invalidFriendCode) }
     }
 
     func testDecodeRejectsNonBase64Garbage() {
@@ -44,5 +46,13 @@ final class FriendCodeTests: XCTestCase {
         // Valid base64, valid JSON, but no "u"/"n" keys.
         let empty = Data("{}".utf8).base64EncodedString()
         XCTAssertThrowsError(try FriendCode.decode(empty))
+    }
+
+    func testDecodeRejectsBlankIdentityOrUsername() {
+        for (userId, username) in [("", "alice"), (" \n", "alice"), ("uid", ""), ("uid", " \t")] {
+            XCTAssertThrowsError(try FriendCode.decode(FriendCode.encode(userId: userId, username: username))) {
+                XCTAssertEqual($0 as? ObscuraError, .invalidFriendCode)
+            }
+        }
     }
 }
