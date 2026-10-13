@@ -69,14 +69,12 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
     }
 
     /** Decrypt with the session of [senderDeviceId]. A valid MAC authenticates that device. */
-    suspend fun decrypt(senderDeviceId: String, message: ByteString): ClientMessage = withContext(dispatcher) {
+    suspend fun decrypt(senderDeviceId: String, message: ByteString): ByteArray = withContext(dispatcher) {
         val encrypted = EncryptedMessage.parseFrom(message)
         val content = encrypted.content.toByteArray()
         val cipher = SessionCipher(signalStore, addressFor(senderDeviceId))
-        ClientMessage.parseFrom(
-            if (encrypted.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE) cipher.decrypt(PreKeySignalMessage(content))
-            else cipher.decrypt(SignalMessage(content))
-        )
+        if (encrypted.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE) cipher.decrypt(PreKeySignalMessage(content))
+        else cipher.decrypt(SignalMessage(content))
     }
 
     companion object {

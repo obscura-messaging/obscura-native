@@ -1,6 +1,7 @@
 package dev.barrelmaker.obscura.kit.network
 
 import dev.barrelmaker.obscura.kit.crypto.fromBase64Url
+import dev.barrelmaker.obscura.kit.ObscuraError
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -29,19 +30,19 @@ internal data class DeviceKeys(
 /** [deviceId] is present only for a device-scoped token. */
 internal data class AuthResponse(val token: String, val refreshToken: String, val deviceId: String?) {
     companion object {
-        fun from(json: JSONObject) = AuthResponse(
-            token = json.getString("token"),
-            refreshToken = json.getString("refreshToken"),
-            deviceId = json.optString("deviceId").ifEmpty { null },
-        )
+        fun from(json: JSONObject): AuthResponse {
+            val token = json.optString("token")
+            val refreshToken = json.optString("refreshToken")
+            if (token.isBlank() || refreshToken.isBlank()) throw ObscuraError.ProtocolViolation("Missing session tokens")
+            return AuthResponse(token, refreshToken, json.optString("deviceId").ifBlank { null })
+        }
     }
 }
 
 /** The claims this kit reads from an access token. It never verifies the signature; the server does. */
 internal object Jwt {
-    fun userId(token: String): String = requireNotNull(claims(token)?.optString("sub")?.ifEmpty { null }) {
-        "access token has no subject"
-    }
+    fun userId(token: String): String = claims(token)?.optString("sub")?.takeIf { it.isNotBlank() }
+        ?: throw ObscuraError.ProtocolViolation("Access token has no subject")
 
     /** Expiry in epoch seconds, or null when the token has none or cannot be read. */
     fun expiresAt(token: String): Long? = claims(token)?.optLong("exp")?.takeIf { it > 0 }

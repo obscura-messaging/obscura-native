@@ -17,10 +17,10 @@ internal object FriendCode {
         val json = try {
             JSONObject(String(cleaned.fromBase64()))
         } catch (e: Exception) {
-            throw IllegalArgumentException("Invalid friend code", e)
+            throw ObscuraError.InvalidFriendCode()
         }
         val decoded = Decoded(json.optString("u"), json.optString("n"))
-        require(decoded.userId.isNotEmpty() && decoded.username.isNotEmpty()) { "Invalid friend code" }
+        if (decoded.userId.isBlank() || decoded.username.isBlank()) throw ObscuraError.InvalidFriendCode()
         return decoded
     }
 }

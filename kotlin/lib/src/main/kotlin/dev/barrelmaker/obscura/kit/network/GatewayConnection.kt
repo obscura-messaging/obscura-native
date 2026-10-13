@@ -1,6 +1,7 @@
 package dev.barrelmaker.obscura.kit.network
 
 import dev.barrelmaker.obscura.kit.ConnectionState
+import dev.barrelmaker.obscura.kit.ObscuraError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -72,7 +73,7 @@ internal class GatewayConnection(
                 open(attempt)
             } catch (e: Exception) {
                 synchronized(lock) { if (abandon(attempt)) _state.value = ConnectionState.DISCONNECTED }
-                throw e
+                throw connectionError(e)
             }
         }
         attempt.await()
@@ -85,16 +86,18 @@ internal class GatewayConnection(
             reconnectJob = null
             reconnectAttempts = 0
             _state.value = ConnectionState.DISCONNECTED
+            while (envelopes.tryReceive().isSuccess) {}
+            while (preKeyStatus.tryReceive().isSuccess) {}
             (socket to pending).also { socket = null; pending = null }
         }
-        attempt?.completeExceptionally(IllegalStateException("disconnected"))
+        attempt?.completeExceptionally(ObscuraError.ConnectionFailed("Disconnected"))
         closing?.close(1000, null)
     }
 
     fun ack(envelopeId: com.google.protobuf.ByteString) {
         val frame = WebSocketFrame.newBuilder().setAck(AckMessage.newBuilder().addMessageIds(envelopeId)).build()
-        val ws = synchronized(lock) { socket } ?: error("not connected")
-        check(ws.send(frame.toByteArray().toByteString())) { "socket is closing" }
+        val ws = synchronized(lock) { socket } ?: throw ObscuraError.ConnectionFailed("Not connected")
+        if (!ws.send(frame.toByteArray().toByteString())) throw ObscuraError.ConnectionFailed("Socket is closing")
     }
 
     private suspend fun open(attempt: CompletableDeferred<Unit>) {
@@ -102,14 +105,19 @@ internal class GatewayConnection(
             beforeConnect()
             val url = api.gatewayUrl(api.fetchGatewayTicket())
             synchronized(lock) {
-                check(pending === attempt) { "disconnected" }
+                if (pending !== attempt) throw ObscuraError.ConnectionFailed("Disconnected")
                 socket = http.newWebSocket(Request.Builder().url(url).build(), Listener(++generation, attempt))
             }
             attempt.await()
         } catch (e: Exception) {
-            attempt.completeExceptionally(e)
+            attempt.completeExceptionally(connectionError(e))
             throw e
         }
+    }
+
+    private fun connectionError(cause: Exception): Exception = when (cause) {
+        is CancellationException, is ObscuraError -> cause
+        else -> ObscuraError.ConnectionFailed(cause.message ?: cause.javaClass.simpleName, cause)
     }
 
     /** Forget a failed attempt and its socket. False when a disconnect or newer attempt already did. */
@@ -168,13 +176,31 @@ internal class GatewayConnection(
             val frame = try {
                 WebSocketFrame.parseFrom(bytes.toByteArray())
             } catch (e: Exception) {
-                log("GATEWAY dropped an undecodable frame (${bytes.size} bytes): ${e.message}")
+                log("GATEWAY undecodable frame (${bytes.size} bytes): ${e.message}")
+                ended(ObscuraError.ProtocolViolation("Undecodable gateway frame", e))
+                webSocket.cancel()
                 return
             }
-            when {
-                frame.hasEnvelopeBatch() -> frame.envelopeBatch.envelopesList.forEach { envelopes.trySend(it) }
-                frame.hasPreKeyStatus() -> preKeyStatus.trySend(frame.preKeyStatus)
+            if (!frame.hasEnvelopeBatch() && !frame.hasPreKeyStatus()) {
+                log("GATEWAY invalid server frame: ${frame.payloadCase}")
+                ended(ObscuraError.ProtocolViolation("Unexpected gateway frame: ${frame.payloadCase}"))
+                webSocket.cancel()
+                return
             }
+            synchronized(lock) {
+                if (!isCurrent()) return
+                when {
+                    frame.hasEnvelopeBatch() -> frame.envelopeBatch.envelopesList.forEach { envelopes.trySend(it) }
+                    frame.hasPreKeyStatus() -> preKeyStatus.trySend(frame.preKeyStatus)
+                }
+            }
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            if (!synchronized(lock) { isCurrent() }) return
+            log("GATEWAY invalid text frame (${text.length} characters)")
+            ended(ObscuraError.ProtocolViolation("Gateway sent a text frame"))
+            webSocket.cancel()
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -189,6 +215,7 @@ internal class GatewayConnection(
         private fun ended(cause: Throwable) {
             val wasOpen = synchronized(lock) {
                 if (!isCurrent()) return
+                this@GatewayConnection.generation++
                 socket = null
                 _state.value == ConnectionState.CONNECTED
             }
@@ -196,7 +223,9 @@ internal class GatewayConnection(
                 log("GATEWAY dropped: ${cause.message}")
                 scheduleReconnect()
             } else {
-                attempt.completeExceptionally(cause)
+                attempt.completeExceptionally(
+                    if (cause is ObscuraError) cause else ObscuraError.ConnectionFailed(cause.message ?: "Gateway closed", cause)
+                )
             }
         }
     }

@@ -46,12 +46,12 @@ class SubmissionResultsTest {
         val a = submission()
         val failure = SendMessageResponse.FailedSubmission.newBuilder()
             .setSubmissionId(submission().submissionId).build()
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows(dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation::class.java) {
             decodeSubmissionResults("user", listOf(a),
                 SendMessageResponse.newBuilder().addFailedSubmissions(failure).build())
         }
         val duplicate = failure.toBuilder().setSubmissionId(a.submissionId).build()
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows(dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation::class.java) {
             decodeSubmissionResults("user", listOf(a), SendMessageResponse.newBuilder()
                 .addFailedSubmissions(duplicate).addFailedSubmissions(duplicate).build())
         }

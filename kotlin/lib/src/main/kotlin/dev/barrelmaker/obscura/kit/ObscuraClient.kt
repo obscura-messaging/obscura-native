@@ -32,6 +32,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -55,7 +56,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedDeque
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The kit. With [driver] null the kit opens [ObscuraConfig.databasePath] (or an in-memory database)
@@ -74,7 +74,7 @@ class ObscuraClient(
     internal val db: ObscuraDatabase
 
     init {
-        require(driver == null || config.databasePath == null) { "Pass either a driver or a databasePath, not both" }
+        if (driver != null && config.databasePath != null) throw ObscuraError.InvalidArgument("Pass either a driver or a databasePath, not both")
         sqlDriver = driver ?: JdbcSqliteDriver(config.databasePath?.let { "jdbc:sqlite:$it" } ?: JdbcSqliteDriver.IN_MEMORY)
             .also { ObscuraDatabase.Schema.create(it) }
         // EntryStore.erase relies on freed pages being zeroed.
@@ -102,10 +102,13 @@ class ObscuraClient(
         auth = AuthManager(
             api, signalStore, devices, sessionStorage, config.deviceName, scope,
             logger = { logger },
-            onRejected = { endSession(revoke = false) },
+            onRejected = { credentials, generation -> endSession(revoke = false, expected = credentials, expectedGeneration = generation) },
         )
         authRef = auth
-        gateway = GatewayConnection(api, scope, beforeConnect = ::requireFreshToken, log = ::log)
+        gateway = GatewayConnection(api, scope, beforeConnect = {
+            val self = requireFreshToken()
+            refreshOwnDirectory(self)
+        }, log = ::log)
         messenger = Messenger(signalStore, api)
         sender = MessageSender(api, messenger, devices) { auth.credentials?.deviceId }
     }
@@ -167,25 +170,37 @@ class ObscuraClient(
         logout()
         withContext(Dispatchers.IO) {
             db.transaction {
+                sqlDriver.pragma("PRAGMA secure_delete = ON")
                 db.friendQueries.deleteAll()
                 db.deviceQueries.deleteAll()
                 db.deviceQueries.deleteIdentity()
                 db.modelEntryQueries.deleteAllEntries()
                 db.inboxQueries.deleteAll()
+                signalStore.clear()
             }
-            signalStore.clear()
+            sqlDriver.pragma("PRAGMA wal_checkpoint(TRUNCATE)")
         }
     }
 
-    private suspend fun endSession(revoke: Boolean) {
-        gateway.disconnect()
-        synchronized(this) {
-            receiveJob?.cancel()
-            receiveJob = null
+    private suspend fun endSession(revoke: Boolean, expected: Credentials? = null, expectedGeneration: Long? = null) {
+        val previous = try {
+            auth.end(expected, expectedGeneration)
+        } finally {
+            if (auth.credentials == null) {
+                gateway.disconnect()
+                val stopping = synchronized(this) {
+                    val jobs = listOfNotNull(receiveJob, replenishJob)
+                    jobs.forEach { it.cancel() }
+                    receiveJob = null
+                    replenishJob = null
+                    jobs
+                }
+                withContext(NonCancellable) { stopping.forEach { it.join() } }
+                typing.clear()
+            }
         }
-        if (revoke) auth.revoke()
-        typing.clear()
-        auth.end()
+        if (expected != null && previous == null) return
+        if (revoke && previous != null) auth.revoke(previous)
         log("SESSION ended")
     }
 
@@ -209,7 +224,7 @@ class ObscuraClient(
     }
 
     private var receiveJob: Job? = null
-    private val replenishing = AtomicBoolean(false)
+    private var replenishJob: Job? = null
     private val processedEnvelopes = MutableStateFlow(0L)
     @Volatile private var lastProcessedAtMs = 0L
 
@@ -226,7 +241,7 @@ class ObscuraClient(
     }
 
     /** Persist, then ack. Anything that fails before the ack leaves the envelope on the server. */
-    private suspend fun receive(envelope: Envelope) {
+    internal suspend fun receive(envelope: Envelope, ack: suspend (ByteString) -> Unit = { gateway.ack(it) }) {
         val envelopeId = UuidCodec.uuidString(envelope.id)
         val senderUserId = UuidCodec.uuidString(envelope.senderId)
         val senderDeviceId = UuidCodec.uuidString(envelope.senderDeviceId)
@@ -234,13 +249,40 @@ class ObscuraClient(
             log("RECV malformed envelope (id, sender or sender device is not 16 bytes); not acked")
             return
         }
-        val message = try {
+        try {
+            if (inbox.contains(envelopeId)) {
+                ack(envelope.id)
+                markProcessed()
+                return
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV duplicate lookup or ack failed for $envelopeId: ${e.message}")
+            return
+        }
+        val plaintext = try {
             messenger.decrypt(senderDeviceId, envelope.message)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             log("RECV decrypt failed from $senderUserId: ${e.message}")
             logger.decryptFailed(senderUserId, e.message ?: e.javaClass.simpleName)
+            return
+        }
+        try {
+            devices.add(senderUserId, senderDeviceId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV sender directory not stored: ${e.message}")
+            logger.databaseError("devices", "receive", e.message ?: e.javaClass.simpleName)
+            return
+        }
+        val message = try {
+            ClientMessage.parseFrom(plaintext)
+        } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
+            log("RECV invalid client message from $senderUserId: ${e.message}; not acked")
             return
         }
         try {
@@ -254,11 +296,17 @@ class ObscuraClient(
         }
         replenishPreKeys { signalStore.getPreKeyCount() < PREKEY_MIN_COUNT }
         try {
-            gateway.ack(envelope.id)
+            ack(envelope.id)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             log("RECV ack failed for $envelopeId: ${e.message}")
             logger.ackFailed(envelopeId, e.message ?: e.javaClass.simpleName)
         }
+        markProcessed()
+    }
+
+    private fun markProcessed() {
         lastProcessedAtMs = System.currentTimeMillis()
         processedEnvelopes.value++
     }
@@ -324,17 +372,15 @@ class ObscuraClient(
     }
 
     /** At most one replenish in flight; a backlog of envelopes would otherwise upload the same ids N times. */
-    private fun replenishPreKeys(needed: () -> Boolean) {
-        if (!replenishing.compareAndSet(false, true)) return
-        scope.launch {
+    private fun replenishPreKeys(needed: () -> Boolean) = synchronized(this) {
+        if (auth.credentials == null || replenishJob?.isActive == true) return
+        replenishJob = scope.launch {
             try {
                 if (needed()) api.uploadDeviceKeys(SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 logger.preKeyReplenishFailed(e.message ?: e.javaClass.simpleName)
-            } finally {
-                replenishing.set(false)
             }
         }
     }
@@ -408,12 +454,27 @@ class ObscuraClient(
         }
         val recipients = recipientUserIds.distinct().filter { it != self.userId }
             .flatMap { sender.send(it, message, acceptedDeviceIds) }
-        return SendReport(recipients, sender.send(self.userId, message, acceptedDeviceIds))
+        val ownIds = try {
+            fetchOwnDirectory()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return SendReport(recipients, listOf(SubmissionResult(self.userId, null, SubmissionStatus.UNKNOWN, e.message ?: e.javaClass.simpleName)))
+        }
+        val selfSync = try {
+            storeOwnDirectory(self, ownIds)
+            sender.send(self.userId, message, acceptedDeviceIds)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            listOf(SubmissionResult(self.userId, null, SubmissionStatus.REJECTED, e.message ?: e.javaClass.simpleName))
+        }
+        return SendReport(recipients, selfSync)
     }
 
     /** Throttled per (context, state). A recipient that cannot be reached is logged and skipped. */
     suspend fun sendTyping(recipientUserIds: List<String>, contextId: String, state: TypingState) {
-        require(contextId.isNotBlank()) { "contextId must not be blank" }
+        if (contextId.isBlank()) throw ObscuraError.InvalidArgument("contextId must not be blank")
         val self = auth.requireCredentials()
         if (!typing.shouldSend(contextId, state)) return
         requireFreshToken()
@@ -435,7 +496,10 @@ class ObscuraClient(
     }
 
     /** The ids of users typing in [contextId], sorted. Each expires 5 s after its last signal. */
-    fun observeTyping(contextId: String): Flow<List<String>> = typing.observe(contextId)
+    fun observeTyping(contextId: String): Flow<List<String>> {
+        if (contextId.isBlank()) throw ObscuraError.InvalidArgument("contextId must not be blank")
+        return typing.observe(contextId)
+    }
 
     suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload {
         val encrypted = AttachmentCrypto.encrypt(plaintext)
@@ -458,7 +522,7 @@ class ObscuraClient(
 
     internal suspend fun befriend(targetUserId: String, targetUsername: String) {
         val self = requireFreshToken()
-        require(targetUserId != self.userId) { "Cannot befriend yourself" }
+        if (targetUserId == self.userId) throw ObscuraError.InvalidArgument("Cannot befriend yourself")
         val existing = friends.get(targetUserId)
         when (existing?.status) {
             FriendStatus.ACCEPTED -> return
@@ -471,7 +535,7 @@ class ObscuraClient(
 
     suspend fun acceptFriend(userId: String) {
         requireFreshToken()
-        requireNotNull(friends.get(userId)) { "No friend request from $userId" }
+        if (friends.get(userId) == null) throw ObscuraError.InvalidArgument("No friend request from $userId")
         sender.sendOrThrow(userId, clientMessage { setFriendAccept(friendAccept {}) })
         friends.updateStatus(userId, FriendStatus.ACCEPTED)
     }
@@ -483,6 +547,26 @@ class ObscuraClient(
     }
 
     suspend fun getFriends(): List<FriendData> = friends.getAll()
+
+    private suspend fun refreshOwnDirectory(self: Credentials) {
+        storeOwnDirectory(self, fetchOwnDirectory())
+    }
+
+    private suspend fun fetchOwnDirectory(): List<String> =
+        try {
+            api.fetchOwnDeviceIds()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("DIRECTORY own refresh failed: ${e.message}")
+            throw e
+        }
+
+    private suspend fun storeOwnDirectory(self: Credentials, ids: List<String>) {
+        if (auth.credentials?.deviceId == self.deviceId && auth.credentials?.userId == self.userId) {
+            devices.replace(self.userId, ids)
+        }
+    }
 
     private fun clientMessage(build: ClientMessage.Builder.() -> Unit): ClientMessage =
         ClientMessage.newBuilder().setTimestamp(System.currentTimeMillis()).apply(build).build()

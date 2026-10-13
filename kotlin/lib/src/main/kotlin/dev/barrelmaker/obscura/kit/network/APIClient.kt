@@ -17,7 +17,8 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /** The REST API. Authenticated calls use [token]; a missing token is [ObscuraError.NotAuthenticated]. */
-internal class APIClient(private val baseUrl: String, private val token: () -> String?) {
+internal class APIClient(baseUrl: String, private val token: () -> String?) {
+    private val baseUrl = baseUrl.trimEnd('/')
 
     private val http = OkHttpClient.Builder()
         // ObscuraConfig allows http:// only for loopback.
@@ -48,8 +49,8 @@ internal class APIClient(private val baseUrl: String, private val token: () -> S
         json("POST", "/v1/sessions/refresh", JSONObject().put("refreshToken", refreshToken), bearer = null)
     )
 
-    suspend fun logout(refreshToken: String) {
-        send("DELETE", "/v1/sessions", JSONObject().put("refreshToken", refreshToken).body(), requireToken())
+    suspend fun logout(refreshToken: String, bearer: String) {
+        send("DELETE", "/v1/sessions", JSONObject().put("refreshToken", refreshToken).body(), bearer)
     }
 
     suspend fun registerPushToken(pushToken: String) {
@@ -62,6 +63,21 @@ internal class APIClient(private val baseUrl: String, private val token: () -> S
 
     suspend fun fetchPreKeyBundles(userId: String): JSONArray =
         JSONArray(String(send("GET", "/v1/users/${enc(userId)}", null, requireToken())))
+
+    suspend fun fetchOwnDeviceIds(): List<String> {
+        val bytes = send("GET", "/v1/devices", null, requireToken())
+        try {
+            val response = JSONObject(String(bytes))
+            val devices = response.getJSONArray("devices")
+            return (0 until devices.length()).map { devices.getJSONObject(it).getString("deviceId") }.also { ids ->
+                if (ids.any { runCatching { UUID.fromString(it) }.isFailure } || ids.distinct().size != ids.size) {
+                    throw ObscuraError.ProtocolViolation("Invalid own-device directory")
+                }
+            }
+        } catch (e: org.json.JSONException) {
+            throw ObscuraError.ProtocolViolation("Invalid own-device directory", e)
+        }
+    }
 
     /** The idempotency key is derived from the body, so a retried batch cannot be delivered twice. */
     suspend fun sendMessage(protobuf: ByteArray): ByteArray = send(
@@ -81,8 +97,14 @@ internal class APIClient(private val baseUrl: String, private val token: () -> S
 
     private fun requireToken(): String = token() ?: throw ObscuraError.NotAuthenticated()
 
-    private suspend fun json(method: String, path: String, body: JSONObject, bearer: String?): JSONObject =
-        JSONObject(String(send(method, path, body.body(), bearer)))
+    private suspend fun json(method: String, path: String, body: JSONObject, bearer: String?): JSONObject {
+        val bytes = send(method, path, body.body(), bearer)
+        return try {
+            JSONObject(String(bytes))
+        } catch (e: org.json.JSONException) {
+            throw ObscuraError.ProtocolViolation("Invalid JSON response for $path", e)
+        }
+    }
 
     /** Retries 429 and 503 after `Retry-After`; any other non-2xx is [ObscuraError.Http]. */
     private suspend fun send(

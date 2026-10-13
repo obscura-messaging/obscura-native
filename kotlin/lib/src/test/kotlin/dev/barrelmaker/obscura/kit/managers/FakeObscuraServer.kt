@@ -134,7 +134,7 @@ class FakeDevice internal constructor(
     suspend fun receive(): List<Received> = mailbox.toList().also { mailbox.clear() }.map { envelope ->
         val encrypted = EncryptedMessage.parseFrom(envelope.message)
         Received(
-            messenger.decrypt(UuidCodec.uuidString(envelope.senderDeviceId)!!, envelope.message),
+            ClientMessage.parseFrom(messenger.decrypt(UuidCodec.uuidString(envelope.senderDeviceId)!!, envelope.message)),
             encrypted.type,
             if (encrypted.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE) {
                 ByteString.copyFrom(PreKeySignalMessage(encrypted.content.toByteArray()).baseKey.serialize())

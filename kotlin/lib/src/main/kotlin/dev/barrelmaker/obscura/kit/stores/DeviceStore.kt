@@ -13,6 +13,10 @@ internal class DeviceStore(private val db: ObscuraDatabase) {
 
     suspend fun getIdentity(): String? = withContext(dispatcher) { queries.selectIdentity().executeAsOneOrNull() }
 
+    suspend fun add(userId: String, deviceId: String) = withContext(dispatcher) {
+        queries.insert(userId, deviceId)
+    }
+
     suspend fun devicesOf(userId: String): List<String> = withContext(dispatcher) {
         queries.selectByUser(userId).executeAsList()
     }

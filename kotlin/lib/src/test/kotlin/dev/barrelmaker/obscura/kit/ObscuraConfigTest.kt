@@ -15,7 +15,7 @@ class ObscuraConfigTest {
     @Test
     fun `plain http and other schemes are rejected`() {
         for (url in listOf("http://obscura.example.com", "ws://example.com", "file:///etc/passwd", "")) {
-            assertThrows(IllegalArgumentException::class.java, { config(url) }, url)
+            assertThrows(ObscuraError.InvalidArgument::class.java, { config(url) }, url)
         }
     }
 
@@ -33,15 +33,15 @@ class ObscuraConfigTest {
             "http://127.0.0.1.evil.com",
             "http://127.0.0.1@evil.com/api",
         )) {
-            assertThrows(IllegalArgumentException::class.java, { config(url) }, url)
+            assertThrows(ObscuraError.InvalidArgument::class.java, { config(url) }, url)
         }
     }
 
     @Test
     fun `a driver and a database path together are rejected`() {
         val driver = app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver(app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver.IN_MEMORY)
-        assertThrows(IllegalArgumentException::class.java) {
-            ObscuraClient(ObscuraConfig("https://x.test", "Test", databasePath = "/tmp/x.db"), driver, MemoryStorage())
+        assertThrows(ObscuraError.InvalidArgument::class.java) {
+            ObscuraClient(ObscuraConfig("https://x.test", "Test", databasePath = "build/x.db"), driver, MemoryStorage())
         }
     }
 }

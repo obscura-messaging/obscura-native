@@ -87,6 +87,21 @@ class GatewayConnectionTest {
     }
 
     @Test
+    fun `explicit connect during backoff connects now and all joiners finish once`() = runBlocking {
+        enqueueGateway { it.close(1000, "going away") }
+        enqueueGateway()
+        gateway.connect()
+        withTimeout(5_000) { gateway.state.first { it == ConnectionState.RECONNECTING } }
+
+        withTimeout(900) { List(5) { async { gateway.connect() } }.awaitAll() }
+        delay(1_200)
+
+        assertEquals(ConnectionState.CONNECTED, gateway.state.value)
+        assertEquals(4, server.requestCount)
+        assertEquals(2, beforeConnectCalls.get())
+    }
+
+    @Test
     fun `a client disconnect does not reconnect`() = runBlocking {
         enqueueGateway()
         enqueueGateway()
@@ -100,18 +115,36 @@ class GatewayConnectionTest {
     }
 
     @Test
-    fun `an undecodable frame is logged and the socket stays open`() = runBlocking {
+    fun `an undecodable frame is logged and reconnects rather than being swallowed`() = runBlocking {
         enqueueGateway { it.send(byteArrayOf(-1, -1, -1).toByteString()) }
+        enqueueGateway()
 
         gateway.connect()
         withTimeout(5_000) { while (logs.none { it.contains("undecodable frame") }) delay(10) }
 
-        assertEquals(ConnectionState.CONNECTED, gateway.state.value)
+        withTimeout(5_000) {
+            while (server.requestCount < 4 || gateway.state.value != ConnectionState.CONNECTED) delay(10)
+        }
     }
 
     @Test
     fun `ack without a socket throws`() {
         val error = runCatching { gateway.ack(com.google.protobuf.ByteString.EMPTY) }.exceptionOrNull()
-        assertTrue(error is IllegalStateException)
+        assertTrue(error is dev.barrelmaker.obscura.kit.ObscuraError.ConnectionFailed)
+    }
+
+    @Test
+    fun `empty and textual frames are logged and reconnect rather than silently dropped`() = runBlocking {
+        for (textual in listOf(false, true)) {
+            val previousRequests = server.requestCount
+            enqueueGateway { if (textual) it.send("not protobuf") else it.send(byteArrayOf().toByteString()) }
+            enqueueGateway()
+            gateway.connect()
+            withTimeout(5_000) {
+                while (server.requestCount < previousRequests + 4 || gateway.state.value != ConnectionState.CONNECTED) delay(10)
+            }
+            assertTrue(logs.any { it.contains(if (textual) "invalid text frame" else "invalid server frame") })
+            gateway.disconnect()
+        }
     }
 }

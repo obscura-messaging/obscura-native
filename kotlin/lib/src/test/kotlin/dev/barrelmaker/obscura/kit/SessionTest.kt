@@ -52,7 +52,7 @@ class SessionTest {
     @Test
     fun `an incomplete blob is not restored and is cleared`() = runBlocking {
         val storage = MemoryStorage(mapOf("token" to "t", "userId" to "u"))
-        val c = newClient(url, storage)
+        val c = sessionClient(url, storage)
 
         assertFalse(c.restorePersistedSession())
         assertEquals(AuthState.LOGGED_OUT, c.authState.value)
@@ -62,7 +62,7 @@ class SessionTest {
     @Test
     fun `an unavailable server keeps the expired session, authenticated and disconnected`() = runBlocking {
         val storage = expiredSession()
-        val c = newClient(url, storage)
+        val c = sessionClient(url, storage)
 
         assertTrue(c.restorePersistedSession())
 
@@ -75,7 +75,7 @@ class SessionTest {
     fun `a rejected refresh token signs out and forgets the session`() = runBlocking {
         refreshStatus = 401
         val storage = expiredSession()
-        val c = newClient(url, storage)
+        val c = sessionClient(url, storage)
 
         assertFalse(c.restorePersistedSession())
 
@@ -88,7 +88,7 @@ class SessionTest {
     fun `a refresh persists the rotated refresh token`() = runBlocking {
         refreshStatus = 200
         val storage = expiredSession()
-        val c = newClient(url, storage)
+        val c = sessionClient(url, storage)
 
         assertTrue(c.restorePersistedSession())
 
@@ -101,7 +101,7 @@ class SessionTest {
     @Test
     fun `concurrent refreshes spend the refresh token once`() = runBlocking {
         refreshStatus = 200
-        val c = newClient(url, expiredSession())
+        val c = sessionClient(url, expiredSession())
         assertTrue(c.restorePersistedSession())
         refreshCalls.set(0)
 
@@ -114,7 +114,7 @@ class SessionTest {
     @Test
     fun `logout revokes best effort, clears storage and typing, keeps local data`() = runBlocking {
         val storage = storedSession()
-        val c = newClient(url, storage)
+        val c = sessionClient(url, storage)
         assertTrue(c.restorePersistedSession())
         c.route(friendRequest(), "019f025a-0000-7de6-84b6-000000000002", "dev", "env-1")
         c.route(typingStarted(), "019f025a-0000-7de6-84b6-000000000002", "dev", "env-2")
@@ -132,7 +132,7 @@ class SessionTest {
 
     @Test
     fun `wipe deletes every piece of local data`() = runBlocking {
-        val c = newClient(url, storedSession())
+        val c = sessionClient(url, storedSession())
         assertTrue(c.restorePersistedSession())
         c.signalStore.generateIdentity()
         c.devices.storeIdentity(SELF_DEVICE_ID)
@@ -169,7 +169,7 @@ class SessionTest {
     @Test
     fun `typing with a blank context is rejected`() = runBlocking {
         val c = authenticatedClient()
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows(ObscuraError.InvalidArgument::class.java) {
             runBlocking { c.sendTyping(listOf("u"), " ", TypingState.STARTED) }
         }
         Unit

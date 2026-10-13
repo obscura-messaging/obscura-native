@@ -42,6 +42,10 @@ class InboxStore internal constructor(
     private val dispatcher = Dispatchers.IO.limitedParallelism(1)
     private val queries = db.inboxQueries
 
+    internal suspend fun contains(envelopeId: String): Boolean = withContext(dispatcher) {
+        queries.existsByEnvelopeId(envelopeId).executeAsOne()
+    }
+
     /** True when a row was inserted, false when [InboxInsert.envelopeId] was already stored. */
     internal suspend fun put(record: InboxInsert): Boolean = withContext(dispatcher) {
         db.transactionWithResult {

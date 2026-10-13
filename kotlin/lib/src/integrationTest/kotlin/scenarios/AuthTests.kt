@@ -68,7 +68,7 @@ class AuthTests {
     @Test
     fun `a restarted client restores the stored session and receives what was queued`() = runBlocking {
         requireServer()
-        val dbPath = File.createTempFile("obscura_bob_", ".db").absolutePath
+        val dbPath = File("build/test-databases/${uniqueName("restore")}.db").also { it.parentFile.mkdirs() }.absolutePath
         val storage = MemoryStorage()
         val alice = registerAndConnect("restore_a")
         val bob1 = registerAndConnect("restore_b", newClient(databasePath = dbPath, storage = storage))
@@ -105,7 +105,8 @@ class AuthTests {
     fun `logout revokes the session so a stored copy cannot be restored`() = runBlocking {
         requireServer()
         val storage = MemoryStorage()
-        val client = registerAndConnect("logout", newClient(storage = storage))
+        val path = File("build/test-databases/${uniqueName("revoked")}.db").also { it.parentFile.mkdirs() }.absolutePath
+        val client = registerAndConnect("logout", newClient(databasePath = path, storage = storage))
         val stolen = storage.data!!
 
         client.logout()
@@ -114,8 +115,10 @@ class AuthTests {
         assertEquals(ConnectionState.DISCONNECTED, client.connectionState.value)
         assertNull(storage.data)
         // Force a refresh by presenting an expired access token with the revoked refresh token.
-        val copy = MemoryStorage(stolen + ("token" to "x.e30.x"))
-        assertFalse(newClient(storage = copy).restorePersistedSession())
+        val claims = """{"sub":"${stolen.getValue("userId")}","exp":1}"""
+        val expired = "e30.${java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(claims.toByteArray())}.sig"
+        val copy = MemoryStorage(stolen + ("token" to expired))
+        assertFalse(newClient(databasePath = path, storage = copy).restorePersistedSession())
         assertNull(copy.data)
     }
 

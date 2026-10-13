@@ -27,6 +27,8 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     /** Called with the address whose identity key changed (a peer reinstalled or re-keyed). */
     var onIdentityChanged: (String) -> Unit = {}
 
+    fun hasIdentity(): Boolean = localIdentity != null && queries.selectLocalIdentity().executeAsOneOrNull() != null
+
     fun generateIdentity(): Pair<IdentityKeyPair, Int> {
         val identity = IdentityKeyPair.generate() to KeyHelper.generateRegistrationId(false)
         queries.insertLocalIdentity(identity.first.serialize(), identity.second.toLong())

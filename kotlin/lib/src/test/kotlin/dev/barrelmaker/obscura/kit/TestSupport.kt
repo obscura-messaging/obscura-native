@@ -35,7 +35,13 @@ fun storedSession(token: String = jwt(SELF_USER_ID, FAR_FUTURE), refreshToken: S
 
 /** Authenticated through the stored-session path, with no server to connect to. */
 suspend fun authenticatedClient(storage: MemoryStorage = storedSession()): ObscuraClient {
-    val client = newClient(apiUrl = "http://127.0.0.1:1", storage = storage)
+    val client = sessionClient(apiUrl = "http://127.0.0.1:1", storage = storage)
     check(client.restorePersistedSession())
     return client
 }
+
+suspend fun sessionClient(apiUrl: String, storage: SessionStorage): ObscuraClient =
+    newClient(apiUrl, storage).also {
+        it.signalStore.generateIdentity()
+        it.devices.storeIdentity(SELF_DEVICE_ID)
+    }

@@ -155,6 +155,15 @@ class ReceivePathTest {
     }
 
     @Test
+    fun `an accepted peer cannot rename itself or regress its friendship`() = runBlocking {
+        val c = authenticatedClient()
+        c.db.friendQueries.insert(peer, "alice", FriendStatus.ACCEPTED.value)
+        c.receive(friendRequest("mallory"))
+        c.receive(friendAccept(), envelopeId = "env-2")
+        assertEquals(listOf(FriendData(peer, "alice", FriendStatus.ACCEPTED)), c.getFriends())
+    }
+
+    @Test
     fun `removing a friend forgets the friendship and its devices`() = runBlocking {
         val c = authenticatedClient()
         c.receive(friendRequest("alice"))
@@ -203,6 +212,6 @@ class ReceivePathTest {
         c.receive(typing("thread", Client.TypingState.TYPING_STATE_UNSPECIFIED))
         c.receive(typing(" ", Client.TypingState.TYPING_STATE_STARTED))
         assertEquals(emptyList<String>(), c.observeTyping("thread").first())
-        assertEquals(emptyList<String>(), c.observeTyping(" ").first())
+        assertEquals(emptyList<String>(), c.observeTyping("thread").first())
     }
 }

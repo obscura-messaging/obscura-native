@@ -49,6 +49,6 @@ class FriendCodeTest {
     @Test
     fun `decode rejects payload missing required fields`() {
         val empty = java.util.Base64.getEncoder().encodeToString("{}".toByteArray())
-        assertThrows(IllegalArgumentException::class.java) { FriendCode.decode(empty) }
+        assertThrows(ObscuraError.InvalidFriendCode::class.java) { FriendCode.decode(empty) }
     }
 }

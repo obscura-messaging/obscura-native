@@ -102,7 +102,7 @@ class FriendTests {
     fun `befriending yourself is rejected`() = runBlocking {
         requireServer()
         val alice = registerAndConnect("self")
-        assertThrows(IllegalArgumentException::class.java) { runBlocking { alice.addFriendByCode(alice.friendCode()) } }
+        assertThrows(ObscuraError.InvalidArgument::class.java) { runBlocking { alice.addFriendByCode(alice.friendCode()) } }
         alice.disconnect()
     }
 
@@ -111,7 +111,7 @@ class FriendTests {
         requireServer()
         val alice = registerAndConnect("ghost")
         val ghost = java.util.UUID.randomUUID().toString()
-        assertThrows(IllegalArgumentException::class.java) { runBlocking { alice.acceptFriend(ghost) } }
+        assertThrows(ObscuraError.InvalidArgument::class.java) { runBlocking { alice.acceptFriend(ghost) } }
         val error = runCatching { alice.befriend(ghost, "ghost") }.exceptionOrNull()
         assertEquals("SEND_FAILED", (error as ObscuraError).code)
         assertNull(alice.friendStatus(ghost))

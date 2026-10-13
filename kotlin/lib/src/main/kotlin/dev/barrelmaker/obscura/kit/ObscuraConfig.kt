@@ -9,8 +9,14 @@ data class ObscuraConfig(
     init {
         // Parse the host exactly: a prefix check would let "http://localhost@evil.com" send cleartext
         // to a remote host.
-        val host = runCatching { java.net.URI(apiUrl).host }.getOrNull()
-        val isLoopback = apiUrl.startsWith("http://") && (host == "localhost" || host == "127.0.0.1" || host == "[::1]")
-        require(apiUrl.startsWith("https://") || isLoopback) { "API URL must use HTTPS: $apiUrl" }
+        val uri = runCatching { java.net.URI(apiUrl) }.getOrNull()
+        val host = uri?.host
+        val isLoopback = uri?.scheme == "http" && host in setOf("localhost", "127.0.0.1", "[::1]")
+        if (host.isNullOrBlank() || uri?.userInfo != null || uri?.fragment != null || uri?.query != null ||
+            (uri?.port != -1 && uri?.port !in 1..65535) ||
+            !(uri?.scheme == "https" || isLoopback)
+        ) throw ObscuraError.InvalidArgument("API URL must use HTTPS (or loopback HTTP): $apiUrl")
+        if (deviceName.isBlank()) throw ObscuraError.InvalidArgument("deviceName must not be blank")
+        if (databasePath?.isBlank() == true) throw ObscuraError.InvalidArgument("databasePath must not be blank")
     }
 }

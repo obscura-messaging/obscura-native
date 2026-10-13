@@ -6,7 +6,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
 import java.io.File
 
 class EntryStoreTest {
@@ -159,7 +158,8 @@ class EntryStoreTest {
     }
 
     @Test
-    fun `erased content is not recoverable from the database or its WAL`(@TempDir dir: File) = runBlocking {
+    fun `erased content is not recoverable from the database or its WAL`() = runBlocking {
+        val dir = File("build/test-databases/erase-${java.util.UUID.randomUUID()}").also { it.mkdirs() }
         val path = File(dir, "erase.db")
         val driver = JdbcSqliteDriver("jdbc:sqlite:${path.absolutePath}")
         ObscuraDatabase.Schema.create(driver)
@@ -177,5 +177,17 @@ class EntryStoreTest {
 
         assertFalse(secrets.any(::onDisk), "erased content must not survive in the database or its WAL")
         driver.close()
+        dir.deleteRecursively()
+        Unit
+    }
+
+    @Test
+    fun `erase chunks more than SQLite parameter limit`() = runBlocking {
+        val ids = (1..1200).map { "entry-$it" }
+        ids.forEach { store.put("m", entry(it)) }
+        store.put("other", entry(ids.first()))
+        store.erase("m", ids)
+        assertTrue(store.all("m").isEmpty())
+        assertEquals(1, store.all("other").size)
     }
 }
