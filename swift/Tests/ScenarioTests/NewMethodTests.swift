@@ -46,11 +46,11 @@ final class NewMethodTests: XCTestCase {
         await rateLimitDelay()
 
         let result = await alice.client.ensureFreshToken()
-        XCTAssertTrue(result, "Should return true for a fresh token")
+        XCTAssertEqual(result, .fresh, "A just-issued token is fresh")
 
         let fresh = try ObscuraClient(apiURL: TestServer.apiURL)
         let noResult = await fresh.ensureFreshToken()
-        XCTAssertFalse(noResult, "Should return false with no token")
+        XCTAssertEqual(noResult, .rejected, "No token is not a session")
     }
 
     // MARK: - loginAndProvision
