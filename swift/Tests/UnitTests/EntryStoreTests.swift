@@ -180,7 +180,8 @@ final class EntryStoreTests: XCTestCase {
 
     /// The guarantee `erase` exists for: erased content is not recoverable from the database file.
     func testErasedContentIsNotRecoverableFromTheDatabaseFile() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent(".erase-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("erase.db").path
@@ -204,5 +205,45 @@ final class EntryStoreTests: XCTestCase {
         try await store.erase(model: "directMessage", ids: secrets.indices.map { "dm_\($0)" })
 
         XCTAssertFalse(secrets.contains(where: onDisk), "erased content must not survive in the database file")
+    }
+
+    func testEraseAndWipeZeroMainDatabaseAndTruncateWALWithSecureDeleteInitiallyOff() async throws {
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent(".wal-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("wal.db").path
+        let db = try DatabaseQueue(path: path)
+        try ObscuraDatabase.migrator.migrate(db)
+        try await db.writeWithoutTransaction {
+            XCTAssertEqual(try String.fetchOne($0, sql: "PRAGMA journal_mode = WAL"), "wal")
+            try $0.execute(sql: "PRAGMA wal_autocheckpoint = 0; PRAGMA secure_delete = OFF")
+        }
+        let store = EntryStore(db: db)
+        let secret = "WAL-ERASE-SECRET-7fa915"
+        let metadata = "WAL-OPAQUE-METADATA-39fda1"
+        func contains(_ path: String, _ value: String) -> Bool {
+            FileManager.default.contents(atPath: path)?.range(of: Data(value.utf8)) != nil
+        }
+        try await store.put(model: "m", entry: entry("erase", data: secret + String(repeating: "z", count: 6000),
+                                                   localMetadata: metadata))
+        XCTAssertTrue(contains(path + "-wal", secret), "control: plaintext must occur in the WAL")
+        try await db.writeWithoutTransaction { try $0.execute(sql: "PRAGMA wal_checkpoint(FULL)") }
+        XCTAssertTrue(contains(path, secret), "control: plaintext must occur in the database")
+        try await store.erase(model: "m", ids: ["erase"] + (0..<1200).map { "missing-\($0)" })
+        for file in [path, path + "-wal"] {
+            XCTAssertFalse(contains(file, secret))
+            XCTAssertFalse(contains(file, metadata))
+        }
+        XCTAssertEqual(FileManager.default.contents(atPath: path + "-wal")?.count ?? 0, 0)
+
+        try await store.put(model: "m", entry: entry("wipe", data: secret, localMetadata: metadata))
+        try await db.write { try $0.execute(sql: "PRAGMA secure_delete = OFF") }
+        try await ObscuraDatabase.wipe(db)
+        for file in [path, path + "-wal"] {
+            XCTAssertFalse(contains(file, secret))
+            XCTAssertFalse(contains(file, metadata))
+        }
+        XCTAssertEqual(FileManager.default.contents(atPath: path + "-wal")?.count ?? 0, 0)
     }
 }

@@ -35,6 +35,13 @@ public actor InboxStore {
         self.logger = logger
     }
 
+    func contains(envelopeId: String) async throws -> Bool {
+        try await db.read { db in
+            try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM inbox_rows WHERE envelope_id = ?)",
+                              arguments: [envelopeId]) == true
+        }
+    }
+
     /// Returns false when the envelope is already inboxed (a redelivery).
     func put(_ record: InboxInsert) async throws -> Bool {
         try await db.write { db in

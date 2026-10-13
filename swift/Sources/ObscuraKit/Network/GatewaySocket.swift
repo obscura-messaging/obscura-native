@@ -84,7 +84,15 @@ final class GatewaySocket: NSObject, URLSessionWebSocketDelegate, Sendable {
                 }
             }
         }
-        state.withLock { $0.loops = [receive, ping] }
+        let closed = state.withLock { state in
+            guard !state.closed else { return true }
+            state.loops = [receive, ping]
+            return false
+        }
+        if closed {
+            receive.cancel()
+            ping.cancel()
+        }
     }
 
     func acknowledge(_ envelopeId: Data) async throws {
@@ -123,6 +131,7 @@ final class GatewaySocket: NSObject, URLSessionWebSocketDelegate, Sendable {
             frame = try Obscura_V1_WebSocketFrame(serializedBytes: data)
         } catch {
             logger.log("gateway frame parse failed (\(data.count) bytes): \(error)")
+            finish(ObscuraError.protocolViolation("malformed gateway frame"))
             return
         }
         switch frame.payload {
@@ -141,10 +150,12 @@ final class GatewaySocket: NSObject, URLSessionWebSocketDelegate, Sendable {
     // MARK: - URLSessionWebSocketDelegate
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        state.withLock { state in
-            state.opening?.resume()
+        let opening = state.withLock { state in
+            let opening = state.opening
             state.opening = nil
+            return opening
         }
+        opening?.resume()
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,

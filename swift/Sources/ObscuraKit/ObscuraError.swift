@@ -8,7 +8,7 @@ public enum ObscuraError: Error, Equatable, LocalizedError {
     case connectionFailed(String)
     case sendFailed(String)
     case protocolViolation(String)
-    case keychain(status: Int32)
+    case storageFailed(String)
 
     public var code: String {
         switch self {
@@ -19,7 +19,7 @@ public enum ObscuraError: Error, Equatable, LocalizedError {
         case .connectionFailed: return "CONNECTION_FAILED"
         case .sendFailed: return "SEND_FAILED"
         case .protocolViolation: return "PROTOCOL_VIOLATION"
-        case .keychain: return "KEYCHAIN_ERROR"
+        case .storageFailed: return "STORAGE_ERROR"
         }
     }
 
@@ -32,7 +32,7 @@ public enum ObscuraError: Error, Equatable, LocalizedError {
         case .connectionFailed(let reason): return "Connection failed: \(reason)"
         case .sendFailed(let reason): return "Send failed: \(reason)"
         case .protocolViolation(let reason): return "Protocol violation: \(reason)"
-        case .keychain(let status): return "Keychain error \(status)"
+        case .storageFailed(let reason): return "Storage failed: \(reason)"
         }
     }
 }

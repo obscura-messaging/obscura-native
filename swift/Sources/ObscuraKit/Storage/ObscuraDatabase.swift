@@ -32,7 +32,18 @@ enum ObscuraDatabase {
 
     static func wipe(_ db: DatabaseQueue) async throws {
         try await db.write { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
             for table in tables { try db.execute(sql: "DELETE FROM \(table)") }
+        }
+        try await truncateWAL(db)
+    }
+
+    static func truncateWAL(_ db: DatabaseQueue) async throws {
+        try await db.writeWithoutTransaction { db in
+            let row = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            if let row, (row[0] as Int) != 0 {
+                throw ObscuraError.storageFailed("WAL checkpoint blocked by another database connection")
+            }
         }
     }
 

@@ -23,6 +23,7 @@ final class StateStream<Value: Sendable & Equatable>: Sendable {
     }
 
     private let state: Locked<State>
+    private let delivery = DispatchQueue(label: "ObscuraKit.state-delivery")
 
     init(_ initial: Value) {
         state = Locked(State(value: initial))
@@ -34,7 +35,8 @@ final class StateStream<Value: Sendable & Equatable>: Sendable {
         state.withLock { state in
             guard state.value != value else { return }
             state.value = value
-            for subscriber in state.subscribers.values { subscriber.yield(value) }
+            let subscribers = Array(state.subscribers.values)
+            delivery.async { subscribers.forEach { $0.yield(value) } }
         }
     }
 
@@ -42,7 +44,8 @@ final class StateStream<Value: Sendable & Equatable>: Sendable {
         AsyncStream { continuation in
             let id = UUID()
             state.withLock { state in
-                continuation.yield(state.value)
+                let value = state.value
+                delivery.async { continuation.yield(value) }
                 state.subscribers[id] = continuation
             }
             continuation.onTermination = { [state] _ in

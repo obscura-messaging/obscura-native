@@ -7,8 +7,9 @@ final class ClientTests: XCTestCase {
     private func signedIn() async throws -> ObscuraClient {
         let db = try ObscuraDatabase.inMemory()
         try PersistentSignalStore(db: db, logger: SilentLogger()).install(SignalKeys.generate())
+        try await DeviceStore(db: db).setLocalDeviceId("my-device")
         let client = try makeClient(database: db, storage: MemorySessionStorage([
-            "token": SessionRestoreTests.jwt(exp: Int(Date().timeIntervalSince1970) + 3600), "refreshToken": "rt",
+            "token": SessionRestoreTests.jwt(exp: Int(Date().timeIntervalSince1970) + 3600, userId: "me", deviceId: "my-device"), "refreshToken": "rt",
             "userId": "me", "deviceId": "my-device", "username": "me",
         ]))
         // The server is unreachable, so the session is restored offline.
@@ -46,6 +47,16 @@ final class ClientTests: XCTestCase {
         let client = try await signedIn()
         await assertThrows(.invalidArgument("blank contextId")) {
             try await client.sendTyping(to: ["x"], contextId: " \n", state: .started)
+        }
+
+        func testProvisioningAnExistingLocalDeviceRequiresAnExplicitWipe() async throws {
+            let client = try await signedIn()
+            let error = ObscuraError.invalidArgument("local device exists; wipeDevice before provisioning")
+            await assertThrows(error) { try await client.register("new-account", "password") }
+            await assertThrows(error) { try await client.loginAndProvision("new-account", "password") }
+            XCTAssertTrue(try client.signalStore.hasIdentity())
+            let deviceId = try await client.devices.localDeviceId()
+            XCTAssertEqual(deviceId, "my-device")
         }
     }
 
@@ -154,7 +165,7 @@ final class ClientTests: XCTestCase {
         let depth = try await client.inbox.depth()
         XCTAssertEqual(depth, 0)
 
-        await client.logout()
+        try await client.logout()
         let afterLogout = await typers.next()
         XCTAssertEqual(afterLogout, [], "typing state is cleared on logout")
     }

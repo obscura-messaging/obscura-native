@@ -47,4 +47,12 @@ final class FriendCodeTests: XCTestCase {
         let empty = Data("{}".utf8).base64EncodedString()
         XCTAssertThrowsError(try FriendCode.decode(empty))
     }
+
+    func testDecodeRejectsBlankIdentityOrUsername() {
+        for (userId, username) in [("", "alice"), (" \n", "alice"), ("uid", ""), ("uid", " \t")] {
+            XCTAssertThrowsError(try FriendCode.decode(FriendCode.encode(userId: userId, username: username))) {
+                XCTAssertEqual($0 as? ObscuraError, .invalidFriendCode)
+            }
+        }
+    }
 }

@@ -4,12 +4,14 @@ extension ObscuraClient {
     /// Returns once the gateway socket is open. Joins a connect in flight; cuts short a pending
     /// reconnect backoff. Safe to call on every app foreground.
     public func connect() async throws {
+        try Task.checkCancellation()
         guard session != nil else { throw ObscuraError.notAuthenticated }
         if connection.value == .connected { return }
         if let connectTask { return try await connectTask.value }
         reconnectTask?.cancel()
         reconnectTask = nil
-        let task = Task { try await self.openSocket() }
+        let generation = connectionGeneration
+        let task = Task { try await self.openSocket(generation) }
         connectTask = task
         defer { if connectTask == task { connectTask = nil } }
         try await task.value
@@ -24,16 +26,21 @@ extension ObscuraClient {
         connectTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
+        receiveTask?.cancel()
+        receiveTask = nil
         socket?.close()
         socket = nil
         connection.set(.disconnected)
     }
 
-    private func openSocket() async throws {
-        let generation = connectionGeneration
+    private func openSocket(_ generation: Int) async throws {
+        guard generation == connectionGeneration, !Task.isCancelled else { throw CancellationError() }
         connection.set(recovering ? .reconnecting : .connecting)
         do {
-            guard await freshToken() != .rejected else { throw ObscuraError.notAuthenticated }
+            guard try await freshToken() != .rejected else { throw ObscuraError.notAuthenticated }
+            guard generation == connectionGeneration else { throw CancellationError() }
+            try await refreshOwnDirectory()
+            guard generation == connectionGeneration else { throw CancellationError() }
             let socket = try await GatewaySocket.open(gatewayURL(ticket: api.fetchGatewayTicket()), logger: logger)
             guard generation == connectionGeneration, session != nil else {
                 socket.close()
@@ -44,6 +51,10 @@ extension ObscuraClient {
             logger.log("gateway connect failed: \(error)")
             if generation == connectionGeneration {
                 if recovering && session != nil { scheduleReconnect() } else { connection.set(.disconnected) }
+            }
+            if let error = error as? URLError {
+                if error.code == .cancelled { throw CancellationError() }
+                throw ObscuraError.connectionFailed(error.localizedDescription)
             }
             throw error
         }
@@ -64,7 +75,7 @@ extension ObscuraClient {
         recovering = false
         reconnectAttempts = 0
         connection.set(.connected)
-        Task { [weak self] in
+        receiveTask = Task { [weak self] in
             do {
                 for try await event in socket.events {
                     await self?.handle(event, from: socket)
@@ -106,16 +117,18 @@ extension ObscuraClient {
     // MARK: - Receive
 
     private func handle(_ event: GatewayEvent, from socket: GatewaySocket) async {
+        guard self.socket === socket, session != nil, !Task.isCancelled else { return }
         switch event {
         case .preKeyStatus(let count, let threshold):
             if count < threshold { replenishPreKeys() }
         case .envelope(let envelope):
-            await receive(envelope, from: socket)
+            await receive(envelope) { try await socket.acknowledge($0) }
         }
     }
 
     /// Persist, then ack. Anything that fails before the ack leaves the envelope on the server.
-    private func receive(_ envelope: Envelope, from socket: GatewaySocket) async {
+    func receive(_ envelope: Envelope, acknowledge: @Sendable (Data) async throws -> Void) async {
+        let generation = sessionGeneration
         guard let envelopeId = uuidString(envelope.id), let senderUserId = uuidString(envelope.senderId),
               let senderDeviceId = uuidString(envelope.senderDeviceId) else {
             logger.decryptFailed(sourceUserId: uuidString(envelope.senderId) ?? "unknown", reason:
@@ -123,16 +136,40 @@ extension ObscuraClient {
                 + "sender device \(envelope.senderDeviceId.count)); not acked")
             return
         }
-        let message: Obscura_Client_V1_ClientMessage
+        do {
+            if try await inbox.contains(envelopeId: envelopeId) {
+                do { try await acknowledge(envelope.id) }
+                catch { logger.ackFailed(envelopeId: envelopeId, reason: "\(error)") }
+                return
+            }
+        } catch {
+            logger.databaseError(store: "inbox", operation: "contains", reason: "\(error)")
+            return
+        }
+        let plaintext: Data
         do {
             let encrypted = try Obscura_Client_V1_EncryptedMessage(serializedBytes: envelope.message)
-            message = try Obscura_Client_V1_ClientMessage(
-                serializedBytes: await messenger.decrypt(senderDeviceUuid: senderDeviceId, encrypted))
+            plaintext = try await messenger.decrypt(senderDeviceUuid: senderDeviceId, encrypted)
         } catch {
             logger.decryptFailed(sourceUserId: senderUserId, reason: "\(error)")
             return
         }
         do {
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
+            try await devices.add(userId: senderUserId, deviceId: senderDeviceId)
+        } catch {
+            logger.databaseError(store: "devices", operation: "learnSender", reason: "\(error)")
+            return
+        }
+        let message: Obscura_Client_V1_ClientMessage
+        do {
+            message = try Obscura_Client_V1_ClientMessage(serializedBytes: plaintext)
+        } catch {
+            logger.log("client message parse failed from \(senderUserId): \(error); not acked")
+            return
+        }
+        do {
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
             if let modelKey = try await route(message, envelopeId: envelopeId, senderUserId: senderUserId,
                                               senderDeviceId: senderDeviceId) {
                 messageContinuation.yield(modelKey)
@@ -141,9 +178,10 @@ extension ObscuraClient {
             logger.databaseError(store: "receive", operation: WireCodec.messageKind(message.payload), reason: "\(error)")
             return
         }
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
         replenishPreKeysIfLow()
         do {
-            try await socket.acknowledge(envelope.id)
+            try await acknowledge(envelope.id)
         } catch {
             logger.ackFailed(envelopeId: envelopeId, reason: "\(error)")
         }
@@ -220,11 +258,13 @@ extension ObscuraClient {
 
     private func replenishPreKeys() {
         guard replenishTask == nil else { return }
-        replenishTask = Task { await self.performReplenish() }
+        let generation = sessionGeneration
+        replenishTask = Task { await self.performReplenish(generation) }
     }
 
-    private func performReplenish() async {
-        defer { replenishTask = nil }
+    private func performReplenish(_ generation: Int) async {
+        defer { if generation == sessionGeneration { replenishTask = nil } }
+        guard generation == sessionGeneration, session != nil, !Task.isCancelled else { return }
         do {
             try await api.uploadDeviceKeys(signalStore.addPreKeys(Self.preKeyReplenishCount))
         } catch {

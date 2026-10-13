@@ -59,6 +59,13 @@ final class APIClientTests: XCTestCase {
     func testCleartextIsRefusedExceptOnLoopback() {
         XCTAssertThrowsError(try APIClient(baseURL: "http://example.com"))
         XCTAssertNoThrow(try APIClient(baseURL: "http://localhost:3000"))
+        XCTAssertNoThrow(try APIClient(baseURL: "http://127.0.0.1:3000"))
+        XCTAssertNoThrow(try APIClient(baseURL: "http://[::1]:3000"))
+        XCTAssertNoThrow(try APIClient(baseURL: "HTTPS://EXAMPLE.COM"))
+        for url in ["http://localhost.evil.test", "http://127.0.0.1.evil.test", "http://localhost@evil.test",
+                    "http://127.0.0.10", "https://", "ftp://localhost", "https://user:pass@example.com"] {
+            XCTAssertThrowsError(try APIClient(baseURL: url), url)
+        }
     }
 }
 

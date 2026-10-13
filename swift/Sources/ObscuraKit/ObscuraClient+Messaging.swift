@@ -15,20 +15,61 @@ extension ObscuraClient {
         let data = try message.serializedData()
 
         let (userId, sender) = try await sendContext()
+        let generation = sessionGeneration
         var recipients: [SubmissionResult] = []
         for recipient in Self.distinct(recipientUserIds, excluding: userId) {
+            try Task.checkCancellation()
+            guard generation == sessionGeneration else { throw CancellationError() }
             recipients += await sender.send(to: recipient, data, acceptedDeviceIds: acceptedDeviceIds)
         }
-        let selfSync = await sender.send(to: userId, data, acceptedDeviceIds: acceptedDeviceIds)
+        try Task.checkCancellation()
+        guard generation == sessionGeneration else { throw CancellationError() }
+        let selfSync: [SubmissionResult]
+        do {
+            let deviceIds = try await ownDeviceIds()
+            do {
+                try await devices.replace(userId: userId, deviceIds: deviceIds)
+                guard generation == sessionGeneration else { throw CancellationError() }
+                selfSync = await sender.send(to: userId, data, acceptedDeviceIds: acceptedDeviceIds)
+            } catch {
+                guard generation == sessionGeneration, !Task.isCancelled, !(error is CancellationError) else {
+                    throw CancellationError()
+                }
+                selfSync = [SubmissionResult(userId: userId, deviceId: nil, status: .rejected, error: "\(error)")]
+            }
+        } catch {
+            guard generation == sessionGeneration, !Task.isCancelled, !(error is CancellationError) else {
+                throw CancellationError()
+            }
+            selfSync = [SubmissionResult(userId: userId, deviceId: nil, status: .unknown, error: "\(error)")]
+        }
+        try Task.checkCancellation()
+        guard generation == sessionGeneration else { throw CancellationError() }
         return SendReport(recipients: recipients, selfSync: selfSync)
     }
 
     /// Every send refreshes a near-expiry token once, up front.
     func sendContext() async throws -> (userId: String, sender: MessageSender) {
+        try Task.checkCancellation()
         _ = try requireSession()
-        _ = await freshToken()
+        let generation = sessionGeneration
+        _ = try await freshToken()
+        guard generation == sessionGeneration else { throw CancellationError() }
         guard let session, let sender else { throw ObscuraError.notAuthenticated }
         return (session.userId, sender)
+    }
+
+    func refreshOwnDirectory() async throws {
+        let current = try requireSession()
+        try await devices.replace(userId: current.userId, deviceIds: ownDeviceIds())
+    }
+
+    private func ownDeviceIds() async throws -> [String] {
+        _ = try requireSession()
+        let generation = sessionGeneration
+        let deviceIds = try await api.fetchOwnDeviceIds()
+        guard generation == sessionGeneration else { throw CancellationError() }
+        return deviceIds
     }
 
     func sendControl(_ message: Obscura_Client_V1_ClientMessage, to userId: String) async throws {

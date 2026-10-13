@@ -79,12 +79,14 @@ public actor ObscuraClient {
     var sender: MessageSender?
     var typingSentAt: [String: Date] = [:]
 
-    var refreshTask: Task<TokenStatus, Never>?
+    var sessionGeneration = 0
+    var refreshTask: Task<TokenStatus, Error>?
     var refreshLoop: Task<Void, Never>?
     var refreshFailures = 0
     var replenishTask: Task<Void, Never>?
 
     var socket: GatewaySocket?
+    var receiveTask: Task<Void, Never>?
     var connectTask: Task<Void, Error>?
     var reconnectTask: Task<Void, Never>?
     var reconnectAttempts = 0
@@ -123,9 +125,11 @@ public actor ObscuraClient {
 
     deinit {
         refreshLoop?.cancel()
+        refreshTask?.cancel()
         reconnectTask?.cancel()
         connectTask?.cancel()
         replenishTask?.cancel()
+        receiveTask?.cancel()
         socket?.close()
         messageContinuation.finish()
     }
@@ -156,6 +160,7 @@ public actor ObscuraClient {
     // MARK: - Auth
 
     public func register(_ username: String, _ password: String) async throws {
+        try await requireUnprovisionedDevice()
         let account = try await api.registerUser(username, password)
         try await provision(username: username, userToken: account.token)
     }
@@ -168,7 +173,7 @@ public actor ObscuraClient {
                 let response = try await api.login(username, password, deviceId: localDeviceId)
                 // The server answers an unknown device id with a user-scoped token, not an error.
                 guard APIClient.deviceId(response.token) == localDeviceId else { return .deviceMismatch }
-                try await begin(session(response, username: username))
+                try begin(session(response, username: username))
                 return .existingDevice
             } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
                 // Classified by the user-scoped login below.
@@ -183,19 +188,26 @@ public actor ObscuraClient {
     }
 
     public func loginAndProvision(_ username: String, _ password: String) async throws {
+        try await requireUnprovisionedDevice()
         let account = try await api.login(username, password, deviceId: nil)
         try await provision(username: username, userToken: account.token)
     }
 
+    private func requireUnprovisionedDevice() async throws {
+        guard try await devices.localDeviceId() == nil, try !signalStore.hasIdentity() else {
+            throw ObscuraError.invalidArgument("local device exists; wipeDevice before provisioning")
+        }
+    }
+
     private func provision(username: String, userToken: String) async throws {
-        await api.setToken(userToken)
+        api.setToken(userToken)
         let keys = try SignalKeys.generate()
         let response = try await api.provisionDevice(name: deviceName, keys: keys.upload())
         let session = try session(response, username: username)
         try signalStore.install(keys)
         try await devices.setLocalDeviceId(session.deviceId)
         try await devices.add(userId: session.userId, deviceId: session.deviceId)
-        await begin(session)
+        try begin(session)
     }
 
     private func session(_ response: AuthResponse, username: String) throws -> Session {
@@ -206,31 +218,28 @@ public actor ObscuraClient {
         return Session(token: response.token, refreshToken: refreshToken, userId: userId, deviceId: deviceId, username: username)
     }
 
-    func begin(_ session: Session) async {
-        await api.setToken(session.token)
+    func begin(_ session: Session) throws {
+        try storeSession { try sessionStorage.save(session.stored) }
+        stopSessionWork()
+        api.setToken(session.token)
         self.session = session
         sender = MessageSender(messenger: messenger, devices: devices, api: api, logger: logger, selfDeviceId: session.deviceId)
-        sessionStorage.save(session.stored)
         refreshFailures = 0
         startRefreshLoop()
         auth.set(.authenticated)
     }
 
     /// Keeps local data. Revoking the refresh token on the server is best effort.
-    public func logout() async {
+    public func logout() async throws {
         let ended = session
-        disconnect()
-        refreshLoop?.cancel()
-        refreshLoop = nil
-        replenishTask?.cancel()
-        replenishTask = nil
+        stopSessionWork()
         session = nil
         sender = nil
-        await api.setToken(nil)
-        sessionStorage.clear()
+        api.setToken(nil)
         typing.clear()
         typingSentAt = [:]
         auth.set(.loggedOut)
+        try storeSession { try sessionStorage.clear() }
         if let ended {
             do {
                 try await api.logout(ended.refreshToken, token: ended.token)
@@ -242,7 +251,7 @@ public actor ObscuraClient {
 
     /// `logout()`, then deletes every piece of local kit data.
     public func wipeDevice() async throws {
-        await logout()
+        try await logout()
         try await ObscuraDatabase.wipe(db)
     }
 
@@ -250,67 +259,89 @@ public actor ObscuraClient {
     /// the server was reachable. False when nothing usable is stored or the refresh token was
     /// rejected.
     public func restorePersistedSession() async -> Bool {
-        guard let stored = sessionStorage.load() else { return false }
-        let hasIdentity: Bool
+        guard !Task.isCancelled else { return false }
         do {
-            hasIdentity = try signalStore.hasIdentity()
+            guard let stored = try storeSession({ try sessionStorage.load() }) else { return false }
+            guard let restored = Session(stored: stored), try signalStore.hasIdentity(),
+                  try await devices.localDeviceId() == restored.deviceId,
+                  APIClient.userId(restored.token) == restored.userId,
+                  APIClient.deviceId(restored.token) == restored.deviceId else {
+                try storeSession { try sessionStorage.clear() }
+                return false
+            }
+            try begin(restored)
+            let generation = sessionGeneration
+            guard try await freshToken() != .rejected, generation == sessionGeneration else { return false }
+            do {
+                try await connect()
+            } catch {
+                logger.log("restored session offline: \(error)")
+            }
+            return !Task.isCancelled && generation == sessionGeneration && authState == .authenticated
         } catch {
-            logger.databaseError(store: "signal", operation: "hasIdentity", reason: "\(error)")
+            logger.databaseError(store: "session", operation: "restore", reason: "\(error)")
             return false
         }
-        guard hasIdentity, let session = Session(stored: stored) else {
-            sessionStorage.clear()
-            return false
-        }
-        await begin(session)
-        guard await freshToken() != .rejected else { return false }
-        do {
-            try await connect()
-        } catch {
-            logger.log("restored session offline: \(error)")
-        }
-        return authState == .authenticated
+    }
+
+    private func storeSession<T>(_ operation: () throws -> T) throws -> T {
+        do { return try operation() }
+        catch { throw ObscuraError.storageFailed("session storage: \(error)") }
+    }
+
+    private func stopSessionWork() {
+        sessionGeneration += 1
+        disconnect()
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshLoop?.cancel()
+        refreshLoop = nil
+        replenishTask?.cancel()
+        replenishTask = nil
     }
 
     // MARK: - Token refresh
 
-    func freshToken() async -> TokenStatus {
+    func freshToken() async throws -> TokenStatus {
         guard let session else { return .rejected }
         if let expiry = APIClient.expiry(session.token), expiry - Date().timeIntervalSince1970 > Self.tokenExpiryMargin {
             return .fresh
         }
-        return await refresh()
+        return try await refresh()
     }
 
     /// Concurrent callers share one refresh: the refresh token is single-use.
-    func refresh() async -> TokenStatus {
-        if let refreshTask { return await refreshTask.value }
-        let task = Task { await self.performRefresh() }
+    func refresh() async throws -> TokenStatus {
+        try Task.checkCancellation()
+        if let refreshTask { return try await refreshTask.value }
+        let generation = sessionGeneration
+        let task = Task { try await self.performRefresh(generation) }
         refreshTask = task
-        let status = await task.value
-        refreshTask = nil
-        return status
+        defer { if refreshTask == task { refreshTask = nil } }
+        return try await task.value
     }
 
-    private func performRefresh() async -> TokenStatus {
-        guard let current = session else { return .rejected }
+    private func performRefresh(_ generation: Int) async throws -> TokenStatus {
+        guard generation == sessionGeneration, !Task.isCancelled, let current = session else { return .rejected }
         do {
             let response = try await api.refreshSession(current.refreshToken)
-            guard var updated = session, updated.refreshToken == current.refreshToken else {
-                return session == nil ? .rejected : .fresh
-            }
+            guard generation == sessionGeneration, var updated = session else { return .rejected }
             updated.token = response.token
             updated.refreshToken = response.refreshToken ?? updated.refreshToken
+            try storeSession { try sessionStorage.save(updated.stored) }
             session = updated
-            await api.setToken(updated.token)
-            sessionStorage.save(updated.stored)
+            api.setToken(updated.token)
             refreshFailures = 0
             return .fresh
         } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
+            guard generation == sessionGeneration else { return .rejected }
             logger.tokenRefreshFailed(attempt: refreshFailures + 1, reason: "refresh token rejected (\(status))")
-            await logout()
+            try await logout()
             return .rejected
+        } catch let error as ObscuraError where error.code == "STORAGE_ERROR" {
+            throw error
         } catch {
+            guard generation == sessionGeneration else { return .rejected }
             refreshFailures += 1
             logger.tokenRefreshFailed(attempt: refreshFailures, reason: "\(error)")
             return .unavailable
@@ -322,7 +353,8 @@ public actor ObscuraClient {
         refreshLoop = Task { [weak self] in
             while let delay = await self?.nextRefreshDelay() {
                 guard (try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))) != nil else { return }
-                _ = await self?.refresh()
+                do { _ = try await self?.refresh() }
+                catch { self?.logger.databaseError(store: "session", operation: "refresh", reason: "\(error)") }
             }
         }
     }

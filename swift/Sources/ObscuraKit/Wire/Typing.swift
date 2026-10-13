@@ -23,6 +23,7 @@ final class TypingTracker: Sendable {
     }
 
     private let state = Locked(State())
+    private let delivery = DispatchQueue(label: "ObscuraKit.typing-delivery")
 
     func started(contextId: String, userId: String, deviceId: String) {
         let token = UUID()
@@ -45,7 +46,7 @@ final class TypingTracker: Sendable {
             for context in Array(state.typers.keys) {
                 state.typers[context]?.values.forEach { $0.expiry.cancel() }
                 state.typers[context] = nil
-                Self.publish(context, in: &state)
+                publish(context, in: &state)
             }
         }
     }
@@ -55,7 +56,8 @@ final class TypingTracker: Sendable {
         AsyncStream { continuation in
             let id = UUID()
             state.withLock { state in
-                continuation.yield(Self.userIds(contextId, in: state))
+                let current = Self.userIds(contextId, in: state)
+                delivery.async { continuation.yield(current) }
                 state.subscribers[contextId, default: [:]][id] = continuation
             }
             continuation.onTermination = { [state] _ in
@@ -75,15 +77,16 @@ final class TypingTracker: Sendable {
             var typers = state.typers[contextId] ?? [:]
             change(&typers)
             state.typers[contextId] = typers.isEmpty ? nil : typers
-            Self.publish(contextId, in: &state)
+            publish(contextId, in: &state)
         }
     }
 
-    private static func publish(_ contextId: String, in state: inout State) {
-        let current = userIds(contextId, in: state)
+    private func publish(_ contextId: String, in state: inout State) {
+        let current = Self.userIds(contextId, in: state)
         guard current != (state.published[contextId] ?? []) else { return }
         state.published[contextId] = current.isEmpty ? nil : current
-        state.subscribers[contextId]?.values.forEach { $0.yield(current) }
+        let subscribers = Array((state.subscribers[contextId] ?? [:]).values)
+        delivery.async { subscribers.forEach { $0.yield(current) } }
     }
 
     private static func userIds(_ contextId: String, in state: State) -> [String] {

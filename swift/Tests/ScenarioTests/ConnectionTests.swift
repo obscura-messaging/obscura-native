@@ -5,7 +5,7 @@ final class ConnectionTests: XCTestCase {
     func testAFailedConnectReturnsToDisconnectedWithoutRetrying() async throws {
         let client = try ObscuraClient(apiURL: "http://127.0.0.1:1", database: ObscuraDatabase.inMemory(),
                                        deviceName: "d", sessionStorage: MemorySessionStorage(), logger: SilentLogger())
-        await client.begin(Session(token: "t", refreshToken: "r", userId: "u", deviceId: "d", username: "n"))
+        try await client.begin(Session(token: "t", refreshToken: "r", userId: "u", deviceId: "d", username: "n"))
 
         do {
             try await client.connect()

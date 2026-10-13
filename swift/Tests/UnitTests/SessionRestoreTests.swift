@@ -10,16 +10,18 @@ final class SessionRestoreTests: XCTestCase {
     }
 
     override func tearDown() {
+        StubProtocol.pending.withLock { $0 = nil }
+        StubProtocol.onRefresh.withLock { $0 = nil }
         URLProtocol.unregisterClass(StubProtocol.self)
     }
 
-    static func jwt(exp: Int) -> String {
+    static func jwt(exp: Int, userId: String = "u1", deviceId: String = "d1") -> String {
         func encode(_ s: String) -> String {
             Data(s.utf8).base64EncodedString()
                 .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
                 .replacingOccurrences(of: "=", with: "")
         }
-        return "\(encode(#"{"alg":"none"}"#)).\(encode("{\"exp\":\(exp),\"sub\":\"u1\",\"device_id\":\"d1\"}")).sig"
+        return "\(encode(#"{"alg":"none"}"#)).\(encode("{\"exp\":\(exp),\"sub\":\"\(userId)\",\"device_id\":\"\(deviceId)\"}")).sig"
     }
 
     private static let stored = ["token": jwt(exp: 1), "refreshToken": "rt", "userId": "u1", "deviceId": "d1",
@@ -27,7 +29,10 @@ final class SessionRestoreTests: XCTestCase {
 
     private func client(_ storage: MemorySessionStorage, identity: Bool = true) throws -> ObscuraClient {
         let db = try ObscuraDatabase.inMemory()
-        if identity { try PersistentSignalStore(db: db, logger: SilentLogger()).install(SignalKeys.generate()) }
+        if identity {
+            try PersistentSignalStore(db: db, logger: SilentLogger()).install(SignalKeys.generate())
+            try db.write { try $0.execute(sql: "INSERT INTO device_identity VALUES (1, 'd1')") }
+        }
         return try makeClient(apiURL: "https://\(StubProtocol.host)", database: db, storage: storage)
     }
 
@@ -91,7 +96,7 @@ final class SessionRestoreTests: XCTestCase {
         async let a = client.refresh()
         async let b = client.refresh()
         async let c = client.refresh()
-        let statuses = await [a, b, c]
+        let statuses = try await [a, b, c]
 
         XCTAssertEqual(statuses, [.fresh, .fresh, .fresh])
         XCTAssertEqual(StubProtocol.requests.withLock { $0 }, 1)
@@ -131,7 +136,7 @@ final class SessionRestoreTests: XCTestCase {
         _ = await client.restorePersistedSession()
         try await client.friends.add("peer", username: "bob", status: .accepted)
 
-        await client.logout()
+        try await client.logout()
 
         XCTAssertEqual(client.authState, .loggedOut)
         XCTAssertNil(storage.session)
@@ -156,10 +161,128 @@ final class SessionRestoreTests: XCTestCase {
         XCTAssertEqual(friends, [])
         XCTAssertFalse(try client.signalStore.hasIdentity())
     }
+
+    func testStoredDeviceMismatchIsClearedRatherThanRestored() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        try await client.devices.setLocalDeviceId("different-device")
+        let restored = await client.restorePersistedSession()
+        XCTAssertFalse(restored)
+        XCTAssertNil(storage.session)
+    }
+
+    func testSessionSaveLoadAndClearFailuresAreSurfacedAndLogged() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        storage.failing = .load
+        let restored = await client.restorePersistedSession()
+        XCTAssertFalse(restored)
+        XCTAssertTrue(client.getDebugLog().contains { $0.contains("load denied") })
+        storage.failing = .save
+        let session = try XCTUnwrap(Session(stored: Self.stored))
+        do {
+            try await client.begin(session)
+            XCTFail("session save failure must throw")
+        } catch { XCTAssertEqual((error as? ObscuraError)?.code, "STORAGE_ERROR") }
+        XCTAssertEqual(client.authState, .loggedOut)
+        storage.failing = nil
+        try await client.begin(session)
+        storage.failing = .clear
+        do {
+            try await client.logout()
+            XCTFail("session clear failure must throw")
+        } catch { XCTAssertEqual((error as? ObscuraError)?.code, "STORAGE_ERROR") }
+        XCTAssertEqual(client.authState, .loggedOut)
+        let userId = await client.userId
+        XCTAssertNil(userId)
+    }
+
+    func testRefreshSaveFailureDoesNotCommitUnpersistedTokens() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
+        storage.failing = .save
+        StubProtocol.outcome = .refreshed(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600), refreshToken: "rotated")
+        do {
+            _ = try await client.refresh()
+            XCTFail("durable token save failure must throw")
+        } catch { XCTAssertEqual((error as? ObscuraError)?.code, "STORAGE_ERROR") }
+        XCTAssertEqual(storage.session?["refreshToken"], "rt")
+        let current = await client.session
+        XCTAssertEqual(current?.refreshToken, "rt")
+        storage.failing = nil
+        try await client.logout()
+    }
+
+    func testLateRefreshSuccessCannotResurrectLogoutOrOverwriteReplacement() async throws {
+        for replace in [false, true] {
+            try await lateRefresh(.refreshed(token: Self.jwt(exp: 1234), refreshToken: "obsolete"), replace: replace)
+        }
+    }
+
+    func testLateRefreshRejectionCannotLogOutAReplacement() async throws {
+        try await lateRefresh(.status(401), replace: true)
+    }
+
+    func testLogoutDuringConnectRefreshCannotInstallASocketOrChangeDisconnectedState() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
+        StubProtocol.outcome = .refreshed(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600),
+                                         refreshToken: "obsolete")
+        let started = expectation(description: "connect waiting for token refresh")
+        StubProtocol.onRefresh.withLock { $0 = { started.fulfill() } }
+        let connect = Task { try await client.connect() }
+        await fulfillment(of: [started], timeout: 3)
+        StubProtocol.onRefresh.withLock { $0 = nil }
+        try await client.logout()
+        let release = StubProtocol.pending.withLock { pending in
+            defer { pending = nil }
+            return pending
+        }
+        release?()
+        do { try await connect.value; XCTFail("superseded connect must not succeed") }
+        catch {}
+        XCTAssertEqual(client.authState, .loggedOut)
+        XCTAssertEqual(client.connectionState, .disconnected)
+        let socket = await client.socket
+        XCTAssertNil(socket)
+        XCTAssertNil(storage.session)
+    }
+
+    private func lateRefresh(_ outcome: StubProtocol.Outcome, replace: Bool) async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
+        StubProtocol.outcome = outcome
+        let started = expectation(description: "refresh request suspended")
+        StubProtocol.onRefresh.withLock { $0 = { started.fulfill() } }
+        let refresh = Task { try await client.refresh() }
+        await fulfillment(of: [started], timeout: 3)
+        StubProtocol.onRefresh.withLock { $0 = nil }
+        if replace {
+            try await client.begin(Session(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600),
+                                            refreshToken: "replacement", userId: "u1", deviceId: "d1", username: "alice"))
+        } else {
+            try await client.logout()
+        }
+        let release = StubProtocol.pending.withLock { pending in
+            let release = pending
+            pending = nil
+            return release
+        }
+        release?()
+        _ = try await refresh.value
+        XCTAssertEqual(client.authState, replace ? .authenticated : .loggedOut)
+        XCTAssertEqual(storage.session?["refreshToken"], replace ? "replacement" : nil)
+        let current = await client.session
+        XCTAssertEqual(current?.refreshToken, replace ? "replacement" : nil)
+        try await client.logout()
+    }
 }
 
 final class StubProtocol: URLProtocol {
-    enum Outcome {
+    enum Outcome: Sendable {
         case status(Int)
         case offline
         case refreshed(token: String, refreshToken: String)
@@ -168,18 +291,34 @@ final class StubProtocol: URLProtocol {
     static let host = "restore-unit.invalid"
     nonisolated(unsafe) static var outcome = Outcome.status(503)
     static let requests = Locked(0)
+    static let onRefresh = Locked<(@Sendable () -> Void)?>(nil)
+    static let pending = Locked<(() -> Void)?>(nil)
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == host }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         Self.requests.withLock { $0 += 1 }
-        func respond(_ status: Int, _ body: Data) {
-            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
-                                                                  headerFields: nil)!, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: body)
-            client?.urlProtocolDidFinishLoading(self)
+        if request.url?.path == "/v1/sessions", request.httpMethod == "DELETE" {
+            return respond(200, Data())
         }
-        switch Self.outcome {
+        let outcome = Self.outcome
+        if request.url?.path == "/v1/sessions/refresh", let onRefresh = Self.onRefresh.withLock({ $0 }) {
+            Self.pending.withLock { $0 = { self.complete(outcome) } }
+            onRefresh()
+            return
+        }
+        complete(outcome)
+    }
+
+    private func respond(_ status: Int, _ body: Data) {
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                                                              headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    private func complete(_ outcome: Outcome) {
+        switch outcome {
         case .offline:
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
         case .status(let code):

@@ -3,20 +3,22 @@ import CryptoKit
 
 actor APIClient {
     nonisolated let baseURL: URL
-    private var token: String?
+    private nonisolated let token = Locked<String?>(nil)
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
     init(baseURL: String) throws {
-        let loopback = ["http://localhost", "http://127.0.0.1", "http://[::1]"].contains { baseURL.hasPrefix($0) }
-        guard baseURL.hasPrefix("https://") || loopback, let url = URL(string: baseURL) else {
+        guard let url = URL(string: baseURL), let host = url.host?.lowercased(), !host.isEmpty,
+              url.user == nil, url.password == nil,
+              url.scheme?.lowercased() == "https"
+                || (url.scheme?.lowercased() == "http" && ["localhost", "127.0.0.1", "[::1]", "::1"].contains(host)) else {
             throw ObscuraError.invalidArgument("apiURL must be https (http only for loopback): \(baseURL)")
         }
         self.baseURL = url
     }
 
-    func setToken(_ token: String?) {
-        self.token = token
+    nonisolated func setToken(_ token: String?) {
+        self.token.withLock { $0 = token }
     }
 
     // MARK: - JWT
@@ -51,7 +53,7 @@ actor APIClient {
         request.httpMethod = method
         request.httpBody = body
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        if let token = bearer ?? token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let token = bearer ?? token.withLock({ $0 }) { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
 
         var retries = 0
@@ -115,6 +117,13 @@ actor APIClient {
 
     func uploadDeviceKeys(_ keys: DeviceKeysUpload) async throws {
         try await call("v1/devices/keys", method: "POST", body: keys)
+    }
+
+    func fetchOwnDeviceIds() async throws -> [String] {
+        struct Device: Decodable { let deviceId: String }
+        struct Directory: Decodable { let devices: [Device] }
+        let response: Directory = try await json("v1/devices")
+        return response.devices.map(\.deviceId)
     }
 
     /// Consumes one one-time prekey on every device of `userId`.

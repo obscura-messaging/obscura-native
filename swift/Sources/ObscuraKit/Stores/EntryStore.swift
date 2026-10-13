@@ -53,13 +53,18 @@ public actor EntryStore {
         }
     }
 
-    /// Deleted under `secure_delete`, so freed pages are zeroed. Each device erases its own copy.
+    /// Zeroes freed pages and truncates the WAL. Each device erases its own copy.
     public func erase(model: String, ids: [String]) async throws {
         if ids.isEmpty { return }
         try await db.write { db in
-            try db.execute(sql: "DELETE FROM model_entries WHERE model_name = ? AND id IN (\(questionMarks(ids.count)))",
-                           arguments: StatementArguments([model] + ids))
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+            for offset in stride(from: 0, to: ids.count, by: 500) {
+                let chunk = Array(ids[offset..<min(offset + 500, ids.count)])
+                try db.execute(sql: "DELETE FROM model_entries WHERE model_name = ? AND id IN (\(questionMarks(chunk.count)))",
+                               arguments: StatementArguments([model] + chunk))
+            }
         }
+        try await ObscuraDatabase.truncateWAL(db)
     }
 
     private static func entry(_ row: Row) -> StoredEntry {

@@ -9,8 +9,8 @@ wake.
 
 - `obscura-app` `SharedContainer` prefers the App Group container for the
   SQLCipher database and falls back, with a log line, to private storage.
-- `ObscuraClient(apiURL:dataDirectory:userId:keychainAccessGroup:)` stores the
-  database key in a shared keychain group.
+- `ObscuraClient(apiURL:dataDirectory:userId:keychainAccessGroup:deviceName:sessionStorage:logger:)`
+  stores the database key in a shared keychain group.
 - `obscura-app` `KeychainSession` stores the access and refresh tokens, user
   ID, device ID and username in that group.
 
@@ -18,7 +18,9 @@ wake.
 
 1. Enable Push Notifications and Background Modes → Remote notifications.
 2. Forward the APNs token through `pushTokenReceived` to `registerPushToken`.
-3. On the wake, call `processPendingMessages` and post generic local copy.
+3. On the wake, restore the shared session and connect within the host's
+   background execution budget. Drain the durable inbox and let the host
+   determine notification policy and copy.
 
 ## To add an NSE
 
@@ -29,7 +31,7 @@ wake.
    a wipe when shared storage first becomes available.
 4. Support concurrent database access from two processes (WAL, pooling).
 5. Ensure only one process drains the gateway at a time.
-6. In the NSE: restore the shared session, call `processPendingMessages`, set
+6. In the NSE: restore the shared session, connect within the extension budget, set
    generic copy on the incoming notification, and complete it through the
    content handler. Do not post a second notification.
 

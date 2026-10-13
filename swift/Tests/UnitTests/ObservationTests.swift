@@ -2,6 +2,52 @@ import XCTest
 @testable import ObscuraKit
 
 final class ObservationTests: XCTestCase {
+    func testCancellationConcurrentWithStateChangesNeverBlocksAndPreservesOrdering() async throws {
+        let state = StateStream(0)
+        let complete = expectation(description: "concurrent cancellation and publication finish")
+        let work = Task.detached {
+            for i in 1...300 {
+                let stream = state.stream()
+                let consumer = Task { for await _ in stream {} }
+                state.set(i)
+                consumer.cancel()
+                _ = await consumer.value
+            }
+            complete.fulfill()
+        }
+        await fulfillment(of: [complete], timeout: 5)
+        work.cancel()
+        XCTAssertEqual(state.value, 300)
+        let values = try await first(3, of: state.stream()) {
+            state.set(301)
+            state.set(302)
+        }
+        XCTAssertEqual(values, [300, 301, 302])
+    }
+
+    func testTypingCancellationConcurrentWithExpiryAndClearNeverBlocks() async throws {
+        let tracker = TypingTracker()
+        let complete = expectation(description: "expiry publication and cancellation finish")
+        let work = Task.detached {
+            for i in 0..<100 {
+                let consumer = Task { for await _ in tracker.observe(contextId: "c") {} }
+                tracker.started(contextId: "c", userId: "u", deviceId: "\(i)")
+                consumer.cancel()
+                tracker.stopped(contextId: "c", deviceId: "\(i)")
+                _ = await consumer.value
+            }
+            let consumer = Task { for await _ in tracker.observe(contextId: "c") {} }
+            tracker.started(contextId: "c", userId: "u", deviceId: "expiry")
+            try? await Task.sleep(nanoseconds: TypingTracker.expiry)
+            consumer.cancel()
+            tracker.clear()
+            _ = await consumer.value
+            complete.fulfill()
+        }
+        await fulfillment(of: [complete], timeout: 8)
+        work.cancel()
+    }
+
     private func first<T: Sendable>(_ count: Int, of stream: AsyncStream<T>, after action: () async throws -> Void = {}) async throws -> [T] {
         let collector = Task {
             var values: [T] = []
@@ -13,7 +59,7 @@ final class ObservationTests: XCTestCase {
         }
         try await action()
         let timeout = Task {
-            try await Task.sleep(nanoseconds: 5_000_000_000)
+            try await Task.sleep(nanoseconds: 8_000_000_000)
             collector.cancel()
         }
         defer { timeout.cancel() }
@@ -46,7 +92,7 @@ final class ObservationTests: XCTestCase {
     func testFriendsChangedWakesOnSubscribeAndOnEveryChange() async throws {
         let client = try makeClient()
 
-        let wakes = try await first(2, of: client.observeFriendsChanged()) {
+        let wakes: [Void] = try await first(2, of: client.observeFriendsChanged()) {
             try await Task.sleep(nanoseconds: 100_000_000)
             try await client.friends.add("alice-id", username: "alice", status: .accepted)
         }

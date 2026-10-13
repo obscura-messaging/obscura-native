@@ -57,7 +57,8 @@ func makeClient(directory: String? = nil, storage: MemorySessionStorage = Memory
 }
 
 func temporaryDirectory() throws -> String {
-    let dir = NSTemporaryDirectory() + "obscura_test_\(UUID().uuidString)"
+    let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent(".obscura-test-\(UUID().uuidString)").path
     try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     return dir
 }

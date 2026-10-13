@@ -15,8 +15,8 @@ enum FriendCode {
             .replacingOccurrences(of: "_", with: "/")
         guard let data = Data(base64Encoded: base64),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: String],
-              let userId = json["u"], !userId.isEmpty,
-              let username = json["n"], !username.isEmpty
+              let userId = json["u"], !userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let username = json["n"], !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { throw ObscuraError.invalidFriendCode }
         return (userId, username)
     }

@@ -19,7 +19,7 @@ final class AuthTests: XCTestCase {
 
     func testLoginScenarios() async throws {
         let alice = try await TestUser.register()
-        await alice.client.logout()
+        try await alice.client.logout()
 
         let existing = try await alice.client.login(alice.username, TestServer.password)
         XCTAssertEqual(existing, .existingDevice)
@@ -38,8 +38,8 @@ final class AuthTests: XCTestCase {
 
         // Alice's device is not one of Bob's.
         let bob = try await TestUser.register()
-        await bob.client.logout()
-        await alice.client.logout()
+        try await bob.client.logout()
+        try await alice.client.logout()
         let mismatch = try await alice.client.login(bob.username, TestServer.password)
         XCTAssertEqual(mismatch, .deviceMismatch)
         XCTAssertEqual(alice.client.authState, .loggedOut)
@@ -60,7 +60,7 @@ final class AuthTests: XCTestCase {
         let refreshToken = try XCTUnwrap(storage.session?["refreshToken"])
         try await alice.client.connect()
 
-        await alice.client.logout()
+        try await alice.client.logout()
 
         XCTAssertEqual(alice.client.authState, .loggedOut)
         XCTAssertEqual(alice.client.connectionState, .disconnected)
@@ -78,7 +78,7 @@ final class AuthTests: XCTestCase {
         let alice = try await TestUser.register(makeClient(storage: storage))
         let first = try XCTUnwrap(storage.session?["refreshToken"])
 
-        let status = await alice.client.refresh()
+        let status = try await alice.client.refresh()
 
         XCTAssertEqual(status, .fresh)
         let rotated = try XCTUnwrap(storage.session?["refreshToken"])
