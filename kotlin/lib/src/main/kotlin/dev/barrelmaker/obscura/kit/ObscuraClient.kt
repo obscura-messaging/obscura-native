@@ -1067,6 +1067,7 @@ class ObscuraClient(
 
     suspend fun befriend(targetUserId: String, targetUsername: String) = friendshipManager.befriend(targetUserId, targetUsername)
     suspend fun acceptFriend(targetUserId: String) = friendshipManager.acceptFriend(targetUserId)
+    suspend fun removeFriend(userId: String) = friendshipManager.removeFriend(userId)
 
     suspend fun announceDevices() = deviceManager.announceDevices()
     /**
