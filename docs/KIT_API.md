@@ -202,6 +202,14 @@ Incoming entry timestamps are capped at local `now + 60 s`. The inbound
 Signal address is `(senderDeviceUUID, 1)`; attribution comes from this
 session and the server envelope, never application data.
 
+## Envelope identity
+
+The server stamps sender user and device UUIDs from the device-scoped
+credential. Signal decrypt uses that device's session, never a guessed
+device, registration id, payload identity, or fallback bundle.
+The app authorizes the inbox using this attribution; successful transport
+delivery alone does not authorize an application write.
+
 ## Inbox
 
 `peek(limit)`, `consume(ids)`, `discard(ids, reason)`, and `depth()` are
