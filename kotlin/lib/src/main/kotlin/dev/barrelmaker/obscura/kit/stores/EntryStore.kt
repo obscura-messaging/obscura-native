@@ -2,6 +2,7 @@ package dev.barrelmaker.obscura.kit.stores
 
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.db.SqlDriver
+import dev.barrelmaker.obscura.kit.ModelEntry
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -28,10 +29,9 @@ data class StoredEntry(
 /**
  * Raw storage for application entries.
  *
- * The API is `put` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before
- * writing. This store has no schema parser, query layer, merge engine, or expiry policy: the app
- * decides *when* an entry goes away, and `erase` guarantees *how*.
- * `all(model)` therefore loads every live entry for that model.
+ * The API is `put` / `get` / `all` / `erase`. `put` is a blind upsert; the app resolves merge
+ * before writing. This store has no schema parser, query layer, merge engine, or expiry policy: the
+ * app decides *when* an entry goes away, and `erase` guarantees *how*.
  */
 class EntryStore internal constructor(
     private val db: ObscuraDatabase,
@@ -55,36 +55,43 @@ class EntryStore internal constructor(
         )
     }
 
+    /** The live entries among [ids] for a model, in no guaranteed order. Missing ids are absent. */
+    suspend fun get(model: String, ids: Collection<String>): List<StoredEntry> = withContext(dispatcher) {
+        if (ids.isEmpty()) emptyList()
+        else db.modelEntryQueries.selectByIds(model, ids).executeAsList().map { it.toStoredEntry() }
+    }
+
     /** Every live entry for a model, in no guaranteed order. */
     suspend fun all(model: String): List<StoredEntry> = withContext(dispatcher) {
-        db.modelEntryQueries.selectByModel(model).executeAsList().map { row ->
-            StoredEntry(
-                id = row.entry_id,
-                data = row.data_,
-                sentAt = row.timestamp,
-                authorDeviceId = row.author_device_id,
-                localMetadata = row.local_metadata,
-            )
-        }
+        db.modelEntryQueries.selectByModel(model).executeAsList().map { it.toStoredEntry() }
     }
 
     /**
-     * Remove one entry so its contents are unrecoverable from the database files.
+     * Remove entries so their contents are unrecoverable from the database files.
      *
-     * The row is deleted under `secure_delete`, so SQLite zeroes the freed pages. The pragma is
+     * The rows are deleted under `secure_delete`, so SQLite zeroes the freed pages. The pragma is
      * per-connection and drivers may pool connections, so it is set inside the deleting transaction
-     * rather than trusted from open time. The WAL is then checkpointed and truncated, because in WAL
-     * mode the pre-delete page would otherwise survive in the `-wal` file until the next checkpoint.
-     * Erasing an entry that does not exist is a no-op. Not synchronized to peers: each device
-     * erases its own copy.
+     * rather than trusted from open time. The WAL is then checkpointed and truncated once, because
+     * in WAL mode the pre-delete pages would otherwise survive in the `-wal` file until the next
+     * checkpoint. Erasing entries that do not exist is a no-op. Not synchronized to peers: each
+     * device erases its own copy.
      */
-    suspend fun erase(model: String, id: String) = withContext(dispatcher) {
+    suspend fun erase(model: String, ids: Collection<String>) = withContext(dispatcher) {
+        if (ids.isEmpty()) return@withContext
         db.transaction {
             driver.pragma("PRAGMA secure_delete = ON")
-            db.modelEntryQueries.deleteEntry(model, id)
+            db.modelEntryQueries.deleteEntries(model, ids)
         }
         driver.pragma("PRAGMA wal_checkpoint(TRUNCATE)")
     }
+
+    private fun ModelEntry.toStoredEntry() = StoredEntry(
+        id = entry_id,
+        data = data_,
+        sentAt = timestamp,
+        authorDeviceId = author_device_id,
+        localMetadata = local_metadata,
+    )
 }
 
 /**

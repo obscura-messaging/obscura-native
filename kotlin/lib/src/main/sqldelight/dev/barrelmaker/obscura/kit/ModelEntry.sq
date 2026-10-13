@@ -12,14 +12,17 @@ CREATE TABLE IF NOT EXISTS ModelEntry (
 selectByModel:
 SELECT * FROM ModelEntry WHERE model_name = ?;
 
+selectByIds:
+SELECT * FROM ModelEntry WHERE model_name = ? AND entry_id IN ?;
+
 insertEntry:
 INSERT OR REPLACE INTO ModelEntry(
     model_name, entry_id, data, timestamp, author_device_id, local_metadata
 )
 VALUES (?, ?, ?, ?, ?, ?);
 
-deleteEntry:
-DELETE FROM ModelEntry WHERE model_name = ? AND entry_id = ?;
+deleteEntries:
+DELETE FROM ModelEntry WHERE model_name = ? AND entry_id IN ?;
 
 deleteAllEntries:
 DELETE FROM ModelEntry;

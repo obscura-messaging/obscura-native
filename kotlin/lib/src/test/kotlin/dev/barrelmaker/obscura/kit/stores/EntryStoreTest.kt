@@ -144,22 +144,36 @@ class EntryStoreTest {
     }
 
     @Test
-    fun `erase removes only the named entry`() = runBlocking {
+    fun `get returns only the named entries of that model`() = runBlocking {
         store.put("directMessage", entry("dm_1"))
         store.put("directMessage", entry("dm_2"))
+        store.put("directMessage", entry("dm_3"))
         store.put("pix", entry("dm_1"))
 
-        store.erase("directMessage", "dm_1")
+        assertEquals(setOf("dm_1", "dm_3"), store.get("directMessage", listOf("dm_1", "dm_3", "missing")).map { it.id }.toSet())
+        assertEquals(entry("dm_2"), store.get("directMessage", listOf("dm_2")).single())
+        assertEquals(emptyList<StoredEntry>(), store.get("directMessage", emptyList()))
+    }
+
+    @Test
+    fun `erase removes only the named entries`() = runBlocking {
+        store.put("directMessage", entry("dm_1"))
+        store.put("directMessage", entry("dm_2"))
+        store.put("directMessage", entry("dm_3"))
+        store.put("pix", entry("dm_1"))
+
+        store.erase("directMessage", listOf("dm_1", "dm_3"))
 
         assertEquals(listOf("dm_2"), store.all("directMessage").map { it.id })
         assertEquals(listOf("dm_1"), store.all("pix").map { it.id })
     }
 
     @Test
-    fun `erasing a missing entry is a no-op`() = runBlocking {
+    fun `erasing missing entries or none is a no-op`() = runBlocking {
         store.put("directMessage", entry("dm_1"))
 
-        store.erase("directMessage", "never_written")
+        store.erase("directMessage", listOf("never_written"))
+        store.erase("directMessage", emptyList())
 
         assertEquals(1, store.all("directMessage").size)
     }
@@ -175,17 +189,17 @@ class EntryStoreTest {
         ObscuraDatabase.Schema.create(driver)
         driver.pragma("PRAGMA journal_mode = WAL")
         val fileStore = EntryStore(ObscuraDatabase(driver), driver)
-        val secret = "ERASE-ME-7f3a9c"
-        fun onDisk(): Boolean = listOf(path, File("${path.absolutePath}-wal"))
+        val secrets = listOf("ERASE-ME-7f3a9c", "ERASE-ME-2b8d41")
+        fun onDisk(secret: String): Boolean = listOf(path, File("${path.absolutePath}-wal"))
             .filter { it.exists() }
             .any { String(it.readBytes(), Charsets.ISO_8859_1).contains(secret) }
 
-        fileStore.put("directMessage", entry("dm_1", data = """{"content":"$secret"}"""))
-        assertTrue(onDisk(), "control: the secret must be on disk before erase")
+        secrets.forEachIndexed { i, secret -> fileStore.put("directMessage", entry("dm_$i", data = """{"content":"$secret"}""")) }
+        assertTrue(secrets.all(::onDisk), "control: the secrets must be on disk before erase")
 
-        fileStore.erase("directMessage", "dm_1")
+        fileStore.erase("directMessage", secrets.indices.map { "dm_$it" })
 
-        assertFalse(onDisk(), "erased content must not survive in the database or its WAL")
+        assertFalse(secrets.any(::onDisk), "erased content must not survive in the database or its WAL")
         driver.close()
     }
 }
