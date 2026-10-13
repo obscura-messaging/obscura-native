@@ -1,327 +1,293 @@
 # Kit contract
 
-Normative for the Kotlin and Swift kits and their application bridges.
-"MUST" / "MUST NOT" are binding.
+The Kotlin and Swift kits implement this contract. Platform READMEs cover
+toolchains and language-specific signatures, not different behavior.
 
 | Layer | Defined by |
 |---|---|
-| Transport (shared with the server) | [`obscura.proto`](https://github.com/obscura-messaging/obscura-proto/blob/main/obscura/v1/obscura.proto), [`TRANSPORT.md`](https://github.com/obscura-messaging/obscura-proto/blob/main/TRANSPORT.md) |
-| Client content (end-to-end) | [`client.proto`](../protocol/obscura/client/v1/client.proto) |
-| Kit behaviour and app-facing API | this document |
-| App model rules | [`DOMAIN_CONTRACT.md`](https://github.com/obscura-messaging/obscura-app/blob/main/docs/DOMAIN_CONTRACT.md) |
+| Transport | [`obscura.proto`](https://github.com/obscura-messaging/obscura-proto/blob/main/obscura/v1/obscura.proto), [`TRANSPORT.md`](https://github.com/obscura-messaging/obscura-proto/blob/main/TRANSPORT.md) |
+| End-to-end client content | [`client.proto`](../protocol/obscura/client/v1/client.proto) |
+| Kit behavior and API | this document |
+| Application models | [`DOMAIN_CONTRACT.md`](https://github.com/obscura-messaging/obscura-app/blob/main/docs/DOMAIN_CONTRACT.md) |
 
 ## Kit boundary
 
-A kit is the native layer of the Obscura app. It exists because libsignal ships
-separately for Java and Swift, and because background push processing cannot
-depend on a React Native runtime. Its one consumer is the app; it is not a
-general-purpose data layer.
+The kit owns authentication, device provisioning, Signal sessions, the friend
+graph, REST and gateway transport, typing, attachment encryption, the durable
+inbox, and the opaque entry store.
 
-> **If the kit reads it, it is a field in `client.proto`. If it is not in
-> `client.proto`, the kit MUST NOT read it.**
+The app owns payload schemas, recipients, authorization, merge, expiry,
+outbox policy, rendering, and notification policy. Hosts own OS lifecycle,
+secure session storage, files, permissions, push, and notifications.
 
-**The kit owns** transport (REST, gateway WebSocket, ack); the Signal protocol;
-device provisioning, linking and takeover; the friend graph (to address devices
-and label senders); the durable inbox, which the push path writes with the app
-closed; the opaque entry store; attachment encryption and transfer; and the
-push-wake path.
+**If the kit reads a content field, it is declared in `client.proto`.**
+Application payloads and `localMetadata` are opaque. Kits must not contain
+application model names, infer recipients from payloads, implement an
+application query/merge/expiry engine, or post OS notifications.
 
-**The app owns** model schemas and payload parsing, validation, audience
-resolution, merge, expiry, queries/filters/sorting, and notification policy and
-copy.
+Wire mappings live in each kit's `WireCodec` and are checked against
+[`wire.json`](../protocol/conformance/wire.json). `AppEntry` encoding
+preserves model, id, timestamp and data; byte-canonical encoding is not
+required. Typing maps only STARTED/STOPPED; unspecified states are ignored.
 
-**The kit MUST NOT:**
+Device linking, approval codes, takeover, device announcements, and
+friendship export/import do not exist.
 
-- parse an application payload (`AppData.payload` is opaque bytes) or read an
-  application field by name;
-- contain an application model name as a literal (model keys are opaque values
-  it stores and echoes back);
-- resolve or broaden recipients;
-- implement queries, observation, a schema registry, a merge engine, or expiry;
-- accept configuration that names application concepts (e.g. `conversationModel`);
-- post an OS notification.
+## Construction and persistence
 
-Adding a field to existing content is an app-only change. A new notifiable
-content type is a `client.proto` change plus both kits. If a kit cannot do its
-job from declared proto fields, change the proto.
+Every client requires a host-provided `SessionStorage`. There is no default
+no-op store or UserDefaults token store. Swift also requires a logger.
+In-memory construction helpers and stores are internal test infrastructure.
 
-## Receive: persist-then-ack
+`SessionStorage` saves, loads, or clears one string-valued blob containing
+exactly `token`, `refreshToken`, `userId`, `deviceId`, and `username`.
+Storage failures propagate; Swift storage methods throw.
 
-An ack deletes the server's copy; nothing is redelivered after it. Per envelope:
-**decrypt → classify → persist (or run the kit-internal handler) → optional
-wake-up event → ack**.
+The kit is the only writer. It saves after successful authentication,
+provisioning, and every token rotation. Logout, wipe, and refresh rejection
+clear it. Refresh tokens are single-use, so writes must be durable before
+authentication or refresh is reported successful.
 
-1. MUST NOT ack an envelope whose decrypt threw.
-2. MUST NOT ack a skipped or deferred envelope (e.g. rate-limited sender).
-3. MUST NOT ack until the durable write or kit-internal handler succeeded.
-4. A duplicate already in the inbox counts as persisted; ack it.
-5. Wake-up events follow persistence and carry no data the store lacks, so they
-   MAY be dropped or coalesced. The inbox is the delivery path.
+`restorePersistedSession() -> Bool` loads the blob and requires a matching
+local device identity and Signal identity. It restores credentials, refreshes
+when necessary, and connects when possible. An unavailable network leaves a
+usable session authenticated but disconnected. Missing or unusable storage,
+or a rejected refresh token, returns false. Restore logs failures rather
+than throwing; cancellation still cancels.
 
-## Envelope identity
-
-The server stamps `sender_id` (user UUID) and `sender_device_id` (device UUID)
-from the sender's device-scoped token. Both are hints for routing, session
-selection and labelling. The trust root is the Signal session.
-
-1. Select the inbound session by `sender_device_id`. If it is absent or not 16
-   bytes, fail; never guess, iterate sessions, or fall back to a default device.
-2. Key the local `ProtocolAddress` on the device UUID, never `registrationId`.
-3. Select a peer's prekey bundle by device UUID, with no fallback bundle.
-4. Derive `authorDeviceId` from the session that decrypted the message, never
-   from a wire field.
-5. A kit that knows the owner of `sender_device_id` SHOULD cross-check
-   `sender_id` and log a mismatch as a security event.
-
-## Devices and sessions
-
-Each kit keeps one device directory: every device it can address, keyed by
-`(userId, deviceId)`, including the user's own. Nothing else caches device
-lists. Fetching a user's prekey bundles consumes a one-time prekey on every one
-of their devices, so every outgoing message (entries, typing, friend requests,
-announcements, link approvals) takes one send path with these rules:
-
-1. Use the directory's devices and the existing Signal sessions.
-2. Fetch the user's bundles only when the directory lists no device for them, a
-   target device has no session, or the server rejects a listed device with
-   `ERROR_CODE_INVALID_DEVICE`. In the last case, fetch once and send to the
-   devices the server lists now; results for devices it no longer lists are
-   dropped.
-3. A fetch builds a session only for a device that has none. Processing a bundle
-   over an established session restarts it and MUST NOT happen.
-4. A fetch replaces the user's directory entry with the server's list, minus
-   devices whose bundle could not be processed, so a broken bundle cannot cause
-   a fetch on every send. A 404 means the user has no devices.
-5. The sending device is never a target. Sends to one user are serialized, so
-   concurrent first contacts share one fetch.
-
-A friend's `DEVICE_ANNOUNCE` replaces that friend's directory entry only when
-its (clamped) timestamp is newer than the entry's last write. A fetch stamps the
-entry with the current time. An announcement from a non-friend changes nothing.
-`removeFriend(userId)` forgets the friendship and the friend's directory entry
-and sends nothing; entries already stored are the app's to keep or erase.
-
-**Identity keys.** As Signal does for an unverified contact, a changed identity
-key is accepted rather than refused: the kit stores the new key, replaces the
-session, and reports the change through the logger's identity-changed event so
-the app can show that the safety number changed.
-
-**Takeover** generates a new identity and prekeys, clears every session, and
-announces this device's list to accepted friends, whose devices then replace
-their sessions. The server ends the device's connection and deletes its queued
-messages; the kit reconnects.
-
-**Sender names** come from the local friend graph keyed by `sender_id`, never
-from a payload. The one exception is a `FriendRequest` from someone not yet in
-the graph: its payload `username` is a request-time label only and MUST NOT be
-stored as the friend's name once accepted.
-
-## Future-timestamp clamp
-
-An incoming timestamp more than 60 s past local wall-clock is clamped to
-`now + 60s` before it is stored (`clampFutureTimestamp`, applied to inbox
-`sentAt` and `DEVICE_ANNOUNCE` timestamps), so it cannot win every REPLACE
-conflict. Implementation tests cover it, not vectors. Local writes may exceed
-the ceiling; receivers clamp them again.
-
-## Wire encoding
-
-Content is a `ClientMessage`. Vectors in
-[`protocol/conformance/wire.json`](../protocol/conformance/wire.json) run in
-both platform suites. Each kit keeps the mappings in one `WireCodec`.
-
-| Wire | App-facing |
-|---|---|
-| set `ClientMessage.payload` arm, e.g. `app_entry` | upper-snake name, `"APP_ENTRY"` |
-| unset payload | `""` (ignored) |
-| `TYPING_STATE_STARTED` / `_STOPPED` | `started` / `stopped` |
-| `TYPING_STATE_UNSPECIFIED`, unrecognised | ignored |
-
-`encode(AppEntry) → decode` MUST preserve `model`, `id`, `timestamp` and the
-`data` value (JSON in a `bytes` field, compared by parsed value). Byte-canonical
-encoding is not required; define one before adding anything that signs or
-content-addresses payloads.
-
-## Payload classes
-
-| Arm | Kotlin | Swift |
-|---|---|---|
-| `APP_ENTRY` | inboxed | inboxed |
-| `FRIEND_REQUEST`, `FRIEND_ACCEPT`, `DEVICE_ANNOUNCE` | kitInternal | kitInternal |
-| `DEVICE_LINK_APPROVAL` | kitInternal | unimplemented |
-| `TYPING_SIGNAL` | droppable | droppable |
-| unknown / unset | inboxed | inboxed |
-
-- `inboxed`: persist opaque bytes, then ack. Unknown arms are inboxed so an older
-  receiver never destroys a newer sender's data.
-- `kitInternal`: complete the kit's handler, then ack.
-- `droppable`: ephemeral; ack without storage.
-- `unimplemented`: log a diagnostic and ack, so one arm cannot wedge the queue.
-
-Delivery is not authorization. The app MUST authorize inboxed content by the
-server-stamped user and session-attributed device; payload fields never override
-either.
-
-**Typing:** the caller names recipients. `TypingSignal.context_id` is opaque and
-MUST NOT be parsed or used to derive recipients. `STARTED` refreshes the sender
-device's short-lived state, `STOPPED` clears it, other states are ignored. Typing
-state is in-memory, throttled and expiring. `observeTyping` reports typers as
-user IDs, once per user; the app resolves names and decides whose typing to show,
-because a context id names nothing the kit can authorize.
-
-## Inbox
-
-| Field | Type | Meaning |
-|---|---|---|
-| `id` | integer | Local row id for `consume` / `discard`. |
-| `kind` | string | Payload arm, or the unknown/unset marker. |
-| `senderUserId` | string | Server-stamped `sender_id`. |
-| `senderDeviceId` | nullable string | Device UUID whose session decrypted the message. |
-| `modelKey`, `entryId` | nullable string | From `AppEntry`; null for other arms. |
-| `sentAt` | nullable integer | Declared timestamp, clamped. |
-| `payload` | bytes | Opaque serialized payload. |
-
-```text
-peek(limit = 50)     -> [InboxRecord]
-consume(ids)         -> void
-discard(ids, reason) -> void
-depth()              -> integer
-```
-
-1. Only the receive path writes the inbox. No public insert, cursor or retry
-   counter.
-2. Rows leave only through `consume`, `discard`, or the whole-store wipe in a
-   device wipe.
-3. `peek` returns the oldest pending rows in stable order, with no side effects.
-4. `consume` is idempotent and accepts partial batches.
-5. `discard` logs its reason to the kit's security log.
-6. The envelope id is unique while a row is pending, so a redelivery neither
-   duplicates nor re-notifies. Consumed ids are not kept: app merge MUST be
-   idempotent.
-7. `depth` is exposed and the app MUST monitor it.
-
-There is no skip cursor and no eviction. A row the app cannot process is left
-pending (transient), processed and consumed, or discarded with a reason. An
-undrained inbox eventually makes persistence fail, the kit stops acking, and the
-server queue fills; the app must surface abnormal depth first.
-
-**App drain:** `peek` a bounded batch; validate and decode; authorize and merge
-from the identity fields; write entries; `consume` only after the writes
-complete; `discard` only for permanent rejection; repeat until a batch is not
-full. No transaction spans entry writes and `consume`, so a crash replays the
-row. Notification policy runs after the app commits.
-
-## Entry store
-
-```text
-put(model, entry)
-get(model, ids)
-all(model)
-erase(model, ids)
-```
-
-`StoredEntry` holds the app-chosen id, timestamp, session-attributed author
-device, opaque payload, and nullable `localMetadata`, an app-owned sidecar
-stored verbatim and never read, put in an `AppEntry`, or sent.
-
-`get` returns the named entries that exist. `erase` deletes under
-`secure_delete`, then checkpoints and truncates the WAL once per call so the
-content is unrecoverable. Erasing a missing entry is a no-op. Both kits
-enable `secure_delete` on every database, including an app-supplied driver.
-
-Merge belongs to the app: `APPEND` keeps the first write per entry id, `REPLACE`
-keeps the highest `(sentAt, authorDeviceId)`. Expiry is the app calling `erase`;
-no kit enforces a TTL in payload data.
-
-## Send
-
-```text
-send(recipientUserIds, modelKey, entryId, sentAt, payloadBytes, acceptedDeviceIds = [])
-    -> SendReport { recipients, selfSync }
-```
-
-The only app payload send. The kit resolves each named user's devices, adds the
-sender's other devices, excludes the sending device, encrypts per device and
-uploads one envelope per device, following
-[Devices and sessions](#devices-and-sessions). It MUST NOT broaden or
-substitute recipients.
-The sender's own id and duplicates in `recipientUserIds` are ignored. The sender
-gets no inbox row; the app writes its own copy to the entry store. The caller
-validates size and schema.
-
-Each recipient is attempted independently in its own batch; the kit keeps no
-send queue. Each result contains `userId`, nullable `deviceId`,
-`status` (`accepted`, `rejected`, `unknown`) and optional `error`. Device
-resolution or encryption failure is rejected; an HTTP failure or an invalid
-response leaves submission acceptance unknown. HTTP 200 alone is not acceptance:
-both kits decode the server's per-submission failures.
-
-`accepted` means queued by the server, not delivered or viewed. `acceptedDeviceIds`
-contains evidence retained by the caller from previous attempts; these devices
-are reported accepted without encrypting or submitting again. A missing device
-list produces a rejected user-level result, never empty-audience success.
-Self-sync outcomes are separate and cannot invalidate recipient acceptance.
-The app owns durable retries. A retry is a new encrypted transport attempt
-of the same logical entry/version; app merge must remain idempotent. Neither
-kit parses the application payload or decides whether it has expired.
-
-## Attachments
-
-`uploadAttachment(plaintext)` encrypts in the kit (AES-256-GCM, fresh key and
-nonce each time), uploads ciphertext, and returns the server id with
-`contentKey` and `nonce`. `downloadDecryptedAttachment(id, contentKey, nonce)`
-returns plaintext and keeps no decrypted copy. Attachment metadata travels in
-the app's payload.
-
-## Push drain and events
-
-`processPendingMessages(timeout)` connects or reuses the receive path, waits
-within the budget, and returns the number of envelopes processed (redeliveries
-included). It does not touch the inbox or event stream. It returns `0` when it
-cannot connect, so zero does not mean the server queue is empty. Overlapping
-drains may coalesce but MUST NOT duplicate app events for one inbox insert.
-
-`friendsChanged` is a payload-free wake-up; the host then calls `getFriends`.
-Debug output is pull-only via `getDebugLog`.
+Before the first public release, schema changes can require clearing app
+data. There are no compatibility migrations.
 
 ## Login
 
-`login(username, password)` returns:
+`AuthState` is `loggedOut` or `authenticated`.
 
-| Outcome | Meaning | State after |
-|---|---|---|
-| `existingDevice` | Stored local device logged in | Authenticated, device-scoped |
-| `newDevice` | No stored local device | Logged out |
-| `deviceMismatch` | Server no longer knows the stored device | Logged out |
-| `invalidCredentials` | User-scoped login returned 401/403 (incl. unknown username) | Logged out |
+| Operation / outcome | Behavior |
+|---|---|
+| `register(username, password)` | Creates the account and this device, persists the session, authenticates |
+| `login` -> `existingDevice` | Authenticates the stored local device |
+| `login` -> `newDevice` | No stored device; stays logged out |
+| `login` -> `deviceMismatch` | Stored device does not belong to this account or is no longer usable; stays logged out |
+| `login` -> `invalidCredentials` | User login rejected with 401/403; stays logged out |
+| `loginAndProvision(username, password)` | Authenticates the account and provisions an independent device |
+| `logout()` | Disconnects, stops background work, clears credentials, storage and typing; keeps local data |
+| `wipeDevice()` | Logs out, then deletes local Signal state, friends, devices, identity, entries and inbox |
 
-Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
-`deviceMismatch` call `wipeDevice` first. `loginAndProvision` ends in
-`pendingApproval` if another device can approve the link, else `authenticated`.
-`register` and `loginAndProvision` store the device `login` checks.
+Other HTTP failures throw. The app calls `loginAndProvision` after
+`newDevice`; after `deviceMismatch` it wipes first. Registration and
+provisioning share one key-generation path: an identity, signed prekey id 1,
+and 100 one-time prekeys.
 
-**Token refresh.** `ensureFreshToken()` returns `fresh`, `rejected` or
-`unavailable`. Only a refresh the server refuses (401/403), or a session with no
-refresh token, is `rejected`: the kit signs out (auth state logged out) and
-clears its stored session. A network or server failure is `unavailable` and changes
-nothing; the background refresh retries with backoff (5 s doubling to 5 min).
-`restorePersistedSession` therefore keeps an offline session authenticated and
-unconnected rather than discarding it.
+Logout revokes the refresh token best-effort; failure is logged. Durable
+clears and wipes are not best-effort.
 
-## Known gaps
+**Token refresh** is internal. Concurrent callers share one in-flight
+request. A 401/403 or missing refresh token rejects the session; network and
+server failures keep it. Background refresh runs at 80% of remaining token
+lifetime, at least 5 s, with failure backoff from 5 s doubling to 5 min.
+A completed refresh from a superseded session must not restore credentials,
+overwrite storage, or sign out a newer session.
 
-- Swift cannot receive `DEVICE_LINK_APPROVAL`, so a Swift device added to an
-  account that already has a device stays `pendingApproval` and never imports
-  the approver's device list or friends.
-- Kotlin skips the link challenge check when the approval's
-  `challenge_response` is empty or this process has generated no link code, so
-  a device on the account can approve without having seen the code.
-- Link codes are not cross-platform: Kotlin encodes Base64 JSON
-  `{d, c, t}`, Swift encodes Base58 JSON `{deviceId, challenge, timestamp}`.
-- No kit cross-checks `sender_id` against the device owner (risk: mislabelled,
-  never forged, messages).
-- Linked devices do not learn friendships created after linking.
-- A `DEVICE_ANNOUNCE` is ordered only by its sender-declared (clamped)
-  timestamp: last writer wins, with no other freshness check.
-- Partial-recipient send failures are invisible to the app.
-- Consumed inbox envelope ids have no durable tombstone.
+## Devices and sessions
+
+Several devices may sign in independently at the same time. Each installation
+has its own Signal identity, device id, database, and friend graph. Signing
+into a new installation does not transfer keys, friendships, or history.
+Self-sync sends subsequent writes; it is not a historical backfill.
+
+There is one device directory keyed by `(userId, deviceId)`, including the
+account's own devices. No parallel device list lives in a friend row or
+in-memory cache.
+
+**Discovery:**
+
+- The existing `GET /v1/devices` endpoint lists the signed-in account's
+  devices without consuming prekeys. The kit refreshes this list on connect
+  and once per self-sync send.
+- A successfully decrypted inbound envelope teaches the directory its
+  server-stamped sender user/device pair. This write precedes acknowledgement.
+  Failed decrypts and payload fields cannot teach device ownership.
+- Peer bundles are fetched only for an empty directory, a target missing a
+  Signal session, or a server `INVALID_DEVICE` result. A refresh replaces the
+  user's list with the server's list, excluding unusable bundles; 404 means
+  no devices.
+
+A silent new peer installation is not proactively discovered. It becomes
+known through authenticated incoming traffic or the next necessary bundle
+refresh. There is no periodic bundle fetch or replacement announcement
+protocol.
+
+Fetching a user's bundles consumes a one-time prekey on each of their
+devices. Every outgoing message uses the same `MessageSender` path, which:
+
+1. Uses stored devices and existing sessions.
+2. Fetches at most once in a send attempt; after `INVALID_DEVICE`, retries
+   newly discovered targets and drops removed targets.
+3. Builds only missing sessions. Processing a bundle over an established
+   session would restart it and must not happen.
+4. Excludes the sending device and serializes concurrent sends to one user.
+
+A changed identity key is accepted, persisted, and reported through the
+logger, as for an unverified Signal contact. Device ids are never replaced
+by registration ids.
+
+`removeFriend(userId)` removes the local relationship and its device
+directory entry, sends nothing, and leaves application entries alone.
+Names in friend requests/codes are local display labels, not
+server-verified identity.
+
+## Connection and HTTP
+
+`connect()` requires authentication and returns only when the socket is
+open. It is idempotent, joins an in-flight attempt, and cuts short reconnect
+backoff when called explicitly. The host calls it on foreground; the kit
+does not observe OS lifecycle.
+
+`disconnect()` closes the socket and stops reconnecting. An unrequested
+drop or server close reconnects with 1 s doubling to a 30 s cap, refreshing
+credentials before each attempt. Exactly one component owns reconnect.
+Keepalive pings run every 30 s; a failed ping is a drop.
+
+Every REST operation retries 429/503 at most twice. `Retry-After` seconds
+are clamped to 1..10; absent or unparsable values mean 1 s. In particular,
+the server's sub-second `Retry-After: 0` must not cause an immediate retry.
+Other non-2xx responses throw with their status and body. There are no
+unconditional request-pacing sleeps.
+
+## Observation
+
+| Surface | Meaning |
+|---|---|
+| `authState`, `connectionState` | Current state and a stream yielding the current value, then changes |
+| `friendsChanged` | Payload-free wake-up, including subscription; call `getFriends()` |
+| `messageReceived` | One buffered single-consumer stream of model keys |
+| `observeTyping(contextId)` | Current distinct typing user ids, sorted, then changes |
+| `getDebugLog()` | Up to 200 lines, newest first |
+
+`messageReceived` yields once per newly inboxed `APP_ENTRY`, never for a
+duplicate or another payload arm. Capacity is 100, dropping oldest wake-ups:
+the inbox, not the stream, is the delivery path. Hosts drain on cold start,
+foreground and reconnect as well.
+
+Observers must be cancellable without blocking mutations or other
+observers. Stream callbacks must not execute under a state lock.
+
+## Receive: persist-then-ack
+
+An acknowledgement deletes the server's copy. For each envelope:
+
+1. Require 16-byte envelope, sender-user, and sender-device UUIDs.
+2. Select the Signal session by the sender-device UUID and decrypt.
+3. Record the authenticated sender device and classify the content.
+4. Persist the inbox row or complete the internal handler.
+5. Wake the host for a newly inserted application row, then acknowledge.
+
+Malformed identity, failed decrypt, or failed durable handling is logged
+and not acknowledged. An inbox duplicate counts as persisted and is
+acknowledged without another wake-up. Prekeys below 20 trigger replenishment
+of 50, with at most one upload in flight; failures are logged.
+
+| Payload | Handling |
+|---|---|
+| `APP_ENTRY` | Inbox opaque `data`, model, id and timestamp |
+| `FRIEND_REQUEST`, `FRIEND_ACCEPT` | Kit-internal friend transition |
+| `TYPING_SIGNAL` | Ephemeral, no inbox row |
+| Unknown/unset arm | Inbox the whole serialized message as `UNKNOWN` |
+
+A request from an unknown sender becomes pending-received. Crossed
+requests accept the friendship. Other requests do not relabel known
+peers. An accept promotes only a pending-sent relationship.
+
+Incoming entry timestamps are capped at local `now + 60 s`. The inbound
+Signal address is `(senderDeviceUUID, 1)`; attribution comes from this
+session and the server envelope, never application data.
+
+## Inbox
+
+`peek(limit)`, `consume(ids)`, `discard(ids, reason)`, and `depth()` are
+the public API. Insert is internal.
+
+Rows contain a local monotonic `id`, `kind`, authenticated sender user/device,
+nullable model/id/timestamp, and opaque bytes. Peek is stable oldest-first
+and has no side effects. Consume/discard are idempotent and accept partial
+batches. Discard logs its reason.
+
+Envelope ids are unique while pending, preventing duplicate insertion or
+notification. Consumed ids are not retained as tombstones: application
+merge must be idempotent.
+
+An app drain peeks a bounded batch, validates and authorizes, merges and
+writes entries, then consumes. No transaction spans entries and consume;
+a crash can replay a row. Transient failures leave rows pending; permanent
+rejections are discarded explicitly. The app monitors abnormal inbox depth.
+
+## Entry store
+
+`put(model, entry)`, `get(model, ids)`, `all(model)`, `erase(model, ids)`.
+
+`StoredEntry` contains id, opaque data, timestamp, author device, and
+nullable opaque `localMetadata`. Put is a blind upsert. Merge is the app's
+job. Local metadata never enters the wire payload.
+
+Get returns named rows that exist. Erase enables `secure_delete` on the
+deleting connection, deletes in bounded batches, then checkpoints and
+truncates the WAL once per call. It must remove recoverable content from
+both main database and WAL, not merely make rows invisible. An empty erase
+is a no-op. Durable deletion failures propagate.
+
+## Send
+
+`send(recipientUserIds, modelKey, entryId, sentAt, payload, acceptedDeviceIds)`
+returns `SendReport { recipients, selfSync }`.
+
+The kit never infers or broadens recipients. Duplicates and the sender's
+own user id are excluded from peer recipients. It sends separately to the
+sender's other devices and never writes a local entry.
+
+Each result has user id, nullable device id, status
+(`accepted`, `rejected`, `unknown`), and optional error.
+Accepted means queued by the server, not delivered or viewed. Bundles or
+encryption failures are rejected; uncertain submission outcomes are unknown.
+HTTP 200 alone is not enough: the server's per-submission failures are decoded.
+
+`acceptedDeviceIds` is caller-retained evidence: those devices are reported
+accepted without resubmission. A missing device list is a rejected
+user-level result, not empty-audience success. Self-sync/discovery failure
+cannot prevent peer attempts or invalidate their acceptance.
+
+The kit owns no send queue. Durable retries, audience policy, versioning,
+and expiry belong to the app.
+
+## Typing, attachments and push
+
+`sendTyping(recipients, contextId, state)` requires authentication and a
+nonblank opaque context. It sends to distinct peers other than self,
+throttled to once per 2 s per `(context, state)`. Per-recipient delivery
+failures are logged and ignored.
+
+Received `STARTED` lasts 5 s from receipt, renewed per sender device;
+`STOPPED` clears that device. Typing is client-local, cleared on logout,
+and never authorizes recipients or parses a conversation.
+
+`uploadAttachment` encrypts with fresh AES-256-GCM key/nonce and returns
+id/key/nonce. Download returns decrypted bytes; kits keep no decrypted
+cache. `registerPushToken` registers the host's token.
+
+Android's `processPendingMessages(timeoutMs)` connects/reuses the receive
+path and waits within its budget. It returns processed-envelope count,
+including redeliveries, and 0 when connection fails; 0 is not proof that
+the server queue is empty. It does not consume application inbox rows.
+There is no Swift push-drain API without an implemented iOS push host.
+
+## Errors
+
+Both kits use these deliberate error codes:
+
+`NOT_AUTHENTICATED`, `INVALID_ARGUMENT`, `INVALID_FRIEND_CODE`,
+`HTTP_ERROR`, `CONNECTION_FAILED`, `SEND_FAILED`, `PROTOCOL_VIOLATION`,
+`STORAGE_ERROR`.
+
+HTTP errors retain status/body; other classified errors retain useful
+details. Underlying database, filesystem and cryptographic failures
+propagate rather than becoming success or silent defaults. Bridges preserve
+kit codes and use per-method codes for unclassified platform failures.

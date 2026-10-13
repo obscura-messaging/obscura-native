@@ -129,9 +129,6 @@ jobs:
       - name: Integration tests
         env:
           OBSCURA_TEST_API: http://localhost:3000
-          # Client-side pacing exists for prod rate limits; the local container
-          # has them disabled, so drop the 500ms-per-auth-call sleep.
-          AUTH_REQUEST_DELAY_MS: 0
         run: just --justfile ../justfile kotlin-integration http://localhost:3000
 
       - name: Upload integration-test report

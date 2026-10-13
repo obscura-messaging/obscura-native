@@ -193,10 +193,6 @@ jobs:
       - name: Integration tests
         env:
           OBSCURA_TEST_API: http://localhost:3000
-          # Client-side pacing exists for prod rate limits; the local server
-          # has them disabled, so drop the sleeps (auth pacing alone is 1s/call).
-          SERVER_REQUEST_DELAY_MS: 0
-          AUTH_REQUEST_DELAY_MS: 0
         run: just --justfile ../justfile swift-integration http://localhost:3000
 
       - name: Server log on failure
