@@ -219,13 +219,14 @@ extension ObscuraClient {
         min(sentAt, UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)
     }
 
-    /// The payload username names a stranger only; a known peer's request changes nothing, except
-    /// that crossed requests are mutual consent.
+    /// Known requests never relabel peers. An accepted account can explicitly re-add this peer
+    /// from a new independent installation.
     private func receivedFriendRequest(from userId: String, username: String) async throws {
         switch try await friends.friend(userId)?.status {
         case nil: try await friends.add(userId, username: username, status: .pendingReceived)
         case .pendingSent?: try await acceptFriend(userId)
-        case .pendingReceived?, .accepted?: break
+        case .accepted?: try await sendFriendAccept(to: userId)
+        case .pendingReceived?: break
         }
     }
 
