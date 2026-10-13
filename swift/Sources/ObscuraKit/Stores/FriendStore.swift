@@ -11,17 +11,14 @@ public struct Friend: Codable, Sendable, Equatable {
     public var userId: String
     public var username: String
     public var status: FriendStatus
-    public var devices: [[String: String]]
-    public var devicesUpdatedAt: UInt64
     public var createdAt: UInt64
     public var updatedAt: UInt64
 
-    public init(userId: String, username: String, status: FriendStatus, devices: [[String: String]] = []) {
+    /// A friend's devices live in ``DeviceStore``.
+    public init(userId: String, username: String, status: FriendStatus) {
         self.userId = userId
         self.username = username
         self.status = status
-        self.devices = devices
-        self.devicesUpdatedAt = 0
         self.createdAt = UInt64(Date().timeIntervalSince1970 * 1000)
         self.updatedAt = self.createdAt
     }
@@ -68,16 +65,14 @@ public actor FriendStore {
 
     // A durable write that backs an acked message must be able to fail loudly,
     // so the envelope loop skips the ack instead of deleting an un-persisted message server-side.
-    public func add(_ userId: String, _ username: String, status: FriendStatus, devices: [[String: String]] = []) async throws {
+    public func add(_ userId: String, _ username: String, status: FriendStatus) async throws {
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
-        let devicesJson = (try? JSONSerialization.data(withJSONObject: devices)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-
         try await db.write { db in
             try db.execute(sql: """
                 INSERT OR REPLACE INTO friends (
-                    user_id, username, status, devices, devices_updated_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 0, ?, ?)
-            """, arguments: [userId, username, status.rawValue, devicesJson, now, now])
+                    user_id, username, status, devices_updated_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 0, ?, ?)
+            """, arguments: [userId, username, status.rawValue, now, now])
         }
     }
 
@@ -106,28 +101,6 @@ public actor FriendStore {
         }
     }
 
-    public func updateDevices(_ userId: String, devices: [[String: String]], timestamp: UInt64? = nil) async throws {
-        // Saturating, not `Int64(_:)`: that TRAPS above `Int64.max`, and a trap is uncatchable — it
-        // kills the process rather than surfacing as a throw. `ObscuraClient` clamps the wire value
-        // before it gets here, but this store is PUBLIC and the bind is the last line of defence.
-        // `InboxStore.peek` saturates for the same reason at the other end of the same problem.
-        //
-        // Saturating at `Int64.max` deliberately does NOT resurrect the freeze this once caused: the
-        // caller's clamp is what keeps `devices_updated_at` near now, and the LWW guard below is what
-        // needs it. This only guarantees the bind cannot kill the app if a clamp is ever missed.
-        let rawTs = timestamp ?? UInt64(Date().timeIntervalSince1970 * 1000)
-        let ts = Int64(clamping: rawTs)
-        let devicesJson = (try? JSONSerialization.data(withJSONObject: devices)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-
-        try await db.write { db in
-            // LWW: only update if newer
-            try db.execute(sql: """
-                UPDATE friends SET devices = ?, devices_updated_at = ?, updated_at = ?
-                WHERE user_id = ? AND devices_updated_at < ?
-            """, arguments: [devicesJson, ts, ts, userId, ts])
-        }
-    }
-
     public func remove(_ userId: String) async throws {
         try await db.write { db in
             try db.execute(sql: "DELETE FROM friends WHERE user_id = ?", arguments: [userId])
@@ -152,21 +125,11 @@ public actor FriendStore {
     }
 
     private static func rowToFriend(_ row: Row) -> Friend? {
-        let devicesJson: String = row["devices"]
-        let devices: [[String: String]] = {
-            guard let data = devicesJson.data(using: .utf8),
-                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: String]]
-            else { return [] }
-            return parsed
-        }()
-
         var friend = Friend(
             userId: row["user_id"],
             username: row["username"],
-            status: FriendStatus(rawValue: row["status"]) ?? .pendingSent,
-            devices: devices
+            status: FriendStatus(rawValue: row["status"]) ?? .pendingSent
         )
-        friend.devicesUpdatedAt = UInt64(row["devices_updated_at"] as Int64)
         friend.createdAt = UInt64(row["created_at"] as Int64)
         friend.updatedAt = UInt64(row["updated_at"] as Int64)
         return friend

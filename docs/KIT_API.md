@@ -73,6 +73,42 @@ selection and labelling. The trust root is the Signal session.
 5. A kit that knows the owner of `sender_device_id` SHOULD cross-check
    `sender_id` and log a mismatch as a security event.
 
+## Devices and sessions
+
+Each kit keeps one device directory: every device it can address, keyed by
+`(userId, deviceId)`, including the user's own. Nothing else caches device
+lists. Fetching a user's prekey bundles consumes a one-time prekey on every one
+of their devices, so every outgoing message (entries, typing, friend requests,
+announcements, link approvals) takes one send path with these rules:
+
+1. Use the directory's devices and the existing Signal sessions.
+2. Fetch the user's bundles only when the directory lists no device for them, a
+   target device has no session, or the server rejects a listed device with
+   `ERROR_CODE_INVALID_DEVICE`. In the last case, fetch once and send to the
+   devices the server lists now; results for devices it no longer lists are
+   dropped.
+3. A fetch builds a session only for a device that has none. Processing a bundle
+   over an established session restarts it and MUST NOT happen.
+4. A fetch replaces the user's directory entry with the server's list, minus
+   devices whose bundle could not be processed, so a broken bundle cannot cause
+   a fetch on every send. A 404 means the user has no devices.
+5. The sending device is never a target. Sends to one user are serialized, so
+   concurrent first contacts share one fetch.
+
+A friend's `DEVICE_ANNOUNCE` replaces that friend's directory entry only when
+its (clamped) timestamp is newer than the entry's last write. A fetch stamps the
+entry with the current time. An announcement from a non-friend changes nothing.
+
+**Identity keys.** As Signal does for an unverified contact, a changed identity
+key is accepted rather than refused: the kit stores the new key, replaces the
+session, and reports the change through the logger's identity-changed event so
+the app can show that the safety number changed.
+
+**Takeover** generates a new identity and prekeys, clears every session, and
+announces this device's list to accepted friends, whose devices then replace
+their sessions. The server ends the device's connection and deletes its queued
+messages; the caller connects again.
+
 **Sender names** come from the local friend graph keyed by `sender_id`, never
 from a payload. The one exception is a `FriendRequest` from someone not yet in
 the graph: its payload `username` is a request-time label only and MUST NOT be
@@ -200,13 +236,15 @@ send(recipientUserIds, modelKey, entryId, sentAt, payloadBytes, acceptedDeviceId
 
 The only app payload send. The kit resolves each named user's devices, adds the
 sender's other devices, excludes the sending device, encrypts per device and
-uploads one envelope per device. It MUST NOT broaden or substitute recipients.
+uploads one envelope per device, following
+[Devices and sessions](#devices-and-sessions). It MUST NOT broaden or
+substitute recipients.
 The sender's own id and duplicates in `recipientUserIds` are ignored. The sender
 gets no inbox row; the app writes its own copy to the entry store. The caller
 validates size and schema.
 
-Each recipient is attempted independently in a scoped batch, never by flushing
-another caller's queue. Each result contains `userId`, nullable `deviceId`,
+Each recipient is attempted independently in its own batch; the kit keeps no
+send queue. Each result contains `userId`, nullable `deviceId`,
 `status` (`accepted`, `rejected`, `unknown`) and optional `error`. Device
 resolution or encryption failure is rejected; an HTTP failure or an invalid
 response leaves submission acceptance unknown. HTTP 200 alone is not acceptance:
@@ -217,8 +255,7 @@ contains evidence retained by the caller from previous attempts; these devices
 are reported accepted without encrypting or submitting again. A missing device
 list produces a rejected user-level result, never empty-audience success.
 Self-sync outcomes are separate and cannot invalidate recipient acceptance.
-The app owns durable retries. Entry attempts are not retained in the kit's
-in-memory control-message queue. A retry is a new encrypted transport attempt
+The app owns durable retries. A retry is a new encrypted transport attempt
 of the same logical entry/version; app merge must remain idempotent. Neither
 kit parses the application payload or decides whether it has expired.
 
@@ -273,4 +310,6 @@ Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
 - A `DEVICE_ANNOUNCE` is ordered only by its sender-declared (clamped)
   timestamp: last writer wins, with no other freshness check.
 - Partial-recipient send failures are invisible to the app.
+- Kotlin does not complete a close the server initiates, so after one (for
+  example a takeover) the client still reports `CONNECTED` on a dead socket.
 - Consumed inbox envelope ids have no durable tombstone.

@@ -43,7 +43,7 @@ class EntrySendTests {
     }
 
     /**
-     * `getSelfSyncTargets()` returns every own device *including this one*, so a send that does not
+     * The own-device list includes this device, so a send that does not
      * filter would encrypt a copy to itself. A single-device sender makes the echo unmissable.
      */
     @Test

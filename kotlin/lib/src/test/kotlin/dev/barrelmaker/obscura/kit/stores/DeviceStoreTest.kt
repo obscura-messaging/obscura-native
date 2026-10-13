@@ -3,85 +3,97 @@ package dev.barrelmaker.obscura.kit.stores
 import dev.barrelmaker.obscura.kit.newInMemoryDatabase
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/**
- * DeviceStore handles the local device identity row + the own-devices
- * list. Wrong behavior here means the wrong device gets credit for
- * messages or a user's device list reads stale. Tests use an in-memory
- * sqldelight DB (the same driver that ObscuraClient itself uses in
- * test mode), no mocks.
- */
+/** The device directory: the only record of which devices each user has. */
 class DeviceStoreTest {
 
-    private fun newDomain() = DeviceStore(newInMemoryDatabase())
+    private val db = newInMemoryDatabase()
+    private val devices = DeviceStore(db)
+    private val friends = FriendStore(db)
 
-    private fun sampleIdentity(deviceId: String = "device-1") = DeviceIdentityData(
-        deviceId = deviceId,
-    )
+    private suspend fun ids(userId: String) = devices.devicesOf(userId).map { it.deviceId }
 
     @Test
-    fun `getIdentity returns null when none stored`() = runTest {
-        assertNull(newDomain().getIdentity())
+    fun `identity round-trips and starts empty`() = runTest {
+        assertNull(devices.getIdentity())
+        devices.storeIdentity(DeviceIdentityData("device-1"))
+        assertEquals(DeviceIdentityData("device-1"), devices.getIdentity())
     }
 
     @Test
-    fun `store then get identity round-trips the device id`() = runTest {
-        val d = newDomain()
-        d.storeIdentity(sampleIdentity())
+    fun `devices are listed per user`() = runTest {
+        devices.add(DeviceData("me", "d1", "Pixel"))
+        devices.add(DeviceData("peer", "d2"))
 
-        val loaded = d.getIdentity()!!
-        assertEquals("device-1", loaded.deviceId)
+        assertEquals(listOf(DeviceData("me", "d1", "Pixel")), devices.devicesOf("me"))
+        assertEquals(listOf("d2"), ids("peer"))
     }
 
     @Test
-    fun `addOwnDevice then getOwnDevices returns the row`() = runTest {
-        val d = newDomain()
-        d.addOwnDevice(OwnDeviceData(
-            deviceId = "dev-a",
-            deviceName = "Pixel 8",
-        ))
+    fun `replace swaps a user's whole list and leaves other users alone`() = runTest {
+        devices.add(DeviceData("me", "old"))
+        devices.add(DeviceData("peer", "p1"))
 
-        val devices = d.getOwnDevices()
-        assertEquals(1, devices.size)
-        assertEquals("dev-a", devices[0].deviceId)
-        assertEquals("Pixel 8", devices[0].deviceName)
+        devices.replace("me", listOf(DeviceData("me", "a", "A"), DeviceData("me", "b", "B")))
+
+        assertEquals(listOf("a", "b"), ids("me"))
+        assertEquals(listOf("p1"), ids("peer"))
     }
 
     @Test
-    fun `setOwnDevices replaces existing list`() = runTest {
-        val d = newDomain()
-        d.addOwnDevice(OwnDeviceData("old-dev", "Old Phone"))
-        assertEquals(1, d.getOwnDevices().size)
+    fun `a device id claimed for one user cannot be taken from another`() = runTest {
+        devices.add(DeviceData("victim", "d1"))
+        friends.add("mallory", "mallory", FriendStatus.ACCEPTED)
 
-        d.setOwnDevices(listOf(
-            FriendDeviceInfo("new-dev-1", "Phone A"),
-            FriendDeviceInfo("new-dev-2", "Phone B"),
-        ))
+        devices.applyAnnounce("mallory", listOf(DeviceData("mallory", "d1")), 1_000)
 
-        val after = d.getOwnDevices()
-        assertEquals(2, after.size)
-        val ids = after.map { it.deviceId }.toSet()
-        assertTrue("new-dev-1" in ids)
-        assertTrue("new-dev-2" in ids)
-        assertTrue("old-dev" !in ids, "Old device must be wiped by setOwnDevices")
+        assertEquals(listOf("d1"), ids("victim"))
+        assertEquals(listOf("d1"), ids("mallory"))
     }
 
     @Test
-    fun `getSelfSyncTargets returns own device ids`() = runTest {
-        val d = newDomain()
-        d.addOwnDevice(OwnDeviceData("dev-1", "A"))
-        d.addOwnDevice(OwnDeviceData("dev-2", "B"))
+    fun `a server refresh keeps known names and drops devices the server no longer lists`() = runTest {
+        devices.replace("peer", listOf(DeviceData("peer", "keep", "Phone"), DeviceData("peer", "gone", "Tablet")))
 
-        val targets = d.getSelfSyncTargets()
-        assertEquals(setOf("dev-1", "dev-2"), targets.toSet())
+        devices.replaceFromServer("peer", listOf("keep", "new"))
+
+        assertEquals(listOf(DeviceData("peer", "keep", "Phone"), DeviceData("peer", "new", "")), devices.devicesOf("peer"))
     }
 
     @Test
-    fun `getSelfSyncTargets returns empty list when no own devices`() = runTest {
-        assertEquals(emptyList<String>(), newDomain().getSelfSyncTargets())
+    fun `announcements apply only to friends and only when newer`() = runTest {
+        assertFalse(devices.applyAnnounce("stranger", listOf(DeviceData("stranger", "d")), 1_000))
+        assertEquals(emptyList<String>(), ids("stranger"))
+
+        friends.add("peer", "alice", FriendStatus.ACCEPTED)
+        assertTrue(devices.applyAnnounce("peer", listOf(DeviceData("peer", "v2")), 2_000))
+        assertFalse(devices.applyAnnounce("peer", listOf(DeviceData("peer", "v1")), 1_000))
+        assertFalse(devices.applyAnnounce("peer", listOf(DeviceData("peer", "v1")), 2_000))
+
+        assertEquals(listOf("v2"), ids("peer"))
+    }
+
+    @Test
+    fun `a server refresh outranks announcements sent before it`() = runTest {
+        friends.add("peer", "alice", FriendStatus.ACCEPTED)
+        devices.replaceFromServer("peer", listOf("current"))
+
+        assertFalse(devices.applyAnnounce("peer", listOf(DeviceData("peer", "stale")), System.currentTimeMillis() - 1_000))
+        assertEquals(listOf("current"), ids("peer"))
+    }
+
+    @Test
+    fun `clear removes identity and every device`() = runTest {
+        devices.storeIdentity(DeviceIdentityData("device-1"))
+        devices.add(DeviceData("me", "device-1"))
+
+        devices.clear()
+
+        assertNull(devices.getIdentity())
+        assertEquals(emptyList<String>(), ids("me"))
     }
 }

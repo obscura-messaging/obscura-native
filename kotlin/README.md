@@ -82,8 +82,7 @@ when (client.login(username, password)) {
 - `logout()` disconnects, forgets credentials and clears `SessionStorage`;
   local data stays. `fullLogout()` also stops all background jobs and typing
   state. `wipeDevice()` logs out and deletes all local kit data.
-- `takeoverDevice()` replaces this device's identity and prekeys on the server
-  and drops its sessions with accepted friends' devices.
+- `takeoverDevice()`: see [Takeover](../docs/KIT_API.md#devices-and-sessions).
 - The gateway reconnects with backoff 1 s doubling to a 30 s cap. REST calls
   retry HTTP 429/503 twice, honouring `Retry-After` up to 10 s.
 
@@ -92,8 +91,8 @@ when (client.login(username, password)) {
 `friendCode()` returns standard Base64 of `{"u": userId, "n": username}`.
 `addFriendByCode(code)` strips whitespace and soft hyphens (`U+00AD`, added by
 iOS share sheets), accepts the URL-safe alphabet, rejects an empty `u` or `n`,
-then calls `befriend`. The code is not secret; identity is pinned by the Signal
-session on first contact.
+then calls `befriend`. The code is not secret; the peer's identity key is bound
+to its Signal session.
 
 ## Code map (`lib/src/main/kotlin/dev/barrelmaker/obscura/kit/`)
 
@@ -113,9 +112,9 @@ session on first contact.
   `Dispatchers.Default.limitedParallelism(1)`. Keep HTTP off the `Messenger`
   dispatcher: the receive path shares it, so a slow request stalls
   decrypt, persist and ack for everyone.
-- **One encryption path.** Scoped sends call `Messenger.prepareSubmission`,
-  which builds a session from the peer's prekey bundle on first contact.
-  `queueMessage` wraps it for the remaining queued control paths.
+- **One send path.** Every outgoing message goes through
+  `MessageSender.send`, which applies the device and session rules in
+  [`KIT_API.md`](../docs/KIT_API.md#devices-and-sessions).
   `Messenger.addressFor` is the only `SignalProtocolAddress` constructor; send
   and receive must build identical addresses or the session splits.
 - **JUnit 5 ignores a non-void `@Test`.** A body ending in `assertThrows(...)`

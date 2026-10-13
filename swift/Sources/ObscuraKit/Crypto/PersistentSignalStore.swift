@@ -100,13 +100,12 @@ public class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeyS
         return existing != nil
     }
 
+    /// Signal's policy for an unverified contact: a changed identity key (reinstall, takeover) is
+    /// accepted, not refused. `saveIdentity` records the new key and logs the change as a security
+    /// event, so the app can show that the safety number changed. Refusing it would leave the peer
+    /// permanently unreachable, with no way to recover.
     public func isTrustedIdentity(_ identity: IdentityKey, for address: ProtocolAddress, direction: Direction, context: StoreContext) throws -> Bool {
-        let addressStr = "\(address.name).\(address.deviceId)"
-        let stored: Data? = try db.read { db in
-            try Data.fetchOne(db, sql: "SELECT key_data FROM signal_identities WHERE address = ?", arguments: [addressStr])
-        }
-        guard let stored = stored else { return true } // TOFU
-        return constantTimeEqual(stored, Data(identity.serialize()))
+        true
     }
 
     public func identity(for address: ProtocolAddress, context: StoreContext) throws -> IdentityKey? {
@@ -197,10 +196,9 @@ public class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeyS
         }
     }
 
-    public func deleteAllSessions(for userId: String) throws {
-        try db.write { db in
-            try db.execute(sql: "DELETE FROM signal_sessions WHERE address LIKE ?", arguments: ["\(userId).%"])
-        }
+    /// Every session with every peer. Used when this device's own identity changes.
+    public func deleteAllSessions() throws {
+        try db.write { db in try db.execute(sql: "DELETE FROM signal_sessions") }
     }
 
     // MARK: - SenderKeyStore

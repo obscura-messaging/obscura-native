@@ -135,7 +135,7 @@ class ObscuraClient(
 
     // Managers
     private val authManager: AuthManager
-    private val messageSender: MessageSender
+    internal val messageSender: MessageSender
     private val friendshipManager: FriendshipManager
     private val contentService: ContentService
     private val deviceManager: DeviceManager
@@ -218,10 +218,8 @@ class ObscuraClient(
             session = session,
             api = api,
             signalStore = signalStore,
-            messenger = messenger,
             friends = friends,
             devices = devices,
-            db = db
         )
 
         // Create managers — order matters: AuthManager before MessageSender
@@ -241,9 +239,8 @@ class ObscuraClient(
             onWipeDevice = {
                 envelopeJob?.cancel()
                 gateway.disconnect() // fires onStateChanged → _connectionState = DISCONNECTED
-                db.friendQueries.deleteAll()
-                db.deviceQueries.deleteAllDevices()
-                db.deviceQueries.deleteIdentity()
+                friends.clear()
+                devices.clear()
                 db.signalKeyQueries.deleteLocalIdentity()
                 db.signalKeyQueries.deleteAllSignalData()
                 db.signalKeyQueries.deleteAllPreKeys()
@@ -257,7 +254,7 @@ class ObscuraClient(
             onSessionChanged = { persistSession() }
         )
 
-        messageSender = MessageSender(messenger, authManager, api)
+        messageSender = MessageSender(session, api, messenger, devices) { authManager.ensureFreshToken() }
         ctx.messageSender = messageSender
 
         // Wire gateway reconnect token refresh
@@ -282,10 +279,7 @@ class ObscuraClient(
 
         contentService = ContentService(ctx = ctx)
 
-        deviceManager = DeviceManager(
-            ctx = ctx,
-            announceDevicesCallback = { announceDevices() }
-        )
+        deviceManager = DeviceManager(ctx)
 
         // Reactive observation — auto-updates StateFlows when DB changes
         startDatabaseObservation()
@@ -296,7 +290,7 @@ class ObscuraClient(
             db.friendQueries.selectAll()
                 .asFlow()
                 .mapToList(Dispatchers.IO)
-                .map { rows -> rows.map { it.toObservedFriendData() } }
+                .map { rows -> rows.map { it.toFriendData() } }
                 .collect {
                     _friendList.value = it
                     _friendsChanged.tryEmit(Unit)
@@ -459,7 +453,6 @@ class ObscuraClient(
         log("CONNECT start")
         try {
             ensureFreshToken()
-            messenger.rebuildDeviceMap(friends.getAccepted())
             // gateway.connect() drives _connectionState via onStateChanged (the sole
             // writer): CONNECTING now, then CONNECTED on open — set synchronously
             // before this suspends-return — or DISCONNECTED if the open fails (throws).
@@ -905,8 +898,7 @@ class ObscuraClient(
 
     private suspend fun handleFriendRequest(msg: ClientMessage, sourceUserId: String) {
         // sourceUserId is envelope.sender_id — the requester's USER id, server-stamped and
-        // authenticated by the Signal session that decrypted this message (TOFU: libsignal pins the
-        // sender's identity key on first contact, exactly as Signal does).
+        // authenticated by the Signal session that decrypted this message.
         //
         // The payload username is a first-contact label only. A known peer
         // cannot use another request to replace its locally trusted name or friendship status.
@@ -919,9 +911,7 @@ class ObscuraClient(
                 logger.log("crossed friend request from $sourceUserId promoted to accepted")
                 return
             }
-            // Already known. The name now comes from our graph, never from their payload. Refresh
-            // the device list (that IS ours to learn) and change nothing else.
-            friends.updateDevices(sourceUserId, messenger.knownDevicesFor(sourceUserId))
+            // Already known. The name comes from our graph, never from their payload; change nothing.
             logger.log(
                 "friend request from already-known peer $sourceUserId (status=${existing.status.value}); " +
                     "keeping stored name and status"
@@ -929,8 +919,7 @@ class ObscuraClient(
             return
         }
         // Genuine first contact: the payload username is the only name that exists.
-        friends.add(sourceUserId, msg.friendRequest.username, FriendStatus.PENDING_RECEIVED,
-            messenger.knownDevicesFor(sourceUserId))
+        friends.add(sourceUserId, msg.friendRequest.username, FriendStatus.PENDING_RECEIVED)
     }
 
     private suspend fun handleFriendAccept(sourceUserId: String) {
@@ -948,14 +937,12 @@ class ObscuraClient(
         // Promote in place. The name stays the one WE recorded when we sent the request; the
         // payload's username is not consulted.
         friends.updateStatus(sourceUserId, FriendStatus.ACCEPTED)
-        friends.updateDevices(sourceUserId, messenger.knownDevicesFor(sourceUserId))
     }
 
     internal suspend fun handleDeviceAnnounce(msg: ClientMessage, sourceUserId: String) {
-        val announce = msg.deviceAnnounce
-        friends.updateDevices(
+        devices.applyAnnounce(
             sourceUserId,
-            announce.devicesList.map { d -> FriendDeviceInfo(d.id, d.name) },
+            msg.deviceAnnounce.devicesList.map { DeviceData(sourceUserId, it.id, it.name) },
             clampFutureTimestamp(msg.timestamp),
         )
     }
@@ -1005,18 +992,16 @@ class ObscuraClient(
             }
         }
 
-        // Import device list from approval
-        val approvedDevices = approval.ownDevicesList.map { d ->
-            FriendDeviceInfo(d.id, d.name)
+        // Import the account's device list and friend graph from the approval.
+        if (approval.ownDevicesCount > 0) {
+            devices.replace(sourceUserId, approval.ownDevicesList.map { DeviceData(sourceUserId, it.id, it.name) })
         }
-        if (approvedDevices.isNotEmpty()) {
-            devices.setOwnDevices(approvedDevices)
-        }
-
-        // Import friend data from approval
         if (approval.friendsExport.size() > 0) {
             try {
-                friends.importAll(String(approval.friendsExport.toByteArray()))
+                for ((friend, friendDevices) in FriendExport.decode(approval.friendsExport.toStringUtf8())) {
+                    friends.add(friend.userId, friend.username, friend.status)
+                    devices.replace(friend.userId, friendDevices)
+                }
             } catch (e: Exception) { log("friend import from link approval failed: ${e.message}") }
         }
 
@@ -1058,7 +1043,7 @@ class ObscuraClient(
             })
             .build()
         for (recipientUserId in recipientUserIds.distinct().filter { it != userId }) {
-            messageSender.sendToAllDevices(recipientUserId, message)
+            messageSender.sendOrThrow(recipientUserId, message)
         }
     }
 
@@ -1159,19 +1144,4 @@ internal fun shouldForceReconnectAfterPush(
     if (lastProcessedAtMs == 0L) return true
 
     return nowMs - lastProcessedAtMs > recentActivityWindowMs
-}
-
-/**
- * Row-to-[FriendData] projection for [ObscuraClient.friendList].
- *
- * Kept as a small explicit projection so the observed facade does not depend on generated
- * SQLDelight row types.
- */
-private fun Friend.toObservedFriendData(): FriendData {
-    return FriendData(
-        userId = user_id,
-        username = username,
-        status = FriendStatus.entries.find { it.value == status } ?: FriendStatus.PENDING_SENT,
-        devices = parseFriendDevices(devices),
-    )
 }

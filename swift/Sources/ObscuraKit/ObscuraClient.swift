@@ -130,8 +130,14 @@ public class ObscuraClient {
     /// Opaque storage for the app's entries. It does not merge, expire, or route them.
     public let entries: EntryStore
 
-    // Messenger is initialized after register/login with real keys
-    private var _messenger: Messenger?
+    // Messenger is initialized after register/login with real keys. The send path is rebuilt with
+    // it, bound to this device.
+    private var _messenger: Messenger? {
+        didSet {
+            _sender = _messenger.map { MessageSender(messenger: $0, devices: devices, api: api, selfDeviceId: deviceId) }
+        }
+    }
+    private var _sender: MessageSender?
     public private(set) var persistentSignalStore: PersistentSignalStore?
 
     private let recordingLogger: RecordingLogger
@@ -397,10 +403,6 @@ public class ObscuraClient {
         } else {
             self.registrationId = registrationId
         }
-
-        if let deviceId = deviceId {
-            await _messenger?.mapDevice(deviceId, userId: userId)
-        }
         _authState = .authenticated
     }
 
@@ -537,17 +539,17 @@ public class ObscuraClient {
         // 5. Messenger
         self._messenger = Messenger(api: api, store: store)
 
-        await recordProvisionedDevice(deviceName: "ObscuraKit-device")
+        try await recordProvisionedDevice(deviceName: "ObscuraKit-device")
 
         self._authState = .authenticated
     }
 
-    /// Store this device as the local identity `login` checks, and add it to the own-device
-    /// registry that link approval and DeviceAnnounce read. Both writes are idempotent.
-    private func recordProvisionedDevice(deviceName: String) async {
-        guard let did = self.deviceId else { return }
+    /// Store this device as the local identity `login` checks, and list it as one of the user's
+    /// devices. Both writes are idempotent.
+    private func recordProvisionedDevice(deviceName: String) async throws {
+        guard let did = self.deviceId, let uid = self.userId else { throw ObscuraError.notAuthenticated }
         await devices.storeIdentity(DeviceIdentity(deviceId: did))
-        await devices.addOwnDevice(OwnDevice(deviceId: did, deviceName: deviceName))
+        try await devices.add(Device(userId: uid, deviceId: did, name: deviceName))
     }
 
     /// Provision the current device with Signal keys. Requires token + userId already set.
@@ -583,7 +585,7 @@ public class ObscuraClient {
         let store = try initializeSignalStore(identity: identity, regId: regId, spkPrivate: spkPrivate, spkSig: spkSig, preKeyRecords: preKeyRecords)
         self._messenger = Messenger(api: api, store: store)
 
-        await recordProvisionedDevice(deviceName: deviceName)
+        try await recordProvisionedDevice(deviceName: deviceName)
 
         self._authState = .authenticated
     }
@@ -611,7 +613,6 @@ public class ObscuraClient {
                     self.identityKeyPair = try? store.identityKeyPair(context: NullContext())
                     self.registrationId = try? store.localRegistrationId(context: NullContext())
                     self._messenger = Messenger(api: api, store: store)
-                    await _messenger?.mapDevice(storedDeviceId, userId: self.userId!)
                 }
                 self._authState = .authenticated
                 return .existingDevice
@@ -669,7 +670,7 @@ public class ObscuraClient {
         let store = try initializeSignalStore(identity: identity, regId: regId, spkPrivate: spkPrivate, spkSig: spkSig, preKeyRecords: preKeyRecords)
         self._messenger = Messenger(api: api, store: store)
 
-        await recordProvisionedDevice(deviceName: deviceName)
+        try await recordProvisionedDevice(deviceName: deviceName)
 
         // Wait for DEVICE_LINK_APPROVAL only if another device exists to send it.
         await rateLimitDelay()
@@ -935,8 +936,6 @@ public class ObscuraClient {
     ///
     /// - Note: A second device does not learn about friends added after it was linked.
     public func befriend(_ targetUserId: String, username targetUsername: String) async throws {
-        _ = try requireMessenger()
-
         let existing = await friends.getFriend(targetUserId)
         switch existing?.status {
         case .accepted:
@@ -952,7 +951,7 @@ public class ObscuraClient {
         msg.friendRequest.username = username ?? ""
         msg.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
 
-        try await sendToAllDevices(targetUserId, msg)
+        try await requireSender().sendOrThrow(to: targetUserId, msg.serializedData())
         if existing == nil {
             try await friends.add(targetUserId, targetUsername, status: .pendingSent)
         }
@@ -962,90 +961,61 @@ public class ObscuraClient {
     ///
     /// - Note: friendship changes are not copied to own devices after link time.
     public func acceptFriend(_ targetUserId: String) async throws {
-        _ = try requireMessenger()
-
         var msg = Obscura_Client_V1_ClientMessage()
         msg.friendAccept = Obscura_Client_V1_FriendAccept()
         msg.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
 
-        try await sendToAllDevices(targetUserId, msg)
+        try await requireSender().sendOrThrow(to: targetUserId, msg.serializedData())
         try await friends.updateStatus(targetUserId, .accepted)
     }
 
     /// Announce the current device list to all friends.
     public func announceDevices() async throws {
-        let ownDevices = await devices.getOwnDevices()
+        guard let uid = userId else { throw ObscuraError.notAuthenticated }
         var announce = Obscura_Client_V1_DeviceAnnounce()
-        announce.devices = ownDevices.map { dev in
-            var info = Obscura_Client_V1_DeviceInfo()
-            info.id = dev.deviceId
-            info.name = dev.deviceName
-            return info
-        }
+        announce.devices = try await devices.devices(of: uid).map(Self.deviceInfo)
 
         var msg = Obscura_Client_V1_ClientMessage()
         msg.deviceAnnounce = announce
         msg.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
 
-        let accepted = await friends.getAccepted()
-        for friend in accepted {
-            try await sendToAllDevices(friend.userId, msg)
+        let data = try msg.serializedData()
+        let sender = try requireSender()
+        for friend in await friends.getAccepted() {
+            try await sender.sendOrThrow(to: friend.userId, data)
         }
     }
 
-    /// Signal sessions are keyed on peer device UUID, so clearing a user means clearing each of
-    /// that user's device sessions.
-    /// `deleteAllSessions(for:)` matches on the address-name prefix, so passing a device UUID here
-    /// deletes exactly that device's session.
-    private func clearSessionsWithUser(_ userId: String) async {
-        guard let messenger = _messenger else { return }
-        for deviceId in await messenger.getDeviceIdsForUser(userId) {
-            try? persistentSignalStore?.deleteAllSessions(for: deviceId)
-        }
+    private static func deviceInfo(_ device: Device) -> Obscura_Client_V1_DeviceInfo {
+        var info = Obscura_Client_V1_DeviceInfo()
+        info.id = device.deviceId
+        info.name = device.name
+        return info
     }
 
-    /// Approve a device link request — fetch bundles, send DEVICE_LINK_APPROVAL, then announce.
+    /// Approve a device link request: send DEVICE_LINK_APPROVAL to the new device alone, then announce.
     public func approveLink(newDeviceId: String, challengeResponse: Data) async throws {
-        let messenger = try requireMessenger()
         guard let uid = userId else { throw ObscuraError.notAuthenticated }
-
-        // Fetch prekey bundles so we can encrypt to the new device
-        let bundles = try await messenger.fetchPreKeyBundles(uid)
-        await rateLimitDelay()
-        for bundle in bundles {
-            do {
-                try await messenger.processServerBundle(bundle, userId: uid)
-            } catch {
-                logger.sessionEstablishFailed(userId: uid, error: "\(error)")
-            }
-        }
-
-        if await devices.getOwnDevices().contains(where: { $0.deviceId == newDeviceId }) == false {
+        if try await devices.devices(of: uid).contains(where: { $0.deviceId == newDeviceId }) == false {
             let deviceName = (try? await api.getDevice(newDeviceId))?.name ?? "Device"
-            await devices.addOwnDevice(OwnDevice(deviceId: newDeviceId, deviceName: deviceName))
+            try await devices.add(Device(userId: uid, deviceId: newDeviceId, name: deviceName))
         }
-        let ownDevices = await devices.getOwnDevices()
-        let friendsData = await friends.getAll()
-        let friendsExportData = Self.encodeFriendsForLink(friendsData)
+        var linkedFriends: [(Friend, [Device])] = []
+        for friend in await friends.getAll() {
+            linkedFriends.append((friend, try await devices.devices(of: friend.userId)))
+        }
 
         var approval = Obscura_Client_V1_DeviceLinkApproval()
         approval.challengeResponse = challengeResponse
-        approval.ownDevices = ownDevices.map { d in
-            var info = Obscura_Client_V1_DeviceInfo()
-            info.id = d.deviceId
-            info.name = d.deviceName
-            return info
-        }
-        approval.friendsExport = friendsExportData
+        approval.ownDevices = try await devices.devices(of: uid).map(Self.deviceInfo)
+        approval.friendsExport = Self.encodeFriendsForLink(linkedFriends)
 
         var msg = Obscura_Client_V1_ClientMessage()
         msg.deviceLinkApproval = approval
         msg.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
 
-        let msgData = try msg.serializedData()
-        try await messenger.queueMessage(targetDeviceId: newDeviceId, clientMessageData: msgData, targetUserId: uid)
-        _ = try await messenger.flushMessages()
-
+        // The approval carries the friend graph and is for the new device alone.
+        try await requireSender().sendOrThrow(to: uid, msg.serializedData(), only: [newDeviceId])
         try await announceDevices()
     }
 
@@ -1069,22 +1039,6 @@ public class ObscuraClient {
             guard let challenge = DeviceLink.extractChallenge(code) else {
                 throw ObscuraError.deviceLinkFailed("invalid challenge in link code")
             }
-
-            // Fetch prekey bundles for the new device so we can encrypt to it
-            let messenger = try requireMessenger()
-            let bundles = try await messenger.fetchPreKeyBundles(userId!)
-            await rateLimitDelay()
-
-            // Find the bundle for the new device
-            guard let newDeviceBundle = bundles.first(where: { $0.deviceId == code.deviceId }) else {
-                throw ObscuraError.deviceLinkFailed("no prekey bundle for device \(code.deviceId)")
-            }
-            try await messenger.processServerBundle(newDeviceBundle, userId: userId!)
-
-            // Add new device to own device list
-            let deviceName = (try? await api.getDevice(code.deviceId))?.name ?? "Device"
-            let newDevice = OwnDevice(deviceId: code.deviceId, deviceName: deviceName)
-            await devices.addOwnDevice(newDevice)
 
             // Approve the new device, then announce the updated device list.
             try await approveLink(newDeviceId: code.deviceId, challengeResponse: challenge)
@@ -1114,18 +1068,14 @@ public class ObscuraClient {
             oneTimePreKeys: otpKeys
         )
 
-        // The identity key changed, so clear every device-UUID session and force fresh prekey
-        // exchanges on the next send.
-        for friend in await friends.getAccepted() {
-            await clearSessionsWithUser(friend.userId)
-        }
-
         let store = try initializeSignalStore(identity: identity, regId: regId, spkPrivate: spkPrivate, spkSig: spkSig, preKeyRecords: preKeyRecords)
         self._messenger = Messenger(api: api, store: store)
 
-        if let did = deviceId, let uid = userId {
-            await _messenger?.mapDevice(did, userId: uid)
-        }
+        // Every session was built for the old identity. Clear them all, then announce: each
+        // friend's devices get a fresh prekey message from the new identity and replace the old
+        // session, instead of encrypting to an identity this device no longer holds.
+        try store.deleteAllSessions()
+        try await announceDevices()
     }
 
     // MARK: - Encrypted Attachments
@@ -1170,21 +1120,19 @@ public class ObscuraClient {
         var msg = Obscura_Client_V1_ClientMessage()
         msg.appEntry = sync
 
+        guard let selfUserId = userId else { throw ObscuraError.notAuthenticated }
+        let sender = try requireSender()
+        let data = try msg.serializedData()
+
         // Deduplicated because the app may legitimately name the same user twice — e.g. both
         // participants of a canonical `userIdA_userIdB` conversation, one of whom is you.
         var seen = Set<String>()
-        let targets = recipientUserIds.filter { $0 != userId && seen.insert($0).inserted }
-
         var recipients: [SubmissionResult] = []
-        for recipient in targets {
-            recipients += try await attemptToAllDevices(recipient, msg, acceptedDeviceIds: acceptedDeviceIds)
+        for recipient in recipientUserIds where recipient != selfUserId && seen.insert(recipient).inserted {
+            recipients += await sender.send(to: recipient, data, acceptedDeviceIds: acceptedDeviceIds)
         }
-
-        let ownDevices = await devices.getOwnDevices().filter { $0.deviceId != self.deviceId }
-        let selfSync = try await attemptDevices(
-            userId: userId ?? "", deviceIds: ownDevices.map(\.deviceId),
-            msg: msg, acceptedDeviceIds: acceptedDeviceIds
-        )
+        // The author's other devices: the same path, which never targets this device.
+        let selfSync = await sender.send(to: selfUserId, data, acceptedDeviceIds: acceptedDeviceIds)
         return SendReport(recipients: recipients, selfSync: selfSync)
     }
 
@@ -1212,12 +1160,13 @@ public class ObscuraClient {
         msg.typingSignal = signal
         msg.timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
 
+        guard let sender = _sender, let data = try? msg.serializedData() else { return }
         var seen = Set<String>()
         for recipient in recipientUserIds where
             recipient != userId && seen.insert(recipient).inserted
         {
             do {
-                try await sendToAllDevices(recipient, msg)
+                try await sender.sendOrThrow(to: recipient, data)
             } catch {
                 logger.log("typing signal to \(recipient.prefix(8)) failed: \(error)")
             }
@@ -1447,99 +1396,10 @@ public class ObscuraClient {
         try? await inbox.wipe()
     }
 
-    // MARK: - Internal: Send to all devices of a user
+    // MARK: - Internal: raw sends (adversarial tests)
 
     internal func sendSerializedClientMessage(to targetUserId: String, data: Data) async throws {
-        let messenger = try requireMessenger()
-        let bundles = try await messenger.fetchPreKeyBundles(targetUserId)
-        await rateLimitDelay()
-
-        for bundle in bundles {
-            do {
-                try await messenger.processServerBundle(bundle, userId: targetUserId)
-            } catch {
-                logger.sessionEstablishFailed(userId: targetUserId, error: "\(error)")
-                continue
-            }
-            try await messenger.queueMessage(
-                targetDeviceId: bundle.deviceId,
-                clientMessageData: data,
-                targetUserId: targetUserId
-            )
-        }
-        _ = try await messenger.flushMessages()
-    }
-
-    private func sendToAllDevices(_ targetUserId: String, _ msg: Obscura_Client_V1_ClientMessage, excludingDeviceId: String? = nil) async throws {
-        let results = try await attemptToAllDevices(targetUserId, msg, excludingDeviceId: excludingDeviceId)
-        guard results.contains(where: { $0.status == .accepted }) else {
-            throw ObscuraError.sendFailed(results.compactMap(\.error).joined(separator: "; "))
-        }
-    }
-
-    private func attemptToAllDevices(
-        _ targetUserId: String, _ msg: Obscura_Client_V1_ClientMessage,
-        acceptedDeviceIds: Set<String> = [], excludingDeviceId: String? = nil
-    ) async throws -> [SubmissionResult] {
-        let messenger = try requireMessenger()
-        let bundles: [PreKeyBundleResponse]
-        do {
-            bundles = try await messenger.fetchPreKeyBundles(targetUserId)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            return [SubmissionResult(userId: targetUserId, deviceId: nil, status: .rejected, error: "\(error)")]
-        }
-        await rateLimitDelay()
-        var prepared: [String] = []
-        var failures: [SubmissionResult] = []
-        for bundle in bundles {
-            if let excluded = excludingDeviceId, bundle.deviceId == excluded { continue }
-            if acceptedDeviceIds.contains(bundle.deviceId) {
-                prepared.append(bundle.deviceId)
-                continue
-            }
-            do {
-                try await messenger.processServerBundle(bundle, userId: targetUserId)
-            } catch {
-                failures.append(SubmissionResult(userId: targetUserId, deviceId: bundle.deviceId,
-                                                 status: .rejected, error: "\(error)"))
-                continue
-            }
-            prepared.append(bundle.deviceId)
-        }
-        if prepared.isEmpty && failures.isEmpty {
-            return [SubmissionResult(userId: targetUserId, deviceId: nil, status: .rejected, error: "No devices found")]
-        }
-        return failures + (try await attemptDevices(
-            userId: targetUserId, deviceIds: prepared, msg: msg, acceptedDeviceIds: acceptedDeviceIds
-        ))
-    }
-
-    private func attemptDevices(
-        userId: String, deviceIds: [String], msg: Obscura_Client_V1_ClientMessage,
-        acceptedDeviceIds: Set<String>
-    ) async throws -> [SubmissionResult] {
-        if deviceIds.isEmpty { return [] }
-        let messenger = try requireMessenger()
-        let data = try msg.serializedData()
-        var results: [SubmissionResult] = []
-        var submissions: [Obscura_V1_SendMessageRequest.Submission] = []
-        for deviceId in Set(deviceIds).sorted() {
-            if acceptedDeviceIds.contains(deviceId) {
-                results.append(SubmissionResult(userId: userId, deviceId: deviceId, status: .accepted))
-                continue
-            }
-            do {
-                submissions.append(try await messenger.prepareSubmission(
-                    targetDeviceId: deviceId, clientMessageData: data, targetUserId: userId
-                ))
-            } catch {
-                results.append(SubmissionResult(userId: userId, deviceId: deviceId,
-                                                 status: .rejected, error: "\(error)"))
-            }
-        }
-        return results + (try await messenger.submit(userId: userId, submissions: submissions))
+        try await requireSender().sendOrThrow(to: targetUserId, data)
     }
 
     // MARK: - Internal: Envelope Loop
@@ -1605,8 +1465,7 @@ public class ObscuraClient {
             let plaintext: [UInt8]
             do {
                 plaintext = try await messenger.decrypt(
-                    senderUserId: sourceUserId, senderDeviceUuid: senderDeviceId,
-                    content: encMsg.content, messageType: messageType
+                    senderDeviceUuid: senderDeviceId, content: encMsg.content, messageType: messageType
                 )
             } catch {
                 let entry = decryptFailures[sourceUserId] ?? (count: 0, windowStart: Date())
@@ -1713,17 +1572,7 @@ public class ObscuraClient {
                     logger.log("crossed friend request from \(sourceUserId) promoted to accepted")
                     return true
                 }
-                // Known peer: the name comes from our graph now, never from their payload. Refresh
-                // the device list (that IS ours to learn — the sending device was just added to the
-                // messenger's map by decrypt) and change nothing else.
-                if let messenger = _messenger {
-                    let deviceIds = await messenger.getDeviceIdsForUser(sourceUserId)
-                    if !deviceIds.isEmpty {
-                        try await friends.updateDevices(
-                            sourceUserId,
-                            devices: deviceIds.map { ["deviceId": $0, "deviceName": ""] })
-                    }
-                }
+                // Known peer: the name comes from our graph, never from their payload; change nothing.
                 logger.log("friend request from already-known peer \(sourceUserId) "
                     + "(status=\(existing.status.rawValue)); keeping stored name and status")
             } else {
@@ -1742,12 +1591,10 @@ public class ObscuraClient {
             }
 
         case .deviceAnnounce?:
-            let announce = msg.deviceAnnounce
-            let deviceInfos = announce.devices.map { dev -> [String: String] in
-                ["deviceId": dev.id, "deviceName": dev.name]
-            }
-            try await friends.updateDevices(sourceUserId, devices: deviceInfos,
-                                            timestamp: clampFutureTimestamp(msg.timestamp))
+            try await devices.applyAnnounce(
+                sourceUserId,
+                devices: msg.deviceAnnounce.devices.map { Device(userId: sourceUserId, deviceId: $0.id, name: $0.name) },
+                timestamp: clampFutureTimestamp(msg.timestamp))
 
         case .typingSignal?:
             await handleTypingSignal(msg, sourceUserId: sourceUserId, senderDeviceId: senderDeviceId)
@@ -1854,13 +1701,15 @@ public class ObscuraClient {
         }
     }
 
-    private static func encodeFriendsForLink(_ friends: [Friend]) -> Data {
-        let encoded = friends.map { friend -> [String: Any] in
+    /// The `friends_export` encoding shared with the Kotlin kit:
+    /// `[{"userId","username","status","devices":[{"deviceId","deviceName"}]}]`.
+    private static func encodeFriendsForLink(_ friends: [(Friend, [Device])]) -> Data {
+        let encoded = friends.map { friend, devices -> [String: Any] in
             [
                 "userId": friend.userId,
                 "username": friend.username,
                 "status": friend.status.rawValue,
-                "devices": friend.devices,
+                "devices": devices.map { ["deviceId": $0.deviceId, "deviceName": $0.name] },
             ]
         }
         return (try? JSONSerialization.data(withJSONObject: encoded)) ?? Data()
@@ -1961,6 +1810,11 @@ public class ObscuraClient {
     private func requireMessenger() throws -> Messenger {
         guard let m = _messenger else { throw ObscuraError.noMessenger }
         return m
+    }
+
+    private func requireSender() throws -> MessageSender {
+        guard let sender = _sender else { throw ObscuraError.noMessenger }
+        return sender
     }
 
     /// Generate a fresh Signal identity keypair + registration ID. Stores on self.

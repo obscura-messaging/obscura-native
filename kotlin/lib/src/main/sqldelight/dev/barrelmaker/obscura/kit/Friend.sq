@@ -1,17 +1,14 @@
+-- A friend's devices live in Device. `devices_updated_at` orders the device-list writes for this
+-- friend (DEVICE_ANNOUNCE and server refreshes): the newest timestamp wins.
 CREATE TABLE IF NOT EXISTS Friend (
     user_id TEXT NOT NULL PRIMARY KEY,
     username TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    devices TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
     devices_updated_at INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 
--- getAccepted() runs on every connect (rebuildDeviceMap), and selectByStatus was a full scan.
--- NOTE: this index is declared in TWO places on purpose — here, for fresh installs created by
--- Schema.create(), and in 1.sqm, for installs that already exist. SchemaMigrationTests asserts the
--- two paths produce identical schemas; if you add a table or index, do both or that test fails.
 CREATE INDEX IF NOT EXISTS friend_status_idx ON Friend(status);
 
 selectAll:
@@ -24,17 +21,18 @@ selectById:
 SELECT * FROM Friend WHERE user_id = ?;
 
 insert:
-INSERT OR REPLACE INTO Friend(user_id, username, status, devices, devices_updated_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, 0, ?, ?);
+INSERT OR REPLACE INTO Friend(user_id, username, status, devices_updated_at, created_at, updated_at)
+VALUES (?, ?, ?, 0, ?, ?);
 
--- Status and device-list changes preserve the other columns on the row.
 updateStatus:
 UPDATE Friend SET status = ?, updated_at = ? WHERE user_id = ?;
 
-updateDevices:
-UPDATE Friend
-SET devices = ?, devices_updated_at = ?, updated_at = ?
-WHERE user_id = ? AND devices_updated_at < ?;
+-- Claims the device-list write at `devices_updated_at` = ?; changes() is 1 only if it is newer.
+claimDevicesUpdate:
+UPDATE Friend SET devices_updated_at = ?, updated_at = ? WHERE user_id = ? AND devices_updated_at < ?;
+
+changes:
+SELECT changes();
 
 deleteById:
 DELETE FROM Friend WHERE user_id = ?;

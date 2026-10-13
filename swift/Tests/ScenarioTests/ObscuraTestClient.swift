@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 @testable import ObscuraKit
 
 /// Thin test wrapper around ObscuraClient.
@@ -15,6 +16,11 @@ public class ObscuraTestClient {
     public var token: String? { client.token }
     public var friends: FriendStore { client.friends }
     public var devices: DeviceStore { client.devices }
+
+    /// This user's devices as this client's directory lists them.
+    public func ownDevices() async throws -> [Device] {
+        try await client.devices.devices(of: XCTUnwrap(userId))
+    }
     public var api: APIClient { client.api }
     public var gateway: GatewayConnection { client.gateway }
 

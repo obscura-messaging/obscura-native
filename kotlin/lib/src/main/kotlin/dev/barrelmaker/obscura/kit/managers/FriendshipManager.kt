@@ -4,15 +4,16 @@ import dev.barrelmaker.obscura.kit.stores.FriendStatus
 import obscura.client.v1.Client.ClientMessage
 
 /**
- * Befriend and acceptFriend.
+ * Befriend and acceptFriend. First contact needs no special handling: the peer has no listed
+ * devices yet, so [MessageSender] fetches their bundles once and records the devices.
  */
 internal class FriendshipManager(
     private val ctx: ClientContext
 ) {
     private val session get() = ctx.session
-    private val messenger get() = ctx.messenger
     private val friends get() = ctx.friends
     private val messageSender get() = ctx.messageSender
+
     suspend fun befriend(targetUserId: String, targetUsername: String) {
         require(targetUserId != session.userId) { "Cannot befriend yourself" }
 
@@ -26,48 +27,27 @@ internal class FriendshipManager(
             FriendStatus.PENDING_SENT, null -> Unit
         }
 
-        messenger.fetchPreKeyBundles(targetUserId)
-
         // The FriendRequest carries only our display username — a first-contact bootstrap label.
         // Our IDENTITY is not in the payload: the server stamps envelope.sender_id with
-        // our user id, and the recipient's Signal session pins our identity key on first contact
-        // (TOFU), exactly as Signal authenticates. No user_id field is needed or sent.
+        // our user id, and the recipient's Signal session binds our identity key to this device.
         val msg = ClientMessage.newBuilder()
             .setFriendRequest(obscura.client.v1.friendRequest {
                 username = session.username ?: ""
             })
             .setTimestamp(System.currentTimeMillis()).build()
 
-        messageSender.sendToAllDevices(targetUserId, msg)
-        // Persist the friend's devices (learned by the prekey fetch above) so the device->user
-        // mapping survives a restart: rebuildDeviceMap(getAccepted()) restores it from here.
-        if (existing == null) {
-            friends.add(
-                targetUserId,
-                targetUsername,
-                FriendStatus.PENDING_SENT,
-                messenger.knownDevicesFor(targetUserId),
-            )
-        }
+        messageSender.sendOrThrow(targetUserId, msg)
+        if (existing == null) friends.add(targetUserId, targetUsername, FriendStatus.PENDING_SENT)
     }
 
     suspend fun acceptFriend(targetUserId: String) {
-        val existing = requireNotNull(friends.get(targetUserId)) {
-            "Cannot accept a friend request that is not stored locally"
-        }
-        messenger.fetchPreKeyBundles(targetUserId)
+        requireNotNull(friends.get(targetUserId)) { "Cannot accept a friend request that is not stored locally" }
 
         val msg = ClientMessage.newBuilder()
             .setFriendAccept(obscura.client.v1.friendAccept {})
             .setTimestamp(System.currentTimeMillis()).build()
 
-        messageSender.sendToAllDevices(targetUserId, msg)
-        friends.add(
-            targetUserId,
-            existing.username,
-            FriendStatus.ACCEPTED,
-            messenger.knownDevicesFor(targetUserId),
-        )
+        messageSender.sendOrThrow(targetUserId, msg)
+        friends.updateStatus(targetUserId, FriendStatus.ACCEPTED)
     }
-
 }

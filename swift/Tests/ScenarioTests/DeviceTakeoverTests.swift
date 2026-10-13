@@ -66,4 +66,38 @@ final class DeviceTakeoverTests: XCTestCase {
         alice.disconnectWebSocket()
         bob.disconnectWebSocket()
     }
+
+    func testFriendsKeepMessagingInBothDirectionsAfterATakeover() async throws {
+        let (alice, bob) = try await ObscuraTestClient.registerPairAndBecomeFriends()
+        try await assertDelivers(from: bob, to: alice, "before-takeover")
+
+        let oldRegId = alice.client.registrationId
+        try await alice.client.takeoverDevice()
+        XCTAssertNotEqual(oldRegId, alice.client.registrationId)
+
+        // Takeover ends this device's connection on the server and deletes its queued messages;
+        // start a fresh connection.
+        alice.disconnectWebSocket()
+        try await alice.connectWebSocket()
+
+        // The takeover announces from the new identity. Bob accepts the changed key, as Signal does
+        // for an unverified contact, and replaces his session with Alice's device.
+        let announce = try await bob.waitForMessage(timeout: 15)
+        XCTAssertEqual(announce.type, "DEVICE_ANNOUNCE")
+        try await assertDelivers(from: bob, to: alice, "to-new-identity")
+        try await assertDelivers(from: alice, to: bob, "from-new-identity")
+
+        alice.disconnectWebSocket()
+        bob.disconnectWebSocket()
+    }
+
+    private func assertDelivers(from sender: ObscuraTestClient, to receiver: ObscuraTestClient, _ entryId: String,
+                                file: StaticString = #filePath, line: UInt = #line) async throws {
+        try await sender.client.send(to: [XCTUnwrap(receiver.userId)], modelKey: "testModel", entryId: entryId,
+                                     payload: Data(entryId.utf8))
+        let wake = try await receiver.waitForMessage(timeout: 15)
+        XCTAssertEqual(wake.type, "APP_ENTRY", file: file, line: line)
+        let rows = try await receiver.client.inbox.peek()
+        XCTAssertTrue(rows.contains { $0.entryId == entryId }, "\(entryId) was not delivered", file: file, line: line)
+    }
 }

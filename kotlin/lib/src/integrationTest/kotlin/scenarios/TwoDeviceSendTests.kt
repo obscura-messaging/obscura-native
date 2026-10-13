@@ -53,7 +53,7 @@ class TwoDeviceSendTests {
                 alice2!!.connect()
 
                 // 3. Bob, single device. Friendship both ways. Bob's befriend() fetches Alice's
-                //    prekey bundles, which enumerates BOTH of her devices into Bob's deviceMap.
+                //    prekey bundles once, which lists BOTH of her devices in Bob's directory.
                 bob = registerAndConnect("f1_bob")
                 becomeFriends(bob!!, alice1!!)
 
@@ -76,30 +76,20 @@ class TwoDeviceSendTests {
      * Prints the device-UUID address used by
      * `Messenger.addressFor(deviceUuid)`.
      */
-    private fun senderState(tag: String) {
+    private suspend fun senderState(tag: String) {
         val b = bob!!
-        val aliceId = alice1!!.userId!!
+        val devIds = b.devices.devicesOf(alice1!!.userId!!).map { it.deviceId }
         println("── $tag ──")
-        // The friend store's per-device list is rebuildDeviceMap's input.
-        val storeDevices = b.friendList.value.find { it.userId == aliceId }?.devices ?: emptyList()
-        println("  bob's accepted-friends store lists ${storeDevices.size} device(s) for Alice " +
-            "(this is what rebuildDeviceMap reads):")
-        storeDevices.forEach { println("    ${it.id} ${it.name}") }
-        val devIds = b.messenger.getDeviceIdsForUser(aliceId)
-        println("  bob fans out to ${devIds.size} device(s) for Alice:")
+        println("  bob's directory lists ${devIds.size} device(s) for Alice:")
         for (d in devIds) {
             val label = when (d) {
                 alice1!!.deviceId -> "device1"
                 alice2!!.deviceId -> "device2"
                 else -> "UNKNOWN "
             }
-            // The production address and whether a session exists at it.
             val hasSession = b.signalStore.containsSession(SignalProtocolAddress(d, 1))
             println("    $label $d -> encrypts at address ($d, 1)  session=${if (hasSession) "present" else "ABSENT"}")
         }
-        val distinctAddresses = devIds.toSet().size
-        println("  distinct Signal addresses in use for Alice: $distinctAddresses (must equal ${devIds.size} — " +
-            "one address per device)")
     }
 
     /** Bob sends one message; BOTH of Alice's devices must receive and decrypt it. */
@@ -141,20 +131,20 @@ class TwoDeviceSendTests {
     }
 
     /**
-     * Bob's initial prekey fetch enumerates both Alice devices. Reconnect must
-     * rebuild the same per-device session map.
+     * Bob's initial prekey fetch lists both Alice devices. Reconnect must keep the same
+     * per-device sessions.
      */
     @Test @Order(2)
     fun `two-device happy path - fresh befriend and after sender reconnect`() = runBlocking {
         need()
 
-        // (a) Plain send, deviceMap freshly populated by befriend()'s prekey fetch.
-        senderState("(a) fresh — deviceMap from befriend()'s prekey fetch")
+        // (a) Plain send, directory populated by befriend()'s prekey fetch.
+        senderState("(a) fresh — directory from befriend()'s prekey fetch")
         sendAndBothMustDecrypt("multidevice-a-fresh")
 
-        // (b) Bob reconnects and rebuilds the device map from accepted friends.
+        // (b) Bob reconnects; the persisted directory and sessions carry over.
         bob!!.disconnect(); delay(500); bob!!.connect(); delay(500)
-        senderState("(b) after sender reconnect — rebuildDeviceMap has run")
+        senderState("(b) after sender reconnect")
         sendAndBothMustDecrypt("multidevice-b-reconnect")
 
         alice1!!.disconnect(); alice2!!.disconnect(); bob!!.disconnect()
@@ -173,9 +163,9 @@ class TwoDeviceSendTests {
 
         // announceDevices() broadcasts the own-device registry. Assert that
         // setup explicitly so the remainder cannot pass vacuously.
-        val ownDevices = alice1!!.devices.getOwnDevices()
-        println("  alice1.getOwnDevices()=${ownDevices.size} alice2.getOwnDevices()=${alice2!!.devices.getOwnDevices().size}")
-        ownDevices.forEach { println("    own: ${it.deviceId} ${it.deviceName}") }
+        val ownDevices = alice1!!.devices.devicesOf(aliceId)
+        println("  alice1 own devices=${ownDevices.size} alice2 own devices=${alice2!!.devices.devicesOf(aliceId).size}")
+        ownDevices.forEach { println("    own: ${it.deviceId} ${it.name}") }
         assertEquals(2, ownDevices.size,
             "Alice's own-device registry must list both devices before announcement")
 
@@ -185,24 +175,23 @@ class TwoDeviceSendTests {
         // Bob must learn both devices before reconnect.
         val deadline = System.currentTimeMillis() + 10_000
         while (System.currentTimeMillis() < deadline &&
-            (bob!!.friendList.value.find { it.userId == aliceId }?.devices?.size ?: 0) < 2) {
+            bob!!.devices.devicesOf(aliceId).size < 2) {
             try { bob!!.waitForMessage(1_500) } catch (_: Exception) {}
         }
-        val storeDevices = bob!!.friendList.value.find { it.userId == aliceId }?.devices ?: emptyList()
-        println("  after announceDevices(), bob's friend store lists ${storeDevices.size} device(s) for Alice:")
-        storeDevices.forEach { println("    ${it.id} ${it.name}") }
+        val storeDevices = bob!!.devices.devicesOf(aliceId)
+        println("  after announceDevices(), bob's directory lists ${storeDevices.size} device(s) for Alice:")
+        storeDevices.forEach { println("    ${it.deviceId} ${it.name}") }
         assertEquals(2, storeDevices.size,
-            "Bob's friend store must list both of Alice's devices after a real announceDevices() " +
-                "Got: ${storeDevices.map { it.id }}")
+            "Bob's directory must list both of Alice's devices after a real announceDevices() " +
+                "Got: ${storeDevices.map { it.deviceId }}")
         assertTrue(
-            storeDevices.map { it.id }.toSet() == setOf(alice1!!.deviceId, alice2!!.deviceId),
-            "Bob learned the wrong device UUIDs: ${storeDevices.map { it.id }}"
+            storeDevices.map { it.deviceId }.toSet() == setOf(alice1!!.deviceId, alice2!!.deviceId),
+            "Bob learned the wrong device UUIDs: ${storeDevices.map { it.deviceId }}"
         )
 
-        // Reconnect rebuilds from the populated friend-device list. The
-        // resulting addresses must remain distinct by device UUID.
+        // Reconnect keeps the populated directory. The addresses must remain distinct by device UUID.
         bob!!.disconnect(); delay(500); bob!!.connect(); delay(500)
-        senderState("(c) friend store populated by announce + sender reconnect")
+        senderState("(c) directory populated by announce + sender reconnect")
         sendAndBothMustDecrypt("multidevice-c-announce")
 
         alice1!!.disconnect(); alice2!!.disconnect(); bob!!.disconnect()

@@ -71,20 +71,17 @@ class SignalStore(
         return if (replaced) IdentityKeyStore.IdentityChange.REPLACED_EXISTING else IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED
     }
 
+    /**
+     * Signal's policy for an unverified contact: a changed identity key (reinstall, takeover) is
+     * accepted, not refused. [saveIdentity] records the new key and reports the change through
+     * [onIdentityChanged], so the app can show that the safety number changed. Refusing it would
+     * leave the peer permanently unreachable, with no way to recover.
+     */
     override fun isTrustedIdentity(
         address: SignalProtocolAddress,
         identityKey: IdentityKey,
         direction: IdentityKeyStore.Direction
-    ): Boolean {
-        val addressStr = "${address.name}.${address.deviceId}"
-        return try {
-            val stored = db.signalKeyQueries.selectIdentityByAddress(addressStr).executeAsOneOrNull()
-                ?: return true // TOFU — Trust On First Use
-            java.security.MessageDigest.isEqual(stored, identityKey.serialize())
-        } catch (e: Exception) {
-            false // Fail closed: if we can't read the DB, reject the identity rather than silently trusting it
-        }
-    }
+    ): Boolean = true
 
     override fun getIdentity(address: SignalProtocolAddress): IdentityKey? {
         val addressStr = "${address.name}.${address.deviceId}"
@@ -175,6 +172,11 @@ class SignalStore(
     override fun deleteSession(address: SignalProtocolAddress) {
         val addressStr = "${address.name}.${address.deviceId}"
         db.signalKeyQueries.deleteSession(addressStr)
+    }
+
+    /** Every session with every peer. Used when this device's own identity changes. */
+    fun deleteAllSessions() {
+        db.signalKeyQueries.deleteAllSessions()
     }
 
     override fun deleteAllSessions(name: String) {

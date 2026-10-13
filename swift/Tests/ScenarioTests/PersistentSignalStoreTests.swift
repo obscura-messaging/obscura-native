@@ -50,9 +50,9 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.identityKeyPair(context: NullContext()))
     }
 
-    // MARK: - TOFU (Trust On First Use)
+    // MARK: - Identity trust (Signal's policy for unverified contacts)
 
-    func testTOFU_unknownAddressTrusted() throws {
+    func testUnknownIdentityTrusted() throws {
         let store = try PersistentSignalStore()
         _ = store.generateIdentity()
 
@@ -60,10 +60,10 @@ final class PersistentSignalStoreTests: XCTestCase {
         let addr = try ProtocolAddress(name: "alice", deviceId: 1)
 
         let trusted = try store.isTrustedIdentity(key, for: addr, direction: .receiving, context: NullContext())
-        XCTAssertTrue(trusted, "First contact should be trusted (TOFU)")
+        XCTAssertTrue(trusted, "First contact is trusted")
     }
 
-    func testTOFU_sameKeyTrusted() throws {
+    func testSameIdentityTrusted() throws {
         let store = try PersistentSignalStore()
         _ = store.generateIdentity()
 
@@ -78,7 +78,7 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertTrue(trusted)
     }
 
-    func testTOFU_changedKeyUntrusted() throws {
+    func testChangedIdentityIsTrustedAndReplacesTheStoredKey() throws {
         let store = try PersistentSignalStore()
         _ = store.generateIdentity()
 
@@ -88,8 +88,10 @@ final class PersistentSignalStoreTests: XCTestCase {
 
         _ = try store.saveIdentity(key1, for: addr, context: NullContext())
 
-        let trusted = try store.isTrustedIdentity(key2, for: addr, direction: .receiving, context: NullContext())
-        XCTAssertFalse(trusted, "Changed key should NOT be trusted")
+        XCTAssertTrue(try store.isTrustedIdentity(key2, for: addr, direction: .sending, context: NullContext()))
+        XCTAssertTrue(try store.isTrustedIdentity(key2, for: addr, direction: .receiving, context: NullContext()))
+        XCTAssertTrue(try store.saveIdentity(key2, for: addr, context: NullContext()), "a changed key replaces the old one")
+        XCTAssertEqual(try store.identity(for: addr, context: NullContext()), key2)
     }
 
     func testSaveIdentity_firstSaveReturnsNotReplaced() throws {
@@ -250,7 +252,7 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertNil(session, "Missing session should return nil, not throw")
     }
 
-    func testDeleteAllSessionsForUser() throws {
+    func testDeleteAllSessionsClearsEveryPeer() throws {
         let store = try PersistentSignalStore()
         _ = store.generateIdentity()
 
@@ -284,12 +286,11 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertNotNil(try store.loadSession(for: bobAddr, context: NullContext()))
         XCTAssertNotNil(try store.loadSession(for: carolAddr, context: NullContext()))
 
-        // Delete Bob's sessions
-        try store.deleteAllSessions(for: "bob")
+        // An identity change on this device invalidates every session.
+        try store.deleteAllSessions()
 
-        // Bob gone, Carol still there
         XCTAssertNil(try store.loadSession(for: bobAddr, context: NullContext()))
-        XCTAssertNotNil(try store.loadSession(for: carolAddr, context: NullContext()))
+        XCTAssertNil(try store.loadSession(for: carolAddr, context: NullContext()))
     }
 
     // MARK: - Clear All
@@ -324,11 +325,7 @@ final class PersistentSignalStoreTests: XCTestCase {
         // Signed prekeys gone
         XCTAssertThrowsError(try store.loadSignedPreKey(id: 1, context: NullContext()))
 
-        // Remote identities gone (TOFU should trust again)
-        let trusted = try store.isTrustedIdentity(
-            IdentityKey(publicKey: PrivateKey.generate().publicKey),
-            for: addr, direction: .receiving, context: NullContext()
-        )
-        XCTAssertTrue(trusted, "After clearAll, TOFU should trust unknown address again")
+        // Remote identities gone
+        XCTAssertNil(try store.identity(for: addr, context: NullContext()))
     }
 }

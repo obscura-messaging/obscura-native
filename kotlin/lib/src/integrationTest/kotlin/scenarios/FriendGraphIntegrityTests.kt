@@ -69,8 +69,7 @@ class FriendGraphIntegrityTests {
             .setTimestamp(System.currentTimeMillis())
             .setFriendRequest(obscura.client.v1.friendRequest { username = "Mum" })
             .build()
-        mallory.messenger.queueMessage(alice.deviceId!!, spoof, alice.userId!!)
-        mallory.messenger.flushMessages()
+        mallory.messageSender.sendOrThrow(alice.userId!!, spoof)
 
         // Let Alice ingest it.
         val deadline = System.currentTimeMillis() + 8_000
@@ -103,13 +102,11 @@ class FriendGraphIntegrityTests {
 
         // No friendship in either direction. The stranger fetches Alice's prekeys (public to any
         // authenticated user) and sends a FRIEND_ACCEPT claiming Alice accepted them.
-        stranger.messenger.fetchPreKeyBundles(alice.userId!!)
         val forged = ClientMessage.newBuilder()
             .setTimestamp(System.currentTimeMillis())
             .setFriendAccept(obscura.client.v1.friendAccept {})
             .build()
-        stranger.messenger.queueMessage(alice.deviceId!!, forged, alice.userId!!)
-        stranger.messenger.flushMessages()
+        stranger.messageSender.sendOrThrow(alice.userId!!, forged)
 
         val deadline = System.currentTimeMillis() + 8_000
         while (System.currentTimeMillis() < deadline) {
