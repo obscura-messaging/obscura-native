@@ -59,7 +59,7 @@ for await event in client.observeEvents() { }   // ObscuraEvent
 - `ObscuraEvent`: `friendsChanged`, `connectionChanged`, `authChanged`,
   `messageReceived(model:)`, `typingChanged`, `authFailed(reason:)`
   (token refresh exhausted).
-- `befriend(_:username:)`, `acceptFriend(_:)`, `addFriendByCode(_:)` (strips
+- `befriend(_:username:)`, `acceptFriend(_:)`, `removeFriend(_:)`, `addFriendByCode(_:)` (strips
   soft hyphens, accepts URL-safe Base64), `friendCode()` (Base64 of
   `{"u", "n"}`).
 - Typing: sends throttled to one per 2 s per context and state; received state

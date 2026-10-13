@@ -172,6 +172,19 @@ class ReceivePathTest {
     }
 
     @Test
+    fun `removing a friend forgets the friendship and devices, and their announcements stop applying`() = runBlocking {
+        val c = newClient()
+        FriendStore(c.db).add(peerUserId, "alice", FriendStatus.ACCEPTED)
+        c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)
+
+        c.removeFriend(peerUserId)
+        c.handleDeviceAnnounce(announce(listOf("dev-b"), timestamp = 1_800_000_000_000), peerUserId)
+
+        assertNull(FriendStore(c.db).get(peerUserId))
+        assertEquals(emptyList<Any>(), c.devices.devicesOf(peerUserId))
+    }
+
+    @Test
     fun `an announce from an unknown user creates neither a friend nor devices`() = runBlocking {
         val c = newClient()
         c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)

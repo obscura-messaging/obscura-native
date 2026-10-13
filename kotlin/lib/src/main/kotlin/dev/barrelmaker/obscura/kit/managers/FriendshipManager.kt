@@ -12,6 +12,7 @@ internal class FriendshipManager(
 ) {
     private val session get() = ctx.session
     private val friends get() = ctx.friends
+    private val devices get() = ctx.devices
     private val messageSender get() = ctx.messageSender
 
     suspend fun befriend(targetUserId: String, targetUsername: String) {
@@ -49,5 +50,11 @@ internal class FriendshipManager(
 
         messageSender.sendOrThrow(targetUserId, msg)
         friends.updateStatus(targetUserId, FriendStatus.ACCEPTED)
+    }
+
+    /** Forget [userId]: the friendship and their devices. Nothing is sent to them. */
+    suspend fun removeFriend(userId: String) {
+        friends.remove(userId)
+        devices.replace(userId, emptyList())
     }
 }

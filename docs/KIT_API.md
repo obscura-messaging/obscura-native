@@ -98,6 +98,8 @@ announcements, link approvals) takes one send path with these rules:
 A friend's `DEVICE_ANNOUNCE` replaces that friend's directory entry only when
 its (clamped) timestamp is newer than the entry's last write. A fetch stamps the
 entry with the current time. An announcement from a non-friend changes nothing.
+`removeFriend(userId)` forgets the friendship and the friend's directory entry
+and sends nothing; entries already stored are the app's to keep or erase.
 
 **Identity keys.** As Signal does for an unverified contact, a changed identity
 key is accepted rather than refused: the kit stores the new key, replaces the

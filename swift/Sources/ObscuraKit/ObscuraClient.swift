@@ -969,6 +969,12 @@ public class ObscuraClient {
         try await friends.updateStatus(targetUserId, .accepted)
     }
 
+    /// Forget a friend: the friendship and their devices. Nothing is sent to them.
+    public func removeFriend(_ userId: String) async throws {
+        try await friends.remove(userId)
+        try await devices.replace(userId, devices: [])
+    }
+
     /// Announce the current device list to all friends.
     public func announceDevices() async throws {
         guard let uid = userId else { throw ObscuraError.notAuthenticated }
