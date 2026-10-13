@@ -206,24 +206,6 @@ public class ObscuraClient {
         }
     }
 
-    private var authFailedContinuations: [AsyncStream<String>.Continuation] = []
-
-    /// Observe hard auth failures (the server rejected the refresh token, or there is none).
-    /// Distinct from `observeAuthState` going to `.loggedOut`: this is an event,
-    /// not a state, and carries a reason. Does not replay — only fires live.
-    public func observeAuthFailed() -> AsyncStream<String> {
-        AsyncStream { continuation in
-            authFailedContinuations.append(continuation)
-            continuation.onTermination = { [weak self] _ in
-                self?.authFailedContinuations.removeAll { $0 as AnyObject === continuation as AnyObject }
-            }
-        }
-    }
-
-    private func emitAuthFailed(_ reason: String) {
-        for c in authFailedContinuations { c.yield(reason) }
-    }
-
     /// Buffered message queue for waitForMessage
     private var messageQueue: [MessageWakeEvent] = []
     private let processedEnvelopes = ProcessedEnvelopeTracker()
@@ -437,7 +419,7 @@ public class ObscuraClient {
     }
 
     private func rejectSession(_ reason: String) async -> TokenStatus {
-        emitAuthFailed(reason)
+        logger.log("session rejected: \(reason)")
         sessionStorage?.clear()
         try? await logout()
         return .rejected
@@ -1219,8 +1201,6 @@ public class ObscuraClient {
         case connectionChanged(ConnectionState)
         case authChanged(AuthState)
         case messageReceived(model: String)
-        case typingChanged(contextId: String, typers: [String])
-        case authFailed(reason: String)
     }
 
     /// Unified event stream — bridge subscribes once and relays all events.
@@ -1257,19 +1237,11 @@ public class ObscuraClient {
                     }
                 }
             }
-            // Auth failure (refresh token rejected) — distinct from a clean logout.
-            let authFailedTask = Task {
-                for await reason in observeAuthFailed() {
-                    continuation.yield(.authFailed(reason: reason))
-                }
-            }
-
             continuation.onTermination = { _ in
                 friendTask.cancel()
                 connTask.cancel()
                 authTask.cancel()
                 msgTask.cancel()
-                authFailedTask.cancel()
             }
         }
     }

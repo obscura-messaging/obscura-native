@@ -58,8 +58,8 @@ for await event in client.observeEvents() { }   // ObscuraEvent
   SQLCipher-encrypted only when `userId` is passed; the key is created in the
   Keychain (`keychainAccessGroup` shares it with an extension).
 - `ObscuraEvent`: `friendsChanged`, `connectionChanged`, `authChanged`,
-  `messageReceived(model:)`, `typingChanged`, `authFailed(reason:)`
-  (refresh token rejected; see `KIT_API.md`).
+  `messageReceived(model:)`. A rejected refresh token surfaces as
+  `authChanged(.loggedOut)`; typing comes from `observeTyping(contextId:)`.
 - `befriend(_:username:)`, `acceptFriend(_:)`, `removeFriend(_:)`, `addFriendByCode(_:)` (strips
   soft hyphens, accepts URL-safe Base64), `friendCode()` (Base64 of
   `{"u", "n"}`).
