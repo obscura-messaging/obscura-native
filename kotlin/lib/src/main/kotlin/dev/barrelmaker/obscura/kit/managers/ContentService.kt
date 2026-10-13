@@ -2,6 +2,7 @@ package dev.barrelmaker.obscura.kit.managers
 
 import dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto
 import obscura.client.v1.Client.ClientMessage
+import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.SendReport
 
 /** The reference to an uploaded attachment: server id plus the key material to decrypt it. */
@@ -13,7 +14,6 @@ internal class ContentService(
 ) {
     private val session get() = ctx.session
     private val api get() = ctx.api
-    private val devices get() = ctx.devices
     private val messageSender get() = ctx.messageSender
 
     /**
@@ -42,15 +42,11 @@ internal class ContentService(
 
         // `distinct()` because the app may legitimately name the same user twice — e.g. both
         // participants of a canonical `userIdA_userIdB` conversation where one of them is you.
-        val targets = recipientUserIds.distinct().filter { it != session.userId }
-
-        val recipients = targets.flatMap {
-            messageSender.attemptToAllDevices(it, msg, acceptedDeviceIds)
-        }
-        val selfTargets = devices.getSelfSyncTargets().filter { it != session.deviceId }
-        val selfUserId = session.userId
-        val selfSync = if (selfUserId == null) emptyList() else
-            messageSender.attemptDevices(selfUserId, selfTargets, msg, acceptedDeviceIds)
+        val selfUserId = session.userId ?: throw ObscuraError.NotAuthenticated()
+        val recipients = recipientUserIds.distinct().filter { it != selfUserId }
+            .flatMap { messageSender.send(it, msg, acceptedDeviceIds) }
+        // The author's other devices: the same path, which never targets this device.
+        val selfSync = messageSender.send(selfUserId, msg, acceptedDeviceIds)
         return SendReport(recipients, selfSync)
     }
 

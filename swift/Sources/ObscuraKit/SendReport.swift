@@ -23,11 +23,22 @@ public struct SendReport: Codable, Sendable, Equatable {
     public let selfSync: [SubmissionResult]
 }
 
+/// A submission's result, plus whether the server said its device no longer exists.
+struct Submitted: Equatable {
+    let result: SubmissionResult
+    let deviceMissing: Bool
+
+    init(_ result: SubmissionResult, deviceMissing: Bool = false) {
+        self.result = result
+        self.deviceMissing = deviceMissing
+    }
+}
+
 func submissionResults(
     userId: String,
     submissions: [Obscura_V1_SendMessageRequest.Submission],
     response: Obscura_V1_SendMessageResponse
-) throws -> [SubmissionResult] {
+) throws -> [Submitted] {
     let ids = Set(submissions.map(\.submissionID))
     let failures = response.failedSubmissions
     guard failures.allSatisfy({ ids.contains($0.submissionID) }),
@@ -37,11 +48,14 @@ func submissionResults(
     let byId = Dictionary(uniqueKeysWithValues: failures.map { ($0.submissionID, $0) })
     return submissions.map { submission in
         let failure = byId[submission.submissionID]
-        return SubmissionResult(
-            userId: userId,
-            deviceId: uuidFromBytes(submission.deviceID),
-            status: failure == nil ? .accepted : .rejected,
-            error: failure.map { $0.errorMessage.isEmpty ? "\($0.errorCode)" : $0.errorMessage }
+        return Submitted(
+            SubmissionResult(
+                userId: userId,
+                deviceId: uuidFromBytes(submission.deviceID),
+                status: failure == nil ? .accepted : .rejected,
+                error: failure.map { $0.errorMessage.isEmpty ? "\($0.errorCode)" : $0.errorMessage }
+            ),
+            deviceMissing: failure?.errorCode == .invalidDevice
         )
     }
 }

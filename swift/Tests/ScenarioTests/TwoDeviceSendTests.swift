@@ -28,11 +28,11 @@ final class TwoDeviceSendTests: XCTestCase {
         let alice2 = try await ObscuraTestClient.loginAndProvision(alice1.username, deviceName: "Alice Laptop")
         await rateLimitDelay()
 
-        let own1 = await alice1.devices.getOwnDevices()
-        let own2 = await alice2.devices.getOwnDevices()
-        print("  alice1.getOwnDevices()=\(own1.count) alice2.getOwnDevices()=\(own2.count)")
-        own1.forEach { print("    own(device1 view): \($0.deviceId) \($0.deviceName)") }
-        own2.forEach { print("    own(device2 view): \($0.deviceId) \($0.deviceName)") }
+        let own1 = try await alice1.ownDevices()
+        let own2 = try await alice2.ownDevices()
+        print("  alice1 own devices=\(own1.count) alice2 own devices=\(own2.count)")
+        own1.forEach { print("    own(device1 view): \($0.deviceId) \($0.name)") }
+        own2.forEach { print("    own(device2 view): \($0.deviceId) \($0.name)") }
 
         XCTAssertFalse(own1.isEmpty,
             "device 1's own-device registry is empty, so announceDevices() would broadcast nothing")
@@ -67,7 +67,7 @@ final class TwoDeviceSendTests: XCTestCase {
         try await alice1.client.validateAndApproveLink(code)
         await rateLimitDelay()
 
-        let approver = await alice1.devices.getOwnDevices()
+        let approver = try await alice1.ownDevices()
         print("  approver registry after validateAndApproveLink: \(approver.map { $0.deviceId })")
         XCTAssertEqual(approver.count, 2,
             "the approver must record BOTH devices — this list is what approveLink ships and what "

@@ -163,20 +163,20 @@ class ReceivePathTest {
     @Test
     fun `an announce from a friend replaces the device list`() = runBlocking {
         val c = newClient()
-        val friends = FriendStore(c.db)
-        friends.add(peerUserId, "alice", FriendStatus.ACCEPTED)
+        FriendStore(c.db).add(peerUserId, "alice", FriendStatus.ACCEPTED)
 
         c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)
+        c.handleDeviceAnnounce(announce(listOf("dev-stale"), timestamp = 1_600_000_000_000), peerUserId)
 
-        assertEquals(listOf("dev-a"), friends.get(peerUserId)!!.devices.map { it.id })
+        assertEquals(listOf("dev-a"), c.devices.devicesOf(peerUserId).map { it.deviceId })
     }
 
     @Test
-    fun `an announce from an unknown user does not create a friend`() = runBlocking {
+    fun `an announce from an unknown user creates neither a friend nor devices`() = runBlocking {
         val c = newClient()
-        val friends = FriendStore(c.db)
         c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)
-        assertNull(friends.get(peerUserId))
+        assertNull(FriendStore(c.db).get(peerUserId))
+        assertEquals(emptyList<Any>(), c.devices.devicesOf(peerUserId))
     }
 
     // ── TYPING_SIGNAL ─────────────────────────────────────────────────────────

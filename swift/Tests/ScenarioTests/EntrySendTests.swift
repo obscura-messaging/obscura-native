@@ -130,7 +130,7 @@ final class EntrySendTests: XCTestCase {
         try await alice1.client.validateAndApproveLink(code)
         await rateLimitDelay()
 
-        let ownDevices = await alice1.devices.getOwnDevices()
+        let ownDevices = try await alice1.ownDevices()
         XCTAssertEqual(ownDevices.count, 2, "the fixture itself must be real, or nothing below means anything")
 
         // Drain the approval this kit cannot handle so the assertion below is about the entry and

@@ -20,8 +20,10 @@ final class SubmissionResultsTests: XCTestCase {
         failure.errorMessage = "Device not found"
         var response = Obscura_V1_SendMessageResponse()
         response.failedSubmissions = [failure]
-        let results = try submissionResults(userId: "user", submissions: [a, b], response: response)
+        let decoded = try submissionResults(userId: "user", submissions: [a, b], response: response)
+        let results = decoded.map(\.result)
         XCTAssertEqual(results.map(\.status), [.rejected, .accepted])
+        XCTAssertEqual(decoded.map(\.deviceMissing), [true, false])
         XCTAssertEqual(results.first?.error, "Device not found")
         XCTAssertNil(results.last?.error)
         XCTAssertEqual(results.last?.deviceId, "02020202-0202-0202-0202-020202020202")
@@ -45,9 +47,9 @@ final class SubmissionResultsTests: XCTestCase {
         let api = APIClient(baseURL: "https://submission-unit.invalid")
         let messenger = Messenger(api: api, store: try PersistentSignalStore())
         let a = submission(1)
-        let rejected = try await messenger.submit(userId: "user", submissions: [a])
+        let rejected = await messenger.submit(userId: "user", submissions: [a]).map(\.result)
         XCTAssertEqual(rejected.map(\.status), [.rejected])
-        let malformed = try await messenger.submit(userId: "user", submissions: [submission(2)])
+        let malformed = await messenger.submit(userId: "user", submissions: [submission(2)]).map(\.result)
         XCTAssertEqual(malformed.map(\.status), [.unknown])
         XCTAssertNotNil(malformed.first?.error)
     }

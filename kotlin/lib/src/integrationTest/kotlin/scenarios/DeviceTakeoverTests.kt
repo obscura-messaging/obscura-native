@@ -46,28 +46,26 @@ class DeviceTakeoverTests {
     }
 
     @Test @Order(2)
-    fun `Takeover after friendship replaces local keys`() = runBlocking {
+    fun `friends keep messaging in both directions after a takeover`() = runBlocking {
         need()
         val alice = registerAndConnect("tko_alice")
         val bob = registerAndConnect("tko_bob")
-
-        // Full befriend lifecycle
         becomeFriends(alice, bob)
+        sendAndVerify(bob, alice, "before takeover")
 
-        // Alice takes over device (new Signal keys)
         val oldRegId = alice.registrationId
         alice.takeoverDevice()
-        assertNotEquals(oldRegId, alice.registrationId,
-            "Alice's registrationId should change after takeover")
+        assertNotEquals(oldRegId, alice.registrationId, "registrationId should change after takeover")
+        // Takeover ends this device's connection on the server and deletes its queued messages;
+        // start a fresh connection.
+        alice.disconnect()
+        alice.connect()
 
-        // After takeover, Alice's identity key changed. Bob's TOFU check will
-        // reject the new key (identity mismatch). This is correct Signal behavior —
-        // in production, Alice would announce the key change via DEVICE_ANNOUNCE first.
-        // Bob would then update his trust store and accept the new key.
-        //
-        // This verifies only the changed local registration state. It does not
-        // cover local session clearing or post-takeover messaging; those require
-        // the key-change announcement protocol.
+        // The takeover announces from the new identity. Bob accepts the changed key, as Signal does
+        // for an unverified contact, and replaces his session with Alice's device.
+        assertEquals("DEVICE_ANNOUNCE", bob.waitForType("DEVICE_ANNOUNCE").type)
+        sendAndVerify(bob, alice, "to the new identity")
+        sendAndVerify(alice, bob, "from the new identity")
 
         alice.disconnect(); bob.disconnect()
     }

@@ -30,7 +30,6 @@ class FacadePullEventsTest {
             user_id = "alice-id",
             username = "alice",
             status = FriendStatus.ACCEPTED.value,
-            devices = "[]",
             created_at = now,
             updated_at = now,
         )

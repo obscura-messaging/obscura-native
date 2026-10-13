@@ -32,8 +32,10 @@ class SubmissionResultsTest {
                 .setErrorCode(SendMessageResponse.ErrorCode.ERROR_CODE_INVALID_DEVICE)
                 .setErrorMessage("Device not found")
         ).build()
-        val results = decodeSubmissionResults("user", listOf(a, b), response)
+        val decoded = decodeSubmissionResults("user", listOf(a, b), response)
+        val results = decoded.map { it.result }
         assertEquals(listOf(SubmissionStatus.REJECTED, SubmissionStatus.ACCEPTED), results.map { it.status })
+        assertEquals(listOf(true, false), decoded.map { it.deviceMissing })
         assertEquals("Device not found", results[0].error)
         assertNull(results[1].error)
         assertEquals(UuidCodec.bytesToUuid(b.deviceId.toByteArray()).toString(), results[1].deviceId)
@@ -74,14 +76,14 @@ class SubmissionResultsTest {
         try {
             val messenger = Messenger(SignalStore(newInMemoryDatabase()),
                 APIClient("http://127.0.0.1:${server.address.port}").apply { token = "unit-test" })
-            assertEquals(SubmissionStatus.REJECTED, messenger.submit("user", listOf(a)).single().status)
+            assertEquals(SubmissionStatus.REJECTED, messenger.submit("user", listOf(a)).single().result.status)
             val b = submission()
             response = byteArrayOf()
-            assertEquals(SubmissionStatus.ACCEPTED, messenger.submit("other", listOf(b)).single().status)
+            assertEquals(SubmissionStatus.ACCEPTED, messenger.submit("other", listOf(b)).single().result.status)
             assertEquals(listOf(listOf(a), listOf(b)), received.map { it.messagesList })
             status = 503
             response = "unavailable".toByteArray()
-            assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("other", listOf(b)).single().status)
+            assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("other", listOf(b)).single().result.status)
         } finally {
             server.stop(0)
         }

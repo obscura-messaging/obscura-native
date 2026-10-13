@@ -103,35 +103,4 @@ final class ObservationTests: XCTestCase {
         XCTAssertEqual(emitted[0].count, 0, "Initially no accepted friends")
         XCTAssertEqual(emitted[1].count, 1, "After accept, one friend")
     }
-
-    // MARK: - Devices observation
-
-    func testDevicesObservationEmitsOnAdd() async throws {
-        let actor = try DeviceStore()
-
-        var emitted: [[OwnDevice]] = []
-        let expectation = XCTestExpectation(description: "devices emit")
-
-        let task = Task {
-            for await devices in actor.observeOwnDevices().values {
-                emitted.append(devices)
-                if emitted.count >= 2 {
-                    expectation.fulfill()
-                    break
-                }
-            }
-        }
-
-        try await Task.sleep(nanoseconds: 100_000_000)
-
-        await actor.addOwnDevice(OwnDevice(deviceId: "dev1", deviceName: "iPhone"))
-
-        await fulfillment(of: [expectation], timeout: 5)
-        task.cancel()
-
-        XCTAssertEqual(emitted[0].count, 0)
-        XCTAssertEqual(emitted[1].count, 1)
-        XCTAssertEqual(emitted[1][0].deviceName, "iPhone")
-    }
-
 }

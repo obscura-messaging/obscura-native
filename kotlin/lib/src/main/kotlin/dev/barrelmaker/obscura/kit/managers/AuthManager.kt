@@ -9,8 +9,8 @@ import dev.barrelmaker.obscura.kit.network.GatewayConnection
 import dev.barrelmaker.obscura.kit.network.HttpException
 import dev.barrelmaker.obscura.kit.network.LoginScenario
 import dev.barrelmaker.obscura.kit.network.ProvisionDeviceRequest
+import dev.barrelmaker.obscura.kit.stores.DeviceData
 import dev.barrelmaker.obscura.kit.stores.DeviceIdentityData
-import dev.barrelmaker.obscura.kit.stores.OwnDeviceData
 import kotlinx.coroutines.*
 
 /**
@@ -31,7 +31,6 @@ internal class AuthManager(
     private val session get() = ctx.session
     private val api get() = ctx.api
     private val signalStore get() = ctx.signalStore
-    private val messenger get() = ctx.messenger
     private val devices get() = ctx.devices
     private val refreshInProgress = java.util.concurrent.atomic.AtomicReference<Deferred<Boolean>?>(null)
     private var consecutiveRefreshFailures = 0
@@ -58,20 +57,7 @@ internal class AuthManager(
         session.userId = api.getUserId(deviceToken)
         session.deviceId = provResult.deviceId.ifEmpty { null } ?: api.getDeviceId(deviceToken)
 
-        messenger.mapDevice(
-            requireNotNull(session.deviceId) { "deviceId not set - register failed to provision device" },
-            requireNotNull(session.userId) { "userId not set - register failed to resolve user" },
-        )
-
-        devices.storeIdentity(DeviceIdentityData(
-            deviceId = requireNotNull(session.deviceId) { "deviceId not set - register failed to provision device" },
-        ))
-
-        // DeviceAnnounce and link approval require a complete own-device registry.
-        devices.addOwnDevice(OwnDeviceData(
-            deviceId = requireNotNull(session.deviceId),
-            deviceName = config.deviceName,
-        ))
+        recordProvisionedDevice(config.deviceName)
 
         setAuthState(AuthState.AUTHENTICATED)
         delay(config.authRateLimitDelayMs)
@@ -95,8 +81,6 @@ internal class AuthManager(
                 session.userId = api.getUserId(token)
                 session.deviceId = deviceId
                 session.username = username
-
-                messenger.mapDevice(deviceId, session.userId!!)
 
                 setAuthState(AuthState.AUTHENTICATED)
                 delay(config.authRateLimitDelayMs)
@@ -143,20 +127,8 @@ internal class AuthManager(
         session.refreshToken = provResult.refreshToken
         session.deviceId = provResult.deviceId.ifEmpty { null } ?: api.getDeviceId(deviceToken)
 
-        messenger.mapDevice(
-            requireNotNull(session.deviceId) { "deviceId not set - loginAndProvision failed to provision device" },
-            requireNotNull(session.userId) { "userId not set - loginAndProvision failed to resolve user" },
-        )
-
-        devices.storeIdentity(DeviceIdentityData(
-            deviceId = requireNotNull(session.deviceId) { "deviceId not set - loginAndProvision failed to provision device" },
-        ))
-
         // Approval later reconciles the full account list.
-        devices.addOwnDevice(OwnDeviceData(
-            deviceId = requireNotNull(session.deviceId),
-            deviceName = deviceName,
-        ))
+        recordProvisionedDevice(deviceName)
 
         // Wait for DEVICE_LINK_APPROVAL only if another device exists to send it.
         val serverDevices = api.listDevices()
@@ -165,6 +137,14 @@ internal class AuthManager(
         }
         setAuthState(if (hasApprover) AuthState.PENDING_APPROVAL else AuthState.AUTHENTICATED)
         delay(config.authRateLimitDelayMs)
+    }
+
+    /** Store this device as the identity `login` checks, and list it as one of the user's devices. */
+    private suspend fun recordProvisionedDevice(deviceName: String) {
+        val deviceId = requireNotNull(session.deviceId) { "deviceId not set - device was not provisioned" }
+        val userId = requireNotNull(session.userId) { "userId not set - user was not resolved" }
+        devices.storeIdentity(DeviceIdentityData(deviceId))
+        devices.add(DeviceData(userId, deviceId, deviceName))
     }
 
     fun restoreSession(
@@ -179,10 +159,6 @@ internal class AuthManager(
         session.userId = userId
         session.deviceId = deviceId
         session.username = username
-
-        if (deviceId != null) {
-            messenger.mapDevice(deviceId, userId)
-        }
 
         setAuthState(AuthState.AUTHENTICATED)
     }

@@ -16,7 +16,6 @@ public enum ObscuraSchema {
                     user_id TEXT PRIMARY KEY,
                     username TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    devices TEXT NOT NULL DEFAULT '[]',
                     devices_updated_at INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -29,10 +28,14 @@ public enum ObscuraSchema {
                     device_id TEXT NOT NULL
                 )
             """)
+            // Every addressable device, this user's included. Keyed by user as well as device, so a
+            // peer's DEVICE_ANNOUNCE can never reassign a device that belongs to someone else.
             try db.execute(sql: """
-                CREATE TABLE own_devices (
-                    device_id TEXT PRIMARY KEY,
-                    device_name TEXT NOT NULL
+                CREATE TABLE devices (
+                    user_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (user_id, device_id)
                 )
             """)
 
@@ -112,7 +115,7 @@ public enum ObscuraSchema {
     public static let expectedTables: Set<String> = [
         "friends",
         "device_identity",
-        "own_devices",
+        "devices",
         "signal_local_identity",
         "signal_identities",
         "signal_prekeys",

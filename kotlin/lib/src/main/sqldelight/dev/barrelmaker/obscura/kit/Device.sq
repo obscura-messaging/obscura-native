@@ -1,7 +1,11 @@
+-- Every device this client can address: its own (user_id = the local user) and its peers'.
+-- Keyed by (user_id, device_id) because a device list is a claim made about one user; a peer's
+-- DEVICE_ANNOUNCE can never reassign a device that belongs to someone else.
 CREATE TABLE IF NOT EXISTS Device (
-    device_id TEXT NOT NULL PRIMARY KEY,
-    device_name TEXT NOT NULL,
-    is_own INTEGER NOT NULL DEFAULT 1
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, device_id)
 );
 
 CREATE TABLE IF NOT EXISTS DeviceIdentity (
@@ -9,15 +13,17 @@ CREATE TABLE IF NOT EXISTS DeviceIdentity (
     device_id TEXT NOT NULL
 );
 
-selectOwnDevices:
-SELECT * FROM Device WHERE is_own = 1;
+selectByUser:
+SELECT * FROM Device WHERE user_id = ? ORDER BY device_id;
 
-insertDevice:
-INSERT OR REPLACE INTO Device(device_id, device_name, is_own)
-VALUES (?, ?, 1);
+insert:
+INSERT OR REPLACE INTO Device(user_id, device_id, name) VALUES (?, ?, ?);
 
-deleteDevice:
-DELETE FROM Device WHERE device_id = ?;
+deleteByUser:
+DELETE FROM Device WHERE user_id = ?;
+
+deleteAll:
+DELETE FROM Device;
 
 selectIdentity:
 SELECT * FROM DeviceIdentity WHERE id = 1;
@@ -28,6 +34,3 @@ VALUES (1, ?);
 
 deleteIdentity:
 DELETE FROM DeviceIdentity WHERE id = 1;
-
-deleteAllDevices:
-DELETE FROM Device;

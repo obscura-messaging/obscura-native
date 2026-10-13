@@ -101,24 +101,21 @@ class SignalStoreTests {
     }
 
     @Test
-    fun `isTrustedIdentity — TOFU trusts unknown address`() {
-        store.generateIdentity()
-        val key = IdentityKeyPair.generate()
-        val address = SignalProtocolAddress("unknown-user", 1)
-        assertTrue(store.isTrustedIdentity(address, key.publicKey, IdentityKeyStore.Direction.RECEIVING),
-            "Unknown address should be trusted on first use (TOFU)")
-    }
-
-    @Test
-    fun `isTrustedIdentity — rejects different key for known address`() {
+    fun `a changed identity is trusted, saved and reported`() {
         store.generateIdentity()
         val key1 = IdentityKeyPair.generate()
         val key2 = IdentityKeyPair.generate()
         val address = SignalProtocolAddress("alice", 1)
+        val changes = mutableListOf<String>()
+        store.onIdentityChanged = { changed, _, _ -> changes += changed }
 
         store.saveIdentity(address, key1.publicKey)
-        assertFalse(store.isTrustedIdentity(address, key2.publicKey, IdentityKeyStore.Direction.RECEIVING),
-            "Different key for known address should NOT be trusted")
+        assertTrue(store.isTrustedIdentity(address, key2.publicKey, IdentityKeyStore.Direction.SENDING))
+        assertTrue(store.isTrustedIdentity(address, key2.publicKey, IdentityKeyStore.Direction.RECEIVING))
+        store.saveIdentity(address, key2.publicKey)
+
+        assertEquals(key2.publicKey, store.getIdentity(address))
+        assertEquals(listOf("alice.1"), changes)
     }
 
     // ─── PreKeys ──────────────────────────────────────────────────
