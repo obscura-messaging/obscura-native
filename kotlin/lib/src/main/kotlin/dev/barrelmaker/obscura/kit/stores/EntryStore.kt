@@ -2,6 +2,7 @@ package dev.barrelmaker.obscura.kit.stores
 
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.db.SqlDriver
+import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,7 +48,7 @@ class EntryStore internal constructor(
             driver.pragma("PRAGMA secure_delete = ON")
             ids.chunked(500).forEach { queries.deleteEntries(model, it) }
         }
-        driver.pragma("PRAGMA wal_checkpoint(TRUNCATE)")
+        driver.truncateWal()
     }
 
     @Suppress("UNUSED_PARAMETER")
@@ -58,4 +59,13 @@ class EntryStore internal constructor(
 /** PRAGMAs go through `executeQuery` because several return a row, which Android's `execute` rejects. */
 internal fun SqlDriver.pragma(sql: String) {
     executeQuery(null, sql, { cursor -> cursor.next(); QueryResult.Unit }, 0)
+}
+
+internal fun SqlDriver.truncateWal() {
+    executeQuery(null, "PRAGMA wal_checkpoint(TRUNCATE)", { cursor ->
+        if (!cursor.next().value || cursor.getLong(0) != 0L) {
+            throw ObscuraError.StorageFailed("WAL truncation could not complete; checkpoint is busy")
+        }
+        QueryResult.Unit
+    }, 0)
 }

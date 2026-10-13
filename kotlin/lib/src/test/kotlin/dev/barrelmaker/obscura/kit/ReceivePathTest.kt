@@ -158,7 +158,7 @@ class ReceivePathTest {
     fun `an accepted peer cannot rename itself or regress its friendship`() = runBlocking {
         val c = authenticatedClient()
         c.db.friendQueries.insert(peer, "alice", FriendStatus.ACCEPTED.value)
-        c.receive(friendRequest("mallory"))
+        assertTrue(runCatching { c.receive(friendRequest("mallory")) }.exceptionOrNull() is ObscuraError.SendFailed)
         c.receive(friendAccept(), envelopeId = "env-2")
         assertEquals(listOf(FriendData(peer, "alice", FriendStatus.ACCEPTED)), c.getFriends())
     }

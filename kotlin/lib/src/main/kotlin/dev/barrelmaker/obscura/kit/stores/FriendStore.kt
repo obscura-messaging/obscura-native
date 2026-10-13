@@ -15,7 +15,7 @@ enum class FriendStatus(val value: String) {
 
 data class FriendData(val userId: String, val username: String, val status: FriendStatus)
 
-internal class FriendStore(db: ObscuraDatabase) {
+internal class FriendStore(private val db: ObscuraDatabase) {
     private val dispatcher = Dispatchers.IO.limitedParallelism(1)
     private val queries = db.friendQueries
 
@@ -31,6 +31,18 @@ internal class FriendStore(db: ObscuraDatabase) {
     }
 
     suspend fun getAll(): List<FriendData> = withContext(dispatcher) { queries.selectAll(::friend).executeAsList() }
+
+    suspend fun prepareRequest(userId: String, username: String): FriendData? = withContext(dispatcher) {
+        db.transactionWithResult {
+            queries.selectById(userId, ::friend).executeAsOneOrNull().also {
+                if (it == null) queries.insert(userId, username, FriendStatus.PENDING_SENT.value)
+            }
+        }
+    }
+
+    suspend fun removePendingRequest(userId: String) = withContext(dispatcher) {
+        queries.deleteIfStatus(userId, FriendStatus.PENDING_SENT.value)
+    }
 
     /** Changes the status only. A status change driven by a peer must never carry a name with it. */
     suspend fun updateStatus(userId: String, status: FriendStatus) = withContext(dispatcher) {

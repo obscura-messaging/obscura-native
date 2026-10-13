@@ -94,7 +94,8 @@ class FriendTests {
         assertEquals(FriendStatus.ACCEPTED, bob.friendStatus(alice.userId!!))
 
         alice.befriend(bob.userId!!, bob.username!!)
-        assertEquals(FriendStatus.PENDING_SENT, alice.friendStatus(bob.userId!!))
+        eventually { alice.friendStatus(bob.userId!!) == FriendStatus.ACCEPTED }
+        assertEquals(FriendStatus.ACCEPTED, bob.friendStatus(alice.userId!!))
         alice.disconnect(); bob.disconnect()
     }
 

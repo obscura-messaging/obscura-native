@@ -1,14 +1,45 @@
 package scenarios
 
 import dev.barrelmaker.obscura.kit.SubmissionStatus
+import dev.barrelmaker.obscura.kit.stores.FriendStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/** A user with two devices, both provisioned before the friendship. */
+/** Independent installations, fanout, self-sync and explicit friendships. */
 class MultiDeviceTests {
+    @Test
+    fun `an independent installation explicitly re-adds an already accepted peer`() = runBlocking {
+        requireServer()
+        val first = registerAndConnect("readd_first")
+        val peer = registerAndConnect("readd_peer")
+        becomeFriends(first, peer)
+        val originalPeerRecord = peer.getFriends().single()
+        val originalFirstRecord = first.getFriends().single()
+        val fresh = newClient(deviceName = "Independent re-add")
+        fresh.loginAndProvision(first.username!!, TEST_PASSWORD)
+        fresh.connect()
+        assertTrue(fresh.getFriends().isEmpty())
+        assertEquals(0L, fresh.inbox.depth())
+
+        fresh.addFriendByCode(peer.friendCode())
+
+        eventually(message = "explicit independent re-add acceptance") {
+            fresh.friendStatus(peer.userId!!) == FriendStatus.ACCEPTED
+        }
+        assertEquals(originalPeerRecord, peer.getFriends().single())
+        assertEquals(originalFirstRecord, first.getFriends().single())
+        assertEquals(listOf(peer.userId), fresh.getFriends().map { it.userId })
+        assertEquals(0L, fresh.inbox.depth())
+        assertTrue(fresh.entries.all("directMessage").isEmpty())
+        fresh.addFriendByCode(peer.friendCode())
+        assertEquals(FriendStatus.ACCEPTED, fresh.friendStatus(peer.userId!!))
+        assertEquals(originalPeerRecord, peer.getFriends().single())
+        first.disconnect(); fresh.disconnect(); peer.disconnect()
+    }
+
     @Test
     fun `late independent installation self syncs on next own send and peers learn only from its traffic`() = runBlocking {
         requireServer()
