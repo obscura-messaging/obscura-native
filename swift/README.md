@@ -59,7 +59,7 @@ for await event in client.observeEvents() { }   // ObscuraEvent
   Keychain (`keychainAccessGroup` shares it with an extension).
 - `ObscuraEvent`: `friendsChanged`, `connectionChanged`, `authChanged`,
   `messageReceived(model:)`, `typingChanged`, `authFailed(reason:)`
-  (token refresh exhausted).
+  (refresh token rejected; see `KIT_API.md`).
 - `befriend(_:username:)`, `acceptFriend(_:)`, `removeFriend(_:)`, `addFriendByCode(_:)` (strips
   soft hyphens, accepts URL-safe Base64), `friendCode()` (Base64 of
   `{"u", "n"}`).

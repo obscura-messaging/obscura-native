@@ -208,7 +208,7 @@ public class ObscuraClient {
 
     private var authFailedContinuations: [AsyncStream<String>.Continuation] = []
 
-    /// Observe hard auth failures (token refresh exhausted its retry budget).
+    /// Observe hard auth failures (the server rejected the refresh token, or there is none).
     /// Distinct from `observeAuthState` going to `.loggedOut`: this is an event,
     /// not a state, and carries a reason. Does not replay — only fires live.
     public func observeAuthFailed() -> AsyncStream<String> {
@@ -1257,7 +1257,7 @@ public class ObscuraClient {
                     }
                 }
             }
-            // Auth failure (token refresh exhausted) — distinct from a clean logout.
+            // Auth failure (refresh token rejected) — distinct from a clean logout.
             let authFailedTask = Task {
                 for await reason in observeAuthFailed() {
                     continuation.yield(.authFailed(reason: reason))
