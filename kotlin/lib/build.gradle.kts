@@ -121,6 +121,7 @@ dependencies {
     testRuntimeOnly(libs.junit.engine)
     testRuntimeOnly(libs.junit.platform.launcher)
     testImplementation(libs.coroutines.test)
+    testImplementation(libs.mockwebserver)
 }
 
 protobuf {

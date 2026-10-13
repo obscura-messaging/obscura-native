@@ -56,10 +56,7 @@ class DeviceTakeoverTests {
         val oldRegId = alice.registrationId
         alice.takeoverDevice()
         assertNotEquals(oldRegId, alice.registrationId, "registrationId should change after takeover")
-        // Takeover ends this device's connection on the server and deletes its queued messages;
-        // start a fresh connection.
-        alice.disconnect()
-        alice.connect()
+        // Takeover ends this device's connection on the server; the gateway reconnects by itself.
 
         // The takeover announces from the new identity. Bob accepts the changed key, as Signal does
         // for an unverified contact, and replaces his session with Alice's device.
