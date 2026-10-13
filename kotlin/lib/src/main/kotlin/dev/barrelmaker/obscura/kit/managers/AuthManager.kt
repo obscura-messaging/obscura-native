@@ -3,6 +3,7 @@ package dev.barrelmaker.obscura.kit.managers
 import dev.barrelmaker.obscura.kit.AuthState
 import dev.barrelmaker.obscura.kit.ObscuraConfig
 import dev.barrelmaker.obscura.kit.ObscuraLogger
+import dev.barrelmaker.obscura.kit.TokenStatus
 import dev.barrelmaker.obscura.kit.crypto.toBase64
 import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
 import dev.barrelmaker.obscura.kit.network.GatewayConnection
@@ -22,7 +23,8 @@ internal class AuthManager(
     private val gateway: GatewayConnection,
     private val scope: CoroutineScope,
     private val setAuthState: (AuthState) -> Unit,
-    private val setDisconnected: () -> Unit,
+    /** Signs out and forgets the stored session; called once the server refuses the refresh token. */
+    private val onSessionRejected: suspend () -> Unit,
     private val loggerProvider: () -> ObscuraLogger,
     private val onLogout: suspend () -> Unit,
     private val onWipeDevice: suspend () -> Unit,
@@ -32,9 +34,8 @@ internal class AuthManager(
     private val api get() = ctx.api
     private val signalStore get() = ctx.signalStore
     private val devices get() = ctx.devices
-    private val refreshInProgress = java.util.concurrent.atomic.AtomicReference<Deferred<Boolean>?>(null)
+    private val refreshInProgress = java.util.concurrent.atomic.AtomicReference<Deferred<TokenStatus>?>(null)
     private var consecutiveRefreshFailures = 0
-    private val MAX_REFRESH_FAILURES = 5
     var tokenRefreshJob: Job? = null
 
     suspend fun register(username: String, password: String) {
@@ -187,23 +188,30 @@ internal class AuthManager(
         setAuthState(AuthState.LOGGED_OUT)
     }
 
+    /**
+     * Refresh ahead of expiry for as long as the session lasts. A failed refresh is retried with
+     * backoff; only a rejection ends the loop, because only a rejection ends the session.
+     */
     fun startTokenRefresh() {
         tokenRefreshJob?.cancel()
         tokenRefreshJob = scope.launch {
             while (isActive) {
-                val delayMs = getTokenRefreshDelay()
-                delay(delayMs)
-                refreshTokens()
+                delay(if (consecutiveRefreshFailures == 0) getTokenRefreshDelay() else retryDelayMs(consecutiveRefreshFailures))
+                if (refreshTokens() == TokenStatus.REJECTED) break
             }
         }
     }
 
-    suspend fun refreshTokens(): Boolean {
+    /**
+     * Exchange the refresh token for a new pair. A 401/403 (or no refresh token at all) means the
+     * session is over: sign out. Anything else (offline, timeout, 5xx) keeps the session.
+     */
+    suspend fun refreshTokens(): TokenStatus {
         refreshInProgress.get()?.let { return it.await() }
 
         val deferred = scope.async {
+            val rt = session.refreshToken ?: return@async rejectSession()
             try {
-                val rt = session.refreshToken ?: return@async false
                 val result = api.refreshSession(rt)
                 api.token = result.token
                 session.refreshToken = result.refreshToken
@@ -212,14 +220,13 @@ internal class AuthManager(
                 // refresh loop otherwise leaves a consumed token in storage → 401
                 // on next launch. Mirrors iOS refreshTokenNow → onSessionChanged.
                 onSessionChanged()
-                true
+                TokenStatus.FRESH
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 consecutiveRefreshFailures++
                 loggerProvider().tokenRefreshFailed(consecutiveRefreshFailures, e.message ?: "unknown")
-                if (consecutiveRefreshFailures >= MAX_REFRESH_FAILURES) {
-                    setDisconnected()
-                }
-                false
+                if (e is HttpException && e.statusCode in REJECTION_STATUSES) rejectSession() else TokenStatus.UNAVAILABLE
             }
         }
 
@@ -231,10 +238,19 @@ internal class AuthManager(
         }
     }
 
-    suspend fun ensureFreshToken(): Boolean {
-        if (!isTokenExpired(60)) return true
+    suspend fun ensureFreshToken(): TokenStatus {
+        if (api.token == null) return TokenStatus.REJECTED
+        if (!isTokenExpired(60)) return TokenStatus.FRESH
         return refreshTokens()
     }
+
+    private suspend fun rejectSession(): TokenStatus {
+        onSessionRejected()
+        return TokenStatus.REJECTED
+    }
+
+    /** 5 s doubling to a 5 min cap. */
+    private fun retryDelayMs(failures: Int): Long = (5_000L shl (failures - 1).coerceAtMost(6)).coerceAtMost(300_000L)
 
     private fun isTokenExpired(bufferSeconds: Long = 0): Boolean {
         val token = api.token ?: return true
@@ -243,6 +259,10 @@ internal class AuthManager(
         if (exp == 0L) return true
         val now = System.currentTimeMillis() / 1000
         return (exp - now) <= bufferSeconds
+    }
+
+    private companion object {
+        val REJECTION_STATUSES = setOf(401, 403)
     }
 
     private fun getTokenRefreshDelay(): Long {

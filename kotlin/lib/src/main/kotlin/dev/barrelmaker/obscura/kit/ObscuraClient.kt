@@ -229,7 +229,7 @@ class ObscuraClient(
             gateway = gateway,
             scope = scope,
             setAuthState = { _authState.value = it },
-            setDisconnected = { disconnect() },
+            onSessionRejected = { logout() },
             loggerProvider = { logger },
             onLogout = {
                 envelopeJob?.cancel()
@@ -336,7 +336,7 @@ class ObscuraClient(
         sessionStorage.clear()
     }
     suspend fun wipeDevice() = authManager.wipeDevice()
-    suspend fun ensureFreshToken(): Boolean = authManager.ensureFreshToken()
+    suspend fun ensureFreshToken(): TokenStatus = authManager.ensureFreshToken()
 
     // ─── Session Persistence (kit-owned) ──────────────────
 
@@ -357,8 +357,9 @@ class ObscuraClient(
     }
 
     /**
-     * Restore session from storage and connect.
-     * Returns true if session was restored and connected.
+     * Restore session from storage and connect. Returns true when restored and connected. On false
+     * the session is either signed out (refresh token rejected, storage cleared) or kept offline,
+     * still authenticated, for a later [ensureConnected].
      */
     suspend fun restorePersistedSession(): Boolean {
         val saved = sessionStorage.load() ?: return false
@@ -376,13 +377,19 @@ class ObscuraClient(
         )
 
 
-        // Refresh token + connect
+        // Refresh token + connect. A rejected refresh token has already signed out and cleared
+        // storage; an unavailable server keeps the session so the app still opens offline.
         try {
-            val fresh = ensureFreshToken()
-            if (!fresh) {
-                log("SESSION token refresh failed — clearing")
-                sessionStorage.clear()
-                return false
+            when (ensureFreshToken()) {
+                TokenStatus.FRESH -> Unit
+                TokenStatus.REJECTED -> {
+                    log("SESSION refresh token rejected — signed out")
+                    return false
+                }
+                TokenStatus.UNAVAILABLE -> {
+                    log("SESSION restored offline; connect deferred")
+                    return false
+                }
             }
             connect()
             persistSession() // save refreshed tokens
@@ -964,7 +971,6 @@ class ObscuraClient(
                     contextId = signal.contextId,
                     senderUserId = sourceUserId,
                     senderDeviceId = deviceId,
-                    senderDisplayName = friends.get(sourceUserId)?.username ?: sourceUserId,
                 )
                 TypingState.STOPPED -> typingTracker.clear(signal.contextId, deviceId)
                 null -> log("TYPING DROPPED: unspecified or unknown state")
@@ -1048,7 +1054,8 @@ class ObscuraClient(
     }
 
     /**
-     * Who is currently typing in a context, by display name.
+     * Who is currently typing in a context, as user IDs. The host resolves names through its
+     * friend graph and decides whose typing to show.
      *
      * Auto-expires; a signal with no refresh disappears on its own.
      */

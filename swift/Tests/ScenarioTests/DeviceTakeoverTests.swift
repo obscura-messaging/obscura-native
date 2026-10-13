@@ -75,10 +75,7 @@ final class DeviceTakeoverTests: XCTestCase {
         try await alice.client.takeoverDevice()
         XCTAssertNotEqual(oldRegId, alice.client.registrationId)
 
-        // Takeover ends this device's connection on the server and deletes its queued messages;
-        // start a fresh connection.
-        alice.disconnectWebSocket()
-        try await alice.connectWebSocket()
+        // Takeover ends this device's connection on the server; the gateway reconnects by itself.
 
         // The takeover announces from the new identity. Bob accepts the changed key, as Signal does
         // for an unverified contact, and replaces his session with Alice's device.

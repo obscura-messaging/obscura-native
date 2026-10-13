@@ -22,6 +22,7 @@ sqldelight-runtime = { module = "app.cash.sqldelight:runtime", version.ref = "sq
 sqldelight-coroutines = { module = "app.cash.sqldelight:coroutines-extensions", version.ref = "sqldelight" }
 libsignal = { module = "org.signal:libsignal-client", version.ref = "libsignal" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+mockwebserver = { module = "com.squareup.okhttp3:mockwebserver3", version.ref = "okhttp" }
 coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 json = { module = "org.json:json", version = "20260814" }

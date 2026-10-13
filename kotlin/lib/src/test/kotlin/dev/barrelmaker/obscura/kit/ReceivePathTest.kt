@@ -210,7 +210,16 @@ class ReceivePathTest {
             peerUserId,
             "dev-peer",
         )
-        assertEquals(listOf("alice"), c.observeTyping("thread-123").first())
+        assertEquals(listOf(peerUserId), c.observeTyping("thread-123").first())
+    }
+
+    @Test
+    fun `a user typing on two devices is one typer, named by user id`() = runBlocking {
+        val c = newClient()
+        for (device in listOf("dev-phone", "dev-laptop")) {
+            c.handleTypingSignal(typing("thread-123", Client.TypingState.TYPING_STATE_STARTED), peerUserId, device)
+        }
+        assertEquals(listOf(peerUserId), c.observeTyping("thread-123").first())
     }
 
     @Test
