@@ -29,6 +29,7 @@ final class FakeObscuraServer: @unchecked Sendable {
 
     func close() {
         FakeServerProtocol.onOwnMetadata.withLock { $0 = nil }
+        FakeServerProtocol.messageResponse.withLock { $0 = nil }
         URLProtocol.unregisterClass(FakeServerProtocol.self)
         Self.active = nil
     }
@@ -100,6 +101,7 @@ final class FakeObscuraServer: @unchecked Sendable {
 
 final class FakeServerProtocol: URLProtocol {
     static let onOwnMetadata = Locked<(@Sendable () -> Void)?>(nil)
+    static let messageResponse = Locked<(@Sendable () -> (Int, Data)?)?>(nil)
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == FakeObscuraServer.host }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -108,7 +110,8 @@ final class FakeServerProtocol: URLProtocol {
             held()
             return
         }
-        let (status, data) = FakeObscuraServer.active!.handle(request, body: Self.body(of: request))
+        let override = request.url?.path == "/v1/messages" ? Self.messageResponse.withLock { $0 }?() : nil
+        let (status, data) = override ?? FakeObscuraServer.active!.handle(request, body: Self.body(of: request))
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!,
                             cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)

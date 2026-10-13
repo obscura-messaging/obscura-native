@@ -49,15 +49,16 @@ final class ClientTests: XCTestCase {
             try await client.sendTyping(to: ["x"], contextId: " \n", state: .started)
         }
 
-        func testProvisioningAnExistingLocalDeviceRequiresAnExplicitWipe() async throws {
-            let client = try await signedIn()
-            let error = ObscuraError.invalidArgument("local device exists; wipeDevice before provisioning")
-            await assertThrows(error) { try await client.register("new-account", "password") }
-            await assertThrows(error) { try await client.loginAndProvision("new-account", "password") }
-            XCTAssertTrue(try client.signalStore.hasIdentity())
-            let deviceId = try await client.devices.localDeviceId()
-            XCTAssertEqual(deviceId, "my-device")
-        }
+    }
+
+    func testProvisioningAnExistingLocalDeviceRequiresAnExplicitWipe() async throws {
+        let client = try await signedIn()
+        let error = ObscuraError.invalidArgument("local device exists; wipeDevice before provisioning")
+        await assertThrows(error) { try await client.register("new-account", "password") }
+        await assertThrows(error) { try await client.loginAndProvision("new-account", "password") }
+        XCTAssertTrue(try client.signalStore.hasIdentity())
+        let deviceId = try await client.devices.localDeviceId()
+        XCTAssertEqual(deviceId, "my-device")
     }
 
     func testFriendCodeEncodesThisUser() async throws {
@@ -116,7 +117,12 @@ final class ClientTests: XCTestCase {
 
         _ = try await route(client, request, from: "stranger")
         try await client.friends.add("friend", username: "real name", status: .accepted)
-        _ = try await route(client, message { $0.friendRequest.username = "Mum" }, from: "friend")
+        do {
+            _ = try await route(client, message { $0.friendRequest.username = "Mum" }, from: "friend")
+            XCTFail("an accepted friend's request must attempt an accept reply")
+        } catch {
+            XCTAssertEqual((error as? ObscuraError)?.code, "SEND_FAILED")
+        }
 
         let stranger = try await client.friends.friend("stranger")
         let friend = try await client.friends.friend("friend")

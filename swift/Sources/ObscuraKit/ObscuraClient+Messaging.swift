@@ -103,15 +103,24 @@ extension ObscuraClient {
         }
         var message = Obscura_Client_V1_ClientMessage()
         message.friendRequest.username = me.username
-        try await sendControl(message, to: userId)
         if existing == nil { try await friends.add(userId, username: username, status: .pendingSent) }
+        do {
+            try await sendControl(message, to: userId)
+        } catch {
+            if existing == nil { try await friends.removePendingSent(userId) }
+            throw error
+        }
     }
 
     public func acceptFriend(_ userId: String) async throws {
+        try await sendFriendAccept(to: userId)
+        try await friends.updateStatus(userId, .accepted)
+    }
+
+    func sendFriendAccept(to userId: String) async throws {
         var message = Obscura_Client_V1_ClientMessage()
         message.friendAccept = Obscura_Client_V1_FriendAccept()
         try await sendControl(message, to: userId)
-        try await friends.updateStatus(userId, .accepted)
     }
 
     /// Forgets the friend and their devices locally. Nothing is sent to them.

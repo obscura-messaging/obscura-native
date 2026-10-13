@@ -62,6 +62,14 @@ actor FriendStore {
             guard db.changesCount == 1 else {
                 throw DatabaseError(message: "friend \(userId) is missing; status was not updated")
             }
+
+        }
+    }
+
+    func removePendingSent(_ userId: String) async throws {
+        try await db.write { db in
+            try db.execute(sql: "DELETE FROM friends WHERE user_id = ? AND status = ?",
+                           arguments: [userId, FriendStatus.pendingSent.rawValue])
         }
     }
 
