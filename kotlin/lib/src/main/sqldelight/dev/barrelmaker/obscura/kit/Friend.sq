@@ -19,5 +19,8 @@ UPDATE Friend SET status = ? WHERE user_id = ?;
 deleteById:
 DELETE FROM Friend WHERE user_id = ?;
 
+deleteIfStatus:
+DELETE FROM Friend WHERE user_id = ? AND status = ?;
+
 deleteAll:
 DELETE FROM Friend;

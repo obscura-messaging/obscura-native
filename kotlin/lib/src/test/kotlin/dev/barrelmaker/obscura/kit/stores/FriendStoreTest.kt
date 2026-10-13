@@ -51,4 +51,17 @@ class FriendStoreTest {
         assertNull(d.get("u1"))
         assertEquals("bob", d.get("u2")!!.username)
     }
+
+    @Test
+    fun `request preparation preserves existing records and conditional cleanup never deletes accepted friendship`() = runTest {
+        val d = newDomain()
+        assertNull(d.prepareRequest("new", "alice"))
+        assertEquals(FriendData("new", "alice", FriendStatus.PENDING_SENT), d.get("new"))
+        d.removePendingRequest("new")
+        assertNull(d.get("new"))
+        d.add("accepted", "trusted name", FriendStatus.ACCEPTED)
+        assertEquals(FriendData("accepted", "trusted name", FriendStatus.ACCEPTED), d.prepareRequest("accepted", "spoof"))
+        d.removePendingRequest("accepted")
+        assertEquals(FriendData("accepted", "trusted name", FriendStatus.ACCEPTED), d.get("accepted"))
+    }
 }

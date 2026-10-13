@@ -350,6 +350,11 @@ class ObscuraClient(
             null -> friends.add(senderUserId, message.friendRequest.username, FriendStatus.PENDING_RECEIVED)
             // Crossed requests are mutual consent.
             FriendStatus.PENDING_SENT -> acceptFriend(senderUserId)
+            FriendStatus.ACCEPTED -> {
+                requireFreshToken()
+                sendFriendAccept(senderUserId)
+                log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged, acceptance replied")
+            }
             else -> log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged")
         }
     }
@@ -524,22 +529,29 @@ class ObscuraClient(
     internal suspend fun befriend(targetUserId: String, targetUsername: String) {
         val self = requireFreshToken()
         if (targetUserId == self.userId) throw ObscuraError.InvalidArgument("Cannot befriend yourself")
-        val existing = friends.get(targetUserId)
+        val existing = friends.prepareRequest(targetUserId, targetUsername)
         when (existing?.status) {
             FriendStatus.ACCEPTED -> return
             FriendStatus.PENDING_RECEIVED -> return acceptFriend(targetUserId)
             FriendStatus.PENDING_SENT, null -> Unit
         }
-        sender.sendOrThrow(targetUserId, clientMessage { setFriendRequest(friendRequest { username = self.username }) })
-        if (existing == null) friends.add(targetUserId, targetUsername, FriendStatus.PENDING_SENT)
+        try {
+            sender.sendOrThrow(targetUserId, clientMessage { setFriendRequest(friendRequest { username = self.username }) })
+        } catch (e: Exception) {
+            if (existing == null) withContext(NonCancellable) { friends.removePendingRequest(targetUserId) }
+            throw e
+        }
     }
 
     suspend fun acceptFriend(userId: String) {
         requireFreshToken()
         if (friends.get(userId) == null) throw ObscuraError.InvalidArgument("No friend request from $userId")
-        sender.sendOrThrow(userId, clientMessage { setFriendAccept(friendAccept {}) })
+        sendFriendAccept(userId)
         friends.updateStatus(userId, FriendStatus.ACCEPTED)
     }
+
+    private suspend fun sendFriendAccept(userId: String) =
+        sender.sendOrThrow(userId, clientMessage { setFriendAccept(friendAccept {}) })
 
     /** Forget [userId] and their devices locally. Nothing is sent to them. */
     suspend fun removeFriend(userId: String) {
