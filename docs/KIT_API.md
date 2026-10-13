@@ -196,7 +196,10 @@ of 50, with at most one upload in flight; failures are logged.
 
 A request from an unknown sender becomes pending-received. Crossed
 requests accept the friendship. Other requests do not relabel known
-peers. An accept promotes only a pending-sent relationship.
+peers. A request from an already accepted account gets an idempotent
+accept reply without changing that relationship, so an independent new
+installation can explicitly re-add the peer. An accept promotes only a
+pending-sent relationship.
 
 Incoming entry timestamps are capped at local `now + 60 s`. The inbound
 Signal address is `(senderDeviceUUID, 1)`; attribution comes from this
