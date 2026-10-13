@@ -206,12 +206,14 @@ public actor APIClient {
 
     // MARK: - Messaging (Protobuf)
 
-    public func sendMessage(_ protobufData: Data) async throws {
+    @discardableResult
+    public func sendMessage(_ protobufData: Data) async throws -> Data {
         let hash = SHA256.hash(data: protobufData)
         let idempotencyKey = Array(hash).prefix(16).map { String(format: "%02x", $0) }.joined()
-        _ = try await request("/v1/messages", method: "POST", body: protobufData,
+        let (data, _) = try await request("/v1/messages", method: "POST", body: protobufData,
                               contentType: "application/x-protobuf",
                               extraHeaders: ["Idempotency-Key": idempotencyKey])
+        return data
     }
 
     // MARK: - Attachments

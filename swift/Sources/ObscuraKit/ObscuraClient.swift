@@ -1152,13 +1152,15 @@ public class ObscuraClient {
     /// own outgoing entry to ``entries``.
     ///
     /// An empty `recipientUserIds` is valid and means "my own devices only".
+    @discardableResult
     public func send(
         to recipientUserIds: [String],
         modelKey: String,
         entryId: String,
         sentAt: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000),
-        payload: Data
-    ) async throws {
+        payload: Data,
+        acceptedDeviceIds: Set<String> = []
+    ) async throws -> SendReport {
         var sync = Obscura_Client_V1_AppEntry()
         sync.model = modelKey
         sync.id = entryId
@@ -1173,46 +1175,17 @@ public class ObscuraClient {
         var seen = Set<String>()
         let targets = recipientUserIds.filter { $0 != userId && seen.insert($0).inserted }
 
-        // PER-RECIPIENT, not all-or-nothing. `sendToAllDevices` throws for a recipient with no
-        // registered devices, so letting the first failure escape would abandon recipients 2..N —
-        // and, worse, skip the own-device self-sync below, so the user's own other devices would
-        // silently never receive something they wrote. One unreachable friend must not cost the
-        // other four, or the sender's own copy.
-        var failures: [(String, Error)] = []
+        var recipients: [SubmissionResult] = []
         for recipient in targets {
-            do {
-                try await sendToAllDevices(recipient, msg)
-            } catch {
-                failures.append((recipient, error))
-                logger.log("SEND FAILED to \(recipient.prefix(8)) for \(modelKey)/\(entryId.prefix(20)): \(error)")
-            }
+            recipients += try await attemptToAllDevices(recipient, msg, acceptedDeviceIds: acceptedDeviceIds)
         }
 
-        // Own OTHER devices. Runs whether or not a recipient failed — see above. Without the
-        // `!=` this device encrypts to itself.
         let ownDevices = await devices.getOwnDevices().filter { $0.deviceId != self.deviceId }
-        if !ownDevices.isEmpty, let uid = userId {
-            let messenger = try requireMessenger()
-            let msgData = try msg.serializedData()
-            for device in ownDevices {
-                do {
-                    try await messenger.queueMessage(targetDeviceId: device.deviceId,
-                                                     clientMessageData: msgData, targetUserId: uid)
-                } catch {
-                    logger.log("self-sync failed for device \(device.deviceId): \(error)")
-                }
-            }
-            _ = try? await messenger.flushMessages()
-        }
-
-        // Throw only when NOBODY named got it. A partial failure is logged and survivable — the
-        // entry is stored, the other recipients have it, and the caller can retry. A total failure
-        // is different in kind: the app believes it sent something that reached no one, and it must
-        // be able to tell the user so.
-        if !targets.isEmpty && failures.count == targets.count {
-            throw ObscuraError.sendFailed(
-                "\(modelKey)/\(entryId.prefix(20)) reached none of its \(targets.count) recipient(s)")
-        }
+        let selfSync = try await attemptDevices(
+            userId: userId ?? "", deviceIds: ownDevices.map(\.deviceId),
+            msg: msg, acceptedDeviceIds: acceptedDeviceIds
+        )
+        return SendReport(recipients: recipients, selfSync: selfSync)
     }
 
     // ── Ephemeral typing signals ──────────────────────────────────────────────────────────────
@@ -1498,31 +1471,75 @@ public class ObscuraClient {
     }
 
     private func sendToAllDevices(_ targetUserId: String, _ msg: Obscura_Client_V1_ClientMessage, excludingDeviceId: String? = nil) async throws {
-        let messenger = try requireMessenger()
-        let bundles = try await messenger.fetchPreKeyBundles(targetUserId)
-        await rateLimitDelay()
+        let results = try await attemptToAllDevices(targetUserId, msg, excludingDeviceId: excludingDeviceId)
+        guard results.contains(where: { $0.status == .accepted }) else {
+            throw ObscuraError.sendFailed(results.compactMap(\.error).joined(separator: "; "))
+        }
+    }
 
-        let msgData = try msg.serializedData()
-        var queued = 0
+    private func attemptToAllDevices(
+        _ targetUserId: String, _ msg: Obscura_Client_V1_ClientMessage,
+        acceptedDeviceIds: Set<String> = [], excludingDeviceId: String? = nil
+    ) async throws -> [SubmissionResult] {
+        let messenger = try requireMessenger()
+        let bundles: [PreKeyBundleResponse]
+        do {
+            bundles = try await messenger.fetchPreKeyBundles(targetUserId)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return [SubmissionResult(userId: targetUserId, deviceId: nil, status: .rejected, error: "\(error)")]
+        }
+        await rateLimitDelay()
+        var prepared: [String] = []
+        var failures: [SubmissionResult] = []
         for bundle in bundles {
             if let excluded = excludingDeviceId, bundle.deviceId == excluded { continue }
+            if acceptedDeviceIds.contains(bundle.deviceId) {
+                prepared.append(bundle.deviceId)
+                continue
+            }
             do {
                 try await messenger.processServerBundle(bundle, userId: targetUserId)
             } catch {
-                logger.sessionEstablishFailed(userId: targetUserId, error: "\(error)")
+                failures.append(SubmissionResult(userId: targetUserId, deviceId: bundle.deviceId,
+                                                 status: .rejected, error: "\(error)"))
                 continue
             }
-            let targetDeviceId = bundle.deviceId
-            try await messenger.queueMessage(targetDeviceId: targetDeviceId, clientMessageData: msgData, targetUserId: targetUserId)
-            queued += 1
+            prepared.append(bundle.deviceId)
         }
-        guard queued > 0 else {
-            throw ObscuraError.sendFailed("No usable devices for \(targetUserId)")
+        if prepared.isEmpty && failures.isEmpty {
+            return [SubmissionResult(userId: targetUserId, deviceId: nil, status: .rejected, error: "No devices found")]
         }
-        let result = try await messenger.flushMessages()
-        guard result.sent > 0 else {
-            throw ObscuraError.sendFailed("No submissions sent to \(targetUserId)")
+        return failures + (try await attemptDevices(
+            userId: targetUserId, deviceIds: prepared, msg: msg, acceptedDeviceIds: acceptedDeviceIds
+        ))
+    }
+
+    private func attemptDevices(
+        userId: String, deviceIds: [String], msg: Obscura_Client_V1_ClientMessage,
+        acceptedDeviceIds: Set<String>
+    ) async throws -> [SubmissionResult] {
+        if deviceIds.isEmpty { return [] }
+        let messenger = try requireMessenger()
+        let data = try msg.serializedData()
+        var results: [SubmissionResult] = []
+        var submissions: [Obscura_V1_SendMessageRequest.Submission] = []
+        for deviceId in Set(deviceIds).sorted() {
+            if acceptedDeviceIds.contains(deviceId) {
+                results.append(SubmissionResult(userId: userId, deviceId: deviceId, status: .accepted))
+                continue
+            }
+            do {
+                submissions.append(try await messenger.prepareSubmission(
+                    targetDeviceId: deviceId, clientMessageData: data, targetUserId: userId
+                ))
+            } catch {
+                results.append(SubmissionResult(userId: userId, deviceId: deviceId,
+                                                 status: .rejected, error: "\(error)"))
+            }
         }
+        return results + (try await messenger.submit(userId: userId, submissions: submissions))
     }
 
     // MARK: - Internal: Envelope Loop

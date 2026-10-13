@@ -4,6 +4,8 @@ import com.google.protobuf.ByteString
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
 import dev.barrelmaker.obscura.kit.crypto.fromBase64
+import dev.barrelmaker.obscura.kit.SubmissionResult
+import dev.barrelmaker.obscura.kit.SubmissionStatus
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.stores.FriendData
 import dev.barrelmaker.obscura.kit.stores.FriendDeviceInfo
@@ -95,6 +97,15 @@ class Messenger internal constructor(
      * decrypt/persist/ack. Only libsignal work is confined; network calls happen outside.
      */
     suspend fun queueMessage(targetDeviceId: String, message: ClientMessage, userId: String? = null) {
+        val submission = prepareSubmission(targetDeviceId, message, userId)
+        withContext(dispatcher) { queue.add(submission) }
+    }
+
+    internal suspend fun prepareSubmission(
+        targetDeviceId: String,
+        message: ClientMessage,
+        userId: String? = null,
+    ): SendMessageRequest.Submission {
         // targetDeviceId IS the peer's device UUID — the address name slot (see addressFor).
         // The owning userId is needed only to fetch that device's prekey bundle on first
         // contact; it is NOT part of the session address.
@@ -104,7 +115,7 @@ class Messenger internal constructor(
         val clientMsgBytes = message.toByteArray()
         ensureSession(ownerUserId, targetDeviceId)
 
-        withContext(dispatcher) {
+        return withContext(dispatcher) {
             val encrypted = encrypt(targetDeviceId, clientMsgBytes)
 
             val encMsg = EncryptedMessage.newBuilder()
@@ -115,13 +126,33 @@ class Messenger internal constructor(
                 .setContent(ByteString.copyFrom(encrypted.second))
                 .build()
 
-            val submission = SendMessageRequest.Submission.newBuilder()
+            SendMessageRequest.Submission.newBuilder()
                 .setSubmissionId(UuidCodec.uuidToBytes(UUID.randomUUID()))
                 .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(targetDeviceId)))
                 .setMessage(ByteString.copyFrom(encMsg.toByteArray()))
                 .build()
 
-            queue.add(submission)
+        }
+    }
+
+    internal suspend fun submit(
+        userId: String,
+        submissions: List<SendMessageRequest.Submission>,
+    ): List<SubmissionResult> {
+        if (submissions.isEmpty()) return emptyList()
+        return try {
+            val request = SendMessageRequest.newBuilder().addAllMessages(submissions).build()
+            val response = SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray()))
+            decodeSubmissionResults(userId, submissions, response)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            submissions.map {
+                SubmissionResult(
+                    userId, UuidCodec.bytesToUuid(it.deviceId.toByteArray()).toString(),
+                    SubmissionStatus.UNKNOWN, e.message ?: e.javaClass.simpleName,
+                )
+            }
         }
     }
 
@@ -130,6 +161,7 @@ class Messenger internal constructor(
         val submissions = withContext(dispatcher) {
             queue.toList().also { queue.clear() }
         }
+
         if (submissions.isEmpty()) return Triple(0, 0, emptyList())
 
         val request = SendMessageRequest.newBuilder()

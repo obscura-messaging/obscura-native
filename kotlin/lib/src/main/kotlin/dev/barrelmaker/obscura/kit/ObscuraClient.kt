@@ -257,7 +257,7 @@ class ObscuraClient(
             onSessionChanged = { persistSession() }
         )
 
-        messageSender = MessageSender(messenger, authManager)
+        messageSender = MessageSender(messenger, authManager, api)
         ctx.messageSender = messageSender
 
         // Wire gateway reconnect token refresh
@@ -1038,7 +1038,8 @@ class ObscuraClient(
         entryId: String,
         sentAt: Long = System.currentTimeMillis(),
         payload: ByteArray,
-    ) = contentService.sendEntry(recipientUserIds, modelKey, entryId, sentAt, payload)
+        acceptedDeviceIds: Set<String> = emptySet(),
+    ): SendReport = contentService.sendEntry(recipientUserIds, modelKey, entryId, sentAt, payload, acceptedDeviceIds)
 
     suspend fun sendTyping(
         recipientUserIds: List<String>,
