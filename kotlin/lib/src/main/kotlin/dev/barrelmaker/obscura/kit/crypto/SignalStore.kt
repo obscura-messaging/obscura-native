@@ -92,6 +92,8 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     override fun loadSignedPreKeys(): List<SignedPreKeyRecord> =
         queries.selectAllSignedPreKeys().executeAsList().map(::SignedPreKeyRecord)
 
+    fun getHighestSignedPreKeyId(): Long = queries.highestSignedPreKeyId().executeAsOne().MAX ?: 0L
+
     override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) =
         queries.insertSignedPreKey(signedPreKeyId.toLong(), record.serialize())
 

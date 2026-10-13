@@ -93,18 +93,71 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertEqual(try store.preKeyCount(), 99)
     }
 
-    func testAddedPreKeysFollowTheHighestIdAndUploadWithTheExistingSignedPreKey() throws {
-        let store = try store()
+    func testRefillsAdvanceTheServerSignedPreKeyIdAcrossStoreReloads() throws {
+        let db = try ObscuraDatabase.inMemory()
+        let store = try store(db)
         let keys = try SignalKeys.generate()
         try store.install(keys)
+        var serverMaxId = Int(keys.signedPreKey.id)
+        var records = [keys.signedPreKey.id: Data(keys.signedPreKey.serialize())]
 
-        let upload = try store.addPreKeys(50)
+        for refill in 0..<3 {
+            let reopened = try self.store(db)
+            let upload = try reopened.addPreKeys(50)
 
-        XCTAssertEqual(upload.oneTimePreKeys.map(\.keyId), Array(101...150))
-        XCTAssertEqual(try store.preKeyCount(), 150)
-        XCTAssertEqual(upload.registrationId, Int(keys.registrationId))
-        XCTAssertEqual(upload.signedPreKey.signature, Data(keys.signedPreKey.signature).base64EncodedString())
-        XCTAssertEqual(upload.identityKey, Data(keys.identity.publicKey.serialize()).base64EncodedString())
+            XCTAssertGreaterThan(upload.signedPreKey.keyId, serverMaxId, "the server rejects an equal or lower signed prekey id")
+            XCTAssertEqual(upload.signedPreKey.keyId, serverMaxId + 1)
+            XCTAssertEqual(upload.oneTimePreKeys.map(\.keyId), Array((101 + refill * 50)...(150 + refill * 50)))
+            XCTAssertEqual(try reopened.preKeyCount(), 150 + refill * 50)
+            XCTAssertEqual(upload.registrationId, Int(keys.registrationId))
+            XCTAssertEqual(upload.identityKey, Data(keys.identity.publicKey.serialize()).base64EncodedString())
+            let signed = try reopened.loadSignedPreKey(id: UInt32(upload.signedPreKey.keyId), context: NullContext())
+            XCTAssertEqual(upload.signedPreKey.publicKey, Data(signed.publicKey.serialize()).base64EncodedString())
+            XCTAssertEqual(upload.signedPreKey.signature, Data(signed.signature).base64EncodedString())
+            XCTAssertTrue(try keys.identity.publicKey.verifySignature(message: signed.publicKey.serialize(), signature: signed.signature))
+            for (id, bytes) in records {
+                XCTAssertEqual(try reopened.loadSignedPreKey(id: id, context: NullContext()).serialize(), Array(bytes))
+            }
+            serverMaxId = upload.signedPreKey.keyId
+            records[signed.id] = Data(signed.serialize())
+        }
+    }
+
+    func testRefillAfterAnUnpublishedAttemptDoesNotReuseItsSignedPreKeyId() throws {
+        let db = try ObscuraDatabase.inMemory()
+        let store = try store(db)
+        try store.install(SignalKeys.generate())
+        let unpublished = try store.addPreKeys(50)
+
+        let reopened = try self.store(db)
+        let retry = try reopened.addPreKeys(50)
+
+        XCTAssertEqual(retry.signedPreKey.keyId, 3)
+        XCTAssertGreaterThan(retry.signedPreKey.keyId, unpublished.signedPreKey.keyId)
+        XCTAssertEqual(retry.oneTimePreKeys.map(\.keyId), Array(151...200))
+        XCTAssertNoThrow(try reopened.loadSignedPreKey(id: UInt32(unpublished.signedPreKey.keyId), context: NullContext()))
+    }
+
+    func testAMessageUsingAnEarlierBundleDecryptsAfterSignedPreKeyRotation() throws {
+        let alice = try store()
+        try alice.install(SignalKeys.generate())
+        let db = try ObscuraDatabase.inMemory()
+        let bob = try store(db)
+        let bobAddress = try ProtocolAddress(name: "bob", deviceId: 1)
+        try processPreKeyBundle(bundle(installingIn: bob), for: bobAddress,
+                                sessionStore: alice, identityStore: alice, context: NullContext())
+        let cipher = try signalEncrypt(message: Array("delayed message".utf8), for: bobAddress,
+                                       sessionStore: alice, identityStore: alice, context: NullContext())
+
+        _ = try bob.addPreKeys(50)
+        _ = try bob.addPreKeys(50)
+        let reopened = try store(db)
+        let decrypted = try signalDecryptPreKey(
+            message: PreKeySignalMessage(bytes: cipher.serialize()), from: ProtocolAddress(name: "alice", deviceId: 1),
+            sessionStore: reopened, identityStore: reopened, preKeyStore: reopened, signedPreKeyStore: reopened,
+            kyberPreKeyStore: reopened, context: NullContext())
+
+        XCTAssertEqual(String(decoding: decrypted, as: UTF8.self), "delayed message")
     }
 
     // MARK: - Sessions

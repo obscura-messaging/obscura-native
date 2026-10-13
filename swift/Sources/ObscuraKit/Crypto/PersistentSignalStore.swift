@@ -40,23 +40,27 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
         try db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM signal_prekeys") ?? 0 }
     }
 
-    /// Stores `count` new one-time prekeys after the highest existing id and returns the upload for
-    /// them with the existing identity and signed prekey.
+    /// Refills with the current identity and a fresh signed prekey; earlier signed keys remain stored.
     func addPreKeys(_ count: UInt32) throws -> DeviceKeysUpload {
         let identity = try identityKeyPair(context: NullContext())
         let registrationId = try localRegistrationId(context: NullContext())
-        let signedPreKey = try loadSignedPreKey(id: Self.signedPreKeyId, context: NullContext())
-        let preKeys = try db.write { db -> [PreKeyRecord] in
+        return try db.write { db in
+            let highestSigned = try Int64.fetchOne(db, sql: "SELECT MAX(key_id) FROM signal_signed_prekeys") ?? 0
+            guard let nextSignedId = Int32(exactly: highestSigned + 1) else {
+                throw SignalError.invalidState("signed prekey IDs exhausted")
+            }
+            let signedPreKey = try SignalKeys.generateSignedPreKey(identity: identity, id: UInt32(nextSignedId))
+            try db.execute(sql: "INSERT INTO signal_signed_prekeys (key_id, record) VALUES (?, ?)",
+                           arguments: [signedPreKey.id, Data(signedPreKey.serialize())])
             let highest = try Int64.fetchOne(db, sql: "SELECT MAX(key_id) FROM signal_prekeys") ?? 0
             let records = try (1...count).map { try PreKeyRecord(id: UInt32(highest) + $0, privateKey: PrivateKey.generate()) }
             for record in records {
                 try db.execute(sql: "INSERT INTO signal_prekeys (key_id, record) VALUES (?, ?)",
                                arguments: [record.id, Data(record.serialize())])
             }
-            return records
+            return SignalKeys.upload(identity: identity, registrationId: registrationId, signedPreKey: signedPreKey,
+                                     preKeys: records)
         }
-        return SignalKeys.upload(identity: identity, registrationId: registrationId, signedPreKey: signedPreKey,
-                                     preKeys: preKeys)
     }
 
     private static func address(_ address: ProtocolAddress) -> String {
@@ -178,16 +182,19 @@ struct SignalKeys {
 
     static func generate() throws -> SignalKeys {
         let identity = IdentityKeyPair.generate()
-        let signedPrivate = PrivateKey.generate()
-        let signature = identity.privateKey.generateSignature(message: signedPrivate.publicKey.serialize())
         return SignalKeys(
             identity: identity,
             registrationId: UInt32.random(in: 1...16380),
-            signedPreKey: try SignedPreKeyRecord(id: PersistentSignalStore.signedPreKeyId,
-                                                 timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-                                                 privateKey: signedPrivate, signature: signature),
+            signedPreKey: try generateSignedPreKey(identity: identity, id: PersistentSignalStore.signedPreKeyId),
             preKeys: try (1...initialPreKeyCount).map { try PreKeyRecord(id: $0, privateKey: PrivateKey.generate()) }
         )
+    }
+
+    static func generateSignedPreKey(identity: IdentityKeyPair, id: UInt32) throws -> SignedPreKeyRecord {
+        let privateKey = PrivateKey.generate()
+        let signature = identity.privateKey.generateSignature(message: privateKey.publicKey.serialize())
+        return try SignedPreKeyRecord(id: id, timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+                                      privateKey: privateKey, signature: signature)
     }
 
     func upload() -> DeviceKeysUpload {
