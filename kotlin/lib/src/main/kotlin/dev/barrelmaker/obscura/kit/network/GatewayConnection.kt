@@ -1,200 +1,231 @@
 package dev.barrelmaker.obscura.kit.network
 
-import kotlinx.coroutines.*
+import dev.barrelmaker.obscura.kit.ConnectionState
+import dev.barrelmaker.obscura.kit.ObscuraError
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import okhttp3.*
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import okio.ByteString
-import xyz.obscura.server.contracts.ObscuraProtocol.*
+import okio.ByteString.Companion.toByteString
+import xyz.obscura.server.contracts.ObscuraProtocol.AckMessage
+import xyz.obscura.server.contracts.ObscuraProtocol.Envelope
+import xyz.obscura.server.contracts.ObscuraProtocol.PreKeyStatus
+import xyz.obscura.server.contracts.ObscuraProtocol.WebSocketFrame
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicLong
-
-enum class GatewayState {
-    DISCONNECTED,
-    CONNECTING,
-    CONNECTED,
-    RECONNECTING
-}
 
 /**
- * WebSocket connection to Obscura gateway.
- *
- * Keeps the connection alive with:
- * - OkHttp ping every 30s (keeps NAT/proxy alive)
- * - Auto-reconnect with exponential backoff (1s → 30s) after any drop or server-initiated close
- * - Token refresh before reconnect attempts
- * - [disconnect] suppresses reconnect
+ * The gateway WebSocket and the only owner of reconnection. [connect] returns once the socket is
+ * open. A drop or server close after that reconnects with backoff until [disconnect].
  */
-class GatewayConnection(
+internal class GatewayConnection(
     private val api: APIClient,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    /** Runs before every attempt; refreshes the access token. */
+    private val beforeConnect: suspend () -> Unit,
+    private val log: (String) -> Unit,
 ) {
-    private val client = OkHttpClient.Builder()
-        .readTimeout(90, TimeUnit.SECONDS)  // if no data or pong for 90s, connection is dead
-        .pingInterval(30, TimeUnit.SECONDS) // keepalive — triggers onFailure if pong missing
+    private val http = OkHttpClient.Builder()
+        .readTimeout(90, TimeUnit.SECONDS)
+        // A missed pong fails the socket, which counts as a drop.
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
 
-    private var webSocket: WebSocket? = null
+    private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
+    val state: StateFlow<ConnectionState> = _state.asStateFlow()
+
+    val envelopes = Channel<Envelope>(Channel.UNLIMITED)
+    val preKeyStatus = Channel<PreKeyStatus>(Channel.CONFLATED)
+
+    private val lock = Any()
+    private var socket: WebSocket? = null
+    // Bumped by every socket and by disconnect, so callbacks from a superseded socket are ignored.
+    private var generation = 0L
+    private var pending: CompletableDeferred<Unit>? = null
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
-    private var shouldReconnect = true
-    private val connectionGeneration = AtomicLong()
-
-    // Completed on onOpen, completed exceptionally on onFailure/onClosed. Lets
-    // connect() suspend until the socket is actually open (or has failed) instead
-    // of returning the instant OkHttp's async newWebSocket() is kicked off.
-    private var openSignal: CompletableDeferred<Unit>? = null
-
-    // Current socket state, exposed two complementary ways:
-    //   • [state]          — observable holder (StateFlow) for pull / flow collection
-    //   • [onStateChanged] — synchronous push, invoked inline from setState() so the
-    //                        one in-process mirror (ObscuraClient.connectionState) is
-    //                        updated with zero latency — see setState() below.
-    // Both are driven by the single mutation point setState(); callers never touch
-    // _state directly.
-    private val _state = MutableStateFlow(GatewayState.DISCONNECTED)
-    val state: StateFlow<GatewayState> = _state
-
-    /** Fired synchronously on every socket state transition. Set by ObscuraClient. */
-    var onStateChanged: ((GatewayState) -> Unit)? = null
-
-    /** The only writer of [_state]; keeps the flow and the callback in lockstep. */
-    private fun setState(s: GatewayState) {
-        _state.value = s
-        onStateChanged?.invoke(s)
-    }
-
-    val envelopes = Channel<Envelope>(capacity = 1000)
-    val preKeyStatus = Channel<PreKeyStatus>(capacity = 10)
-
-    /** Called before reconnect to ensure token is fresh. Set by ObscuraClient. */
-    var ensureFreshToken: (suspend () -> Unit) = {}
 
     suspend fun connect() {
-        if (_state.value == GatewayState.CONNECTED || _state.value == GatewayState.CONNECTING) return
-        setState(GatewayState.CONNECTING)
-        shouldReconnect = true
-
-        val signal = CompletableDeferred<Unit>()
-        openSignal = signal
-        val generation = connectionGeneration.incrementAndGet()
-        try {
-            val ticket = api.fetchGatewayTicket()
-            val url = api.getGatewayUrl(ticket)
-            openWebSocket(url, generation)
-            // Suspend until the socket truly opens (onOpen) or fails (onFailure/
-            // onClosed). This makes "connect() returned" mean "connected", and
-            // lets the listener callbacks be the single owner of the state flow.
-            signal.await()
-        } catch (e: Exception) {
-            if (_state.value != GatewayState.DISCONNECTED) setState(GatewayState.DISCONNECTED)
-            throw e
-        } finally {
-            if (openSignal === signal) openSignal = null
+        var owner = false
+        val attempt = synchronized(lock) {
+            if (_state.value == ConnectionState.CONNECTED) return
+            pending ?: CompletableDeferred<Unit>().also {
+                owner = true
+                pending = it
+                reconnectJob?.cancel()
+                reconnectJob = null
+                _state.value = ConnectionState.CONNECTING
+            }
         }
+        if (owner) {
+            try {
+                open(attempt)
+            } catch (e: Exception) {
+                synchronized(lock) { if (abandon(attempt)) _state.value = ConnectionState.DISCONNECTED }
+                throw connectionError(e)
+            }
+        }
+        attempt.await()
     }
 
     fun disconnect() {
-        shouldReconnect = false
-        connectionGeneration.incrementAndGet()
-        reconnectJob?.cancel()
-        reconnectJob = null
-        openSignal?.completeExceptionally(IllegalStateException("disconnected during connect"))
-        webSocket?.close(1000, "Client disconnect")
-        webSocket = null
-        setState(GatewayState.DISCONNECTED)
+        val (closing, attempt) = synchronized(lock) {
+            generation++
+            reconnectJob?.cancel()
+            reconnectJob = null
+            reconnectAttempts = 0
+            _state.value = ConnectionState.DISCONNECTED
+            while (envelopes.tryReceive().isSuccess) {}
+            while (preKeyStatus.tryReceive().isSuccess) {}
+            (socket to pending).also { socket = null; pending = null }
+        }
+        attempt?.completeExceptionally(ObscuraError.ConnectionFailed("Disconnected"))
+        closing?.close(1000, null)
     }
 
-    fun ack(messageIds: List<com.google.protobuf.ByteString>) {
-        val ackMsg = AckMessage.newBuilder()
-            .addAllMessageIds(messageIds)
-            .build()
-
-        val frame = WebSocketFrame.newBuilder()
-            .setAck(ackMsg)
-            .build()
-
-        webSocket?.send(ByteString.of(*frame.toByteArray()))
+    fun ack(envelopeId: com.google.protobuf.ByteString) {
+        val frame = WebSocketFrame.newBuilder().setAck(AckMessage.newBuilder().addMessageIds(envelopeId)).build()
+        val ws = synchronized(lock) { socket } ?: throw ObscuraError.ConnectionFailed("Not connected")
+        if (!ws.send(frame.toByteArray().toByteString())) throw ObscuraError.ConnectionFailed("Socket is closing")
     }
 
-    private fun openWebSocket(url: String, generation: Long) {
-        val request = Request.Builder().url(url).build()
-
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (generation != connectionGeneration.get()) {
-                    webSocket.close(1000, "Superseded connection")
-                    return
-                }
-                setState(GatewayState.CONNECTED)
-                reconnectAttempts = 0
-                openSignal?.complete(Unit)
+    private suspend fun open(attempt: CompletableDeferred<Unit>) {
+        try {
+            beforeConnect()
+            val url = api.gatewayUrl(api.fetchGatewayTicket())
+            synchronized(lock) {
+                if (pending !== attempt) throw ObscuraError.ConnectionFailed("Disconnected")
+                socket = http.newWebSocket(Request.Builder().url(url).build(), Listener(++generation, attempt))
             }
-
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                if (generation != connectionGeneration.get()) return
-                try {
-                    val frame = WebSocketFrame.parseFrom(bytes.toByteArray())
-                    when {
-                        frame.hasPreKeyStatus() -> preKeyStatus.trySend(frame.preKeyStatus)
-                        frame.hasEnvelopeBatch() -> {
-                            for (envelope in frame.envelopeBatch.envelopesList) {
-                                envelopes.trySend(envelope)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    // Corrupt/undecodable frame on the wire: drop it and keep the socket
-                    // alive. Non-fatal and self-limiting; the transport has no logger.
-                }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (generation != connectionGeneration.get()) return
-                this@GatewayConnection.webSocket = null
-                setState(GatewayState.DISCONNECTED)
-                openSignal?.completeExceptionally(t)
-                if (shouldReconnect) scheduleReconnect()
-            }
-
-            // The server is closing (takeover, shutdown). OkHttp leaves the socket half-closed until
-            // the close is answered, and only then calls onClosed.
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(1000, null)
-            }
-
-            // Only a close this client did not ask for reaches here: [disconnect] bumps the
-            // generation first, so its own close is ignored above.
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (generation != connectionGeneration.get()) return
-                this@GatewayConnection.webSocket = null
-                setState(GatewayState.DISCONNECTED)
-                openSignal?.completeExceptionally(
-                    IllegalStateException("gateway closed before open: $code $reason")
-                )
-                if (shouldReconnect) scheduleReconnect()
-            }
-        })
+            attempt.await()
+        } catch (e: Exception) {
+            attempt.completeExceptionally(connectionError(e))
+            throw e
+        }
     }
 
-    private fun scheduleReconnect() {
-        reconnectJob?.cancel()
+    private fun connectionError(cause: Exception): Exception = when (cause) {
+        is CancellationException, is ObscuraError -> cause
+        else -> ObscuraError.ConnectionFailed(cause.message ?: cause.javaClass.simpleName, cause)
+    }
+
+    /** Forget a failed attempt and its socket. False when a disconnect or newer attempt already did. */
+    private fun abandon(attempt: CompletableDeferred<Unit>): Boolean = synchronized(lock) {
+        if (pending !== attempt) return false
+        pending = null
+        generation++
+        socket?.cancel()
+        socket = null
+        true
+    }
+
+    private fun scheduleReconnect(): Unit = synchronized(lock) {
+        val delayMs = (1_000L shl reconnectAttempts.coerceAtMost(5)).coerceAtMost(30_000L)
+        reconnectAttempts++
+        _state.value = ConnectionState.RECONNECTING
         reconnectJob = scope.launch {
-            setState(GatewayState.RECONNECTING)
-
-            // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s max
-            val delayMs = (1000L * (1L shl reconnectAttempts.coerceAtMost(5))).coerceAtMost(30_000L)
             delay(delayMs)
-            reconnectAttempts++
-
+            val attempt = synchronized(lock) {
+                if (pending != null) return@launch
+                CompletableDeferred<Unit>().also { pending = it }
+            }
             try {
-                // Refresh token before reconnecting — stale token = failed ticket fetch
-                ensureFreshToken()
-                connect()
-            } catch (_: Exception) {
-                // connect() failed — will retry via onFailure → scheduleReconnect
-                if (shouldReconnect) scheduleReconnect()
+                open(attempt)
+            } catch (e: CancellationException) {
+                abandon(attempt)
+                throw e
+            } catch (e: Exception) {
+                log("GATEWAY reconnect failed: ${e.message}")
+                if (abandon(attempt)) scheduleReconnect()
+            }
+        }
+    }
+
+    private inner class Listener(
+        private val generation: Long,
+        private val attempt: CompletableDeferred<Unit>,
+    ) : WebSocketListener() {
+        private fun isCurrent() = generation == this@GatewayConnection.generation
+
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            val current = synchronized(lock) {
+                isCurrent().also {
+                    if (it) {
+                        pending = null
+                        reconnectAttempts = 0
+                        _state.value = ConnectionState.CONNECTED
+                    }
+                }
+            }
+            if (current) attempt.complete(Unit) else webSocket.close(1000, null)
+        }
+
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            if (!synchronized(lock) { isCurrent() }) return
+            val frame = try {
+                WebSocketFrame.parseFrom(bytes.toByteArray())
+            } catch (e: Exception) {
+                log("GATEWAY undecodable frame (${bytes.size} bytes): ${e.message}")
+                ended(ObscuraError.ProtocolViolation("Undecodable gateway frame", e))
+                webSocket.cancel()
+                return
+            }
+            if (!frame.hasEnvelopeBatch() && !frame.hasPreKeyStatus()) {
+                log("GATEWAY invalid server frame: ${frame.payloadCase}")
+                ended(ObscuraError.ProtocolViolation("Unexpected gateway frame: ${frame.payloadCase}"))
+                webSocket.cancel()
+                return
+            }
+            synchronized(lock) {
+                if (!isCurrent()) return
+                when {
+                    frame.hasEnvelopeBatch() -> frame.envelopeBatch.envelopesList.forEach { envelopes.trySend(it) }
+                    frame.hasPreKeyStatus() -> preKeyStatus.trySend(frame.preKeyStatus)
+                }
+            }
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            if (!synchronized(lock) { isCurrent() }) return
+            log("GATEWAY invalid text frame (${text.length} characters)")
+            ended(ObscuraError.ProtocolViolation("Gateway sent a text frame"))
+            webSocket.cancel()
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            webSocket.close(1000, null)
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) =
+            ended(IllegalStateException("gateway closed: $code $reason"))
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = ended(t)
+
+        private fun ended(cause: Throwable) {
+            val wasOpen = synchronized(lock) {
+                if (!isCurrent()) return
+                this@GatewayConnection.generation++
+                socket = null
+                _state.value == ConnectionState.CONNECTED
+            }
+            if (wasOpen) {
+                log("GATEWAY dropped: ${cause.message}")
+                scheduleReconnect()
+            } else {
+                attempt.completeExceptionally(
+                    if (cause is ObscuraError) cause else ObscuraError.ConnectionFailed(cause.message ?: "Gateway closed", cause)
+                )
             }
         }
     }

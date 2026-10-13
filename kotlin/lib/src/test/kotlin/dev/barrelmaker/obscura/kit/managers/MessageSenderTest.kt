@@ -3,7 +3,6 @@ package dev.barrelmaker.obscura.kit.managers
 import dev.barrelmaker.obscura.kit.SubmissionResult
 import dev.barrelmaker.obscura.kit.SubmissionStatus.ACCEPTED
 import dev.barrelmaker.obscura.kit.SubmissionStatus.REJECTED
-import dev.barrelmaker.obscura.kit.stores.DeviceData
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
@@ -70,7 +69,7 @@ class MessageSenderTest {
         alice.send(bob, "first")
         val firstKey = bob.receive().single().baseKey
         val bobTablet = server.register(bob.userId)
-        alice.directory.replace(bob.userId, listOf(DeviceData(bob.userId, bob.deviceId), DeviceData(bob.userId, bobTablet.deviceId)))
+        alice.directory.replace(bob.userId, listOf(bob.deviceId, bobTablet.deviceId))
 
         assertEquals(setOf(accepted(bob), accepted(bobTablet)), alice.send(bob, "second").toSet())
 
@@ -87,7 +86,7 @@ class MessageSenderTest {
 
         assertEquals(listOf(accepted(bobNew)), alice.send(bob, "second"))
         assertEquals("second", bobNew.receive().single().message.appEntry.id)
-        assertEquals(listOf(bobNew.deviceId), alice.directory.devicesOf(bob.userId).map { it.deviceId })
+        assertEquals(listOf(bobNew.deviceId), alice.directory.devicesOf(bob.userId))
 
         alice.send(bob, "third")
         assertEquals(2, server.bundleFetches(bob.userId))
@@ -95,7 +94,7 @@ class MessageSenderTest {
 
     @Test
     fun `self sync never targets this device and a single device fetches nothing`() = runBlocking {
-        alice.directory.add(DeviceData(alice.userId, alice.deviceId))
+        alice.directory.replace(alice.userId, listOf(alice.deviceId))
 
         assertEquals(emptyList<SubmissionResult>(), alice.send(alice, "note"))
         assertEquals(0, server.bundleFetches(alice.userId))
@@ -132,7 +131,7 @@ class MessageSenderTest {
 
     @Test
     fun `devices with accepted evidence are not re-sent and need no session`() = runBlocking {
-        alice.directory.add(DeviceData(bob.userId, bob.deviceId))
+        alice.directory.replace(bob.userId, listOf(bob.deviceId))
 
         assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
         assertEquals(0, server.bundleFetches(bob.userId))
@@ -154,7 +153,7 @@ class MessageSenderTest {
     @Test
     fun `a changed identity is accepted, reported, and reached with a fresh session`() = runBlocking {
         val changes = mutableListOf<String>()
-        alice.signalStore.onIdentityChanged = { address, _, _ -> changes += address }
+        alice.signalStore.onIdentityChanged = { changes += it }
         alice.send(bob, "before")
         bob.receive()
 

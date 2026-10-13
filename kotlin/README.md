@@ -1,134 +1,131 @@
 # ObscuraKit (Kotlin)
 
-Kotlin/JVM kit for the `obscura-app` Android bridge. Behaviour is defined by
-[`docs/KIT_API.md`](../docs/KIT_API.md); this file covers only Kotlin specifics.
+Kotlin/JVM kit for the Android bridge. Shared behavior is defined in
+[`docs/KIT_API.md`](../docs/KIT_API.md); this file covers Kotlin integration.
 
 ## Build and test
 
+From `kotlin/`, with JDK 21:
+
 ```bash
-just kotlin-unit                                # ./gradlew :lib:test, no network
-just kotlin-integration http://localhost:3000   # ./gradlew :lib:integrationTest
-just kotlin-coverage                            # Kover report, lib/build/reports/kover/
-just kotlin-publish-local                       # publishToMavenLocal, as the app consumes it
+../scripts/run-with-java-21.sh ./gradlew :lib:test :lib:koverVerify :lib:publishToMavenLocal --no-daemon
+../scripts/run-with-java-21.sh ./gradlew :lib:koverHtmlReport :lib:koverXmlReport --no-daemon
+OBSCURA_TEST_API=https://devscura.barrelmaker.dev \
+  ../scripts/run-with-java-21.sh ./gradlew :lib:integrationTest --no-daemon
 ```
 
 - Published as `dev.barrelmaker.obscura.kit:obscura-kit:0.1.0`.
-- Kotlin is pinned to the version React Native uses in `obscura-app`
-  (`gradle/libs.versions.toml`). A newer compiler produces a library the app
-  cannot read; bump only with an app React Native upgrade.
-- `:lib:koverVerify` enforces a unit-suite floor (48% lines, 40% instructions).
-  Integration tests are excluded unless `-Pkover.includeIntegration=true`.
-- Integration tests default to `https://obscura.barrelmaker.dev`; set
-  `OBSCURA_TEST_API` to change it. Each test calls `assumeTrue(checkServer())`,
-  so with no server they skip rather than fail. Server setup:
+- Kotlin follows the Android app's React Native compiler version
+  (`gradle/libs.versions.toml`).
+- Unit coverage floors are 48% lines and 40% instructions. Reports are under
+  `lib/build/reports/kover/`. Integration is excluded unless
+  `-Pkover.includeIntegration=true`.
+- Integration defaults to `https://obscura.barrelmaker.dev` and skips when
+  `<api>/openapi.yaml` is unreachable. Check executed/skipped counts in
+  `lib/build/test-results/integrationTest/`. Server setup:
   [`CONTRIBUTING.md`](../CONTRIBUTING.md#integration-tests).
 
-## Facade
+## Construction
 
 ```kotlin
 val client = ObscuraClient(
-    ObscuraConfig(apiUrl = "https://obscura.barrelmaker.dev", databasePath = "obscura.db"),
-    externalDriver = null,             // or an encrypted AndroidSqliteDriver
-    sessionStorage = NoOpSessionStorage,
+    config = ObscuraConfig(
+        apiUrl = "https://obscura.barrelmaker.dev",
+        deviceName = "Android",
+        databasePath = "obscura.db",
+    ),
+    driver = null,
+    sessionStorage = platformSessionStorage,
 )
-
-val report = client.send(recipientUserIds, modelKey, entryId, sentAt, payload)   // payload: ByteArray
-client.inbox.peek(50); client.inbox.consume(ids); client.inbox.discard(ids, reason); client.inbox.depth()
-client.entries.put(model, StoredEntry(id, data, sentAt, authorDeviceId, localMetadata))
-client.entries.get(model, ids); client.entries.all(model); client.entries.erase(model, ids)
-client.uploadAttachment(bytes); client.downloadDecryptedAttachment(id, contentKey, nonce)
-client.sendTyping(recipientUserIds, contextId, TypingState.STARTED); client.observeTyping(contextId)
-client.processPendingMessages(timeoutMs)
-client.friendsChanged.collect { render(client.getFriends()) }
+client.logger = platformLogger
 ```
 
-- `ObscuraConfig.apiUrl` must be HTTPS; plain HTTP is accepted only for
-  `localhost`, `127.0.0.1` and `[::1]`. `databasePath = null` is in-memory.
-- An app-supplied `SqlDriver` must create `ObscuraDatabase.Schema` itself; the
-  kit creates the schema only for its own JDBC driver.
-- `connectionState` and `authState` are `StateFlow`s.
-- `incomingMessages` is a wake-up `Channel` with one consumer (the app or a
-  test). A full channel drops wake-ups; the inbox still has the data.
-- Typing: sends are throttled to one per 2 s per context and state; received
-  state expires after 3 s.
+All constructor parameters are required. `driver` may be null; then the kit
+opens the configured database and creates its schema (`databasePath = null`
+uses an in-memory database). An app-supplied `SqlDriver` must already have
+`ObscuraDatabase.Schema` and cannot be combined with a database path.
 
-## Auth and devices
+Implement `SessionStorage.save(Map<String, String>)`, `load(): Map<String, String>?`,
+and `clear()` using platform-secure storage. Save replaces the entire map;
+there is no no-op fallback. Storage exceptions surface as `StorageFailed`
+with the original exception as `cause`; `restorePersistedSession()` logs
+failures and returns false. `logger` remains replaceable after construction.
+
+## Kotlin surface
 
 ```kotlin
+client.register(username, password)
 when (client.login(username, password)) {
     LoginScenario.EXISTING_DEVICE -> client.connect()
-    LoginScenario.NEW_DEVICE -> client.loginAndProvision(username, password, deviceName)
-    LoginScenario.DEVICE_MISMATCH -> { client.wipeDevice(); client.loginAndProvision(username, password, deviceName) }
-    LoginScenario.INVALID_CREDENTIALS -> showError()
+    LoginScenario.NEW_DEVICE -> client.loginAndProvision(username, password)
+    LoginScenario.DEVICE_MISMATCH -> {
+        client.wipeDevice()
+        client.loginAndProvision(username, password)
+    }
+    LoginScenario.INVALID_CREDENTIALS -> showLoginError()
 }
+client.restorePersistedSession() // Boolean
+client.connect()                // suspends until open
+client.disconnect()             // non-suspending
+client.logout()
+client.wipeDevice()
+
+val report = client.send(
+    recipientUserIds, modelKey, entryId, sentAt, payload,
+    acceptedDeviceIds = emptySet(),
+)
+client.inbox.peek(50)
+client.inbox.consume(ids)
+client.inbox.discard(ids, reason)
+client.inbox.depth()
+client.entries.put(modelKey, StoredEntry(id, data, sentAt, authorDeviceId, localMetadata))
+client.entries.get(modelKey, ids)
+client.entries.all(modelKey)
+client.entries.erase(modelKey, ids)
+client.uploadAttachment(bytes)
+client.downloadDecryptedAttachment(id, contentKey, nonce)
+client.friendCode()
+client.addFriendByCode(code)
+client.acceptFriend(userId)
+client.removeFriend(userId)
+client.sendTyping(recipientUserIds, contextId, TypingState.STARTED)
+client.observeTyping(contextId).collect { renderTyping(it) }
+client.processPendingMessages(timeoutMs)
 ```
 
-- `register` creates the account, a Signal identity with 100 one-time prekeys,
-  and the device, and ends `AUTHENTICATED`.
-- **Linking.** The new device (`PENDING_APPROVAL`) connects and shows
-  `generateLinkCode()`. The existing device calls
-  `validateAndApproveLink(code)`, which sends `DEVICE_LINK_APPROVAL` (challenge
-  response, own-device list, friends export) and then announces devices. The
-  new device accepts an approval only from its own account while
-  `PENDING_APPROVAL`, compares the challenge in constant time (see the known
-  gaps in `KIT_API.md`), imports both lists, and becomes `AUTHENTICATED`.
-- **Link code:** Base64 JSON `{"d": deviceId, "c": base64(16-byte challenge),
-  "t": epochMillis}`. Valid for 5 minutes; rejected if more than 60 s in the
-  future.
-- **Sessions.** `connect()` refreshes tokens in the background and persists the
-  rotated refresh token through `SessionStorage`. `restorePersistedSession()`
-  restores, refreshes and connects. `restoreSession(token, refreshToken,
-  userId, deviceId, username)` restores without storage.
-- `logout()` disconnects, forgets credentials and clears `SessionStorage`;
-  local data stays. `fullLogout()` also stops all background jobs and typing
-  state. `wipeDevice()` logs out and deletes all local kit data.
-- `takeoverDevice()`: see [Takeover](../docs/KIT_API.md#devices-and-sessions).
-- The gateway reconnects with backoff 1 s doubling to a 30 s cap. REST calls
-  retry HTTP 429/503 twice, honouring `Retry-After` up to 10 s.
+Unless noted otherwise, client/store operations above are suspending
+(`friendCode` and `observeTyping` are not). `payload` is `ByteArray`;
+stored entry `data` and nullable `localMetadata` are opaque strings.
+`acceptedDeviceIds` is required. `SendReport` separates `recipients` and
+`selfSync`, each containing `SubmissionResult` values.
 
-## Friend codes
+`authState` and `connectionState` are `StateFlow`s. `friendsChanged` is a
+payload-free `Flow<Unit>`; collect it and call `getFriends()`. `messageReceived`
+is a one-consumer `ReceiveChannel<String>` of model keys; read durable rows
+from the inbox. `getDebugLog()` returns recent log lines.
 
-`friendCode()` returns standard Base64 of `{"u": userId, "n": username}`.
-`addFriendByCode(code)` strips whitespace and soft hyphens (`U+00AD`, added by
-iOS share sheets), accepts the URL-safe alphabet, rejects an empty `u` or `n`,
-then calls `befriend`. The code is not secret; the peer's identity key is bound
-to its Signal session.
+The purposeful error subclasses of `ObscuraError` are `NotAuthenticated`,
+`InvalidArgument`, `InvalidFriendCode`, `Http`, `ConnectionFailed`,
+`SendFailed`, `ProtocolViolation`, and `StorageFailed`. Use `code` for bridge
+mapping, rather than matching exception messages.
 
-## Code map (`lib/src/main/kotlin/dev/barrelmaker/obscura/kit/`)
+## Code map and testing
 
-| Path | Role |
+| Path under `lib/src/main/kotlin/dev/barrelmaker/obscura/kit/` | Role |
 |---|---|
-| `ObscuraClient.kt` | Facade and receive loop (decrypt, route, persist, ack). |
-| `network/` | `APIClient` (REST), `GatewayConnection` (WebSocket). |
-| `messaging/Messenger.kt` | Signal encrypt/decrypt and session building. |
-| `managers/` | Auth, devices, friendships, sends, attachments. |
-| `stores/` | SQLDelight-backed inbox, entries, friends, devices. |
-| `wire/` | `WireCodec`, payload disposition, typing tracker. |
-| `crypto/` | Signal store, attachment AES-GCM, link codes, UUID codec. |
+| `ObscuraClient.kt` | Facade, receive path and push drain |
+| `managers/AuthManager.kt` | Credentials, secure storage and refresh lifecycle |
+| `managers/MessageSender.kt` | Serialized per-user fanout and session bootstrap |
+| `network/` | REST and gateway; gateway owns reconnection |
+| `messaging/Messenger.kt` | Confined Signal operations; HTTP runs outside confinement |
+| `stores/` | SQLDelight-backed inbox, entries, friends and device directory |
+| `wire/` | Wire mappings, disposition and typing |
+| `crypto/` | Signal persistence, attachment encryption and UUID encoding |
 
-## Pitfalls
-
-- **Messenger confinement.** `Messenger` and each store run on
-  `Dispatchers.Default.limitedParallelism(1)`. Keep HTTP off the `Messenger`
-  dispatcher: the receive path shares it, so a slow request stalls
-  decrypt, persist and ack for everyone.
-- **One send path.** Every outgoing message goes through
-  `MessageSender.send`, which applies the device and session rules in
-  [`KIT_API.md`](../docs/KIT_API.md#devices-and-sessions).
-  `Messenger.addressFor` is the only `SignalProtocolAddress` constructor; send
-  and receive must build identical addresses or the session splits.
-- **JUnit 5 ignores a non-void `@Test`.** A body ending in `assertThrows(...)`
-  needs a trailing `Unit`.
-- **`runBlocking`, not `runTest`, for real I/O.** `runTest` uses virtual time,
-  so `withTimeout` expires before OkHttp's callbacks fire.
-- **Fan-out in tests.** `befriend`, `send` and friends go to every device of
-  the target. With several devices connected, drain every device's
-  `incomingMessages`, or a stale `FRIEND_REQUEST` answers the next
-  `waitForMessage()`.
-- **Facade-only tests.** Integration tests drive `ObscuraClient`. Raw protobuf
-  is allowed only in `AckSemanticsTests` and `FriendGraphIntegrityTests`
-  (adversarial input). Check with
-  `rg -n "obscura\.v1\.|obscura\.client\.v1\.|ClientMessage\.newBuilder" lib/src/integrationTest`.
-- **Generated names.** The SQLDelight column `data` is `data_` in Kotlin.
-  `okio.ByteString` (WebSocket frames) and `com.google.protobuf.ByteString` are
-  different types.
+- Use `runBlocking`, not virtual-time `runTest`, for real HTTP/WebSocket I/O.
+- JUnit 5 test methods must return `Unit`; an expression ending with a
+  non-Unit operation needs a trailing `Unit`.
+- Integration tests drive the facade. Raw encrypted input is reserved for
+  adversarial receive tests.
+- `okio.ByteString` is used for WebSockets; protobuf uses
+  `com.google.protobuf.ByteString`.

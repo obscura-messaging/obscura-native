@@ -1,38 +1,20 @@
--- A friend's devices live in Device. `devices_updated_at` orders the device-list writes for this
--- friend (DEVICE_ANNOUNCE and server refreshes): the newest timestamp wins.
 CREATE TABLE IF NOT EXISTS Friend (
     user_id TEXT NOT NULL PRIMARY KEY,
     username TEXT NOT NULL,
-    status TEXT NOT NULL,
-    devices_updated_at INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    status TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS friend_status_idx ON Friend(status);
-
 selectAll:
-SELECT * FROM Friend;
-
-selectByStatus:
-SELECT * FROM Friend WHERE status = ?;
+SELECT user_id, username, status FROM Friend ORDER BY username, user_id;
 
 selectById:
-SELECT * FROM Friend WHERE user_id = ?;
+SELECT user_id, username, status FROM Friend WHERE user_id = ?;
 
 insert:
-INSERT OR REPLACE INTO Friend(user_id, username, status, devices_updated_at, created_at, updated_at)
-VALUES (?, ?, ?, 0, ?, ?);
+INSERT OR REPLACE INTO Friend(user_id, username, status) VALUES (?, ?, ?);
 
 updateStatus:
-UPDATE Friend SET status = ?, updated_at = ? WHERE user_id = ?;
-
--- Claims the device-list write at `devices_updated_at` = ?; changes() is 1 only if it is newer.
-claimDevicesUpdate:
-UPDATE Friend SET devices_updated_at = ?, updated_at = ? WHERE user_id = ? AND devices_updated_at < ?;
-
-changes:
-SELECT changes();
+UPDATE Friend SET status = ? WHERE user_id = ?;
 
 deleteById:
 DELETE FROM Friend WHERE user_id = ?;

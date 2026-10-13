@@ -1,278 +1,287 @@
 package dev.barrelmaker.obscura.kit.managers
 
 import dev.barrelmaker.obscura.kit.AuthState
-import dev.barrelmaker.obscura.kit.ObscuraConfig
+import dev.barrelmaker.obscura.kit.LoginScenario
+import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.ObscuraLogger
-import dev.barrelmaker.obscura.kit.TokenStatus
-import dev.barrelmaker.obscura.kit.crypto.toBase64
-import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
-import dev.barrelmaker.obscura.kit.network.GatewayConnection
-import dev.barrelmaker.obscura.kit.network.HttpException
-import dev.barrelmaker.obscura.kit.network.LoginScenario
-import dev.barrelmaker.obscura.kit.network.ProvisionDeviceRequest
-import dev.barrelmaker.obscura.kit.stores.DeviceData
-import dev.barrelmaker.obscura.kit.stores.DeviceIdentityData
-import kotlinx.coroutines.*
+import dev.barrelmaker.obscura.kit.crypto.SignalStore
+import dev.barrelmaker.obscura.kit.network.APIClient
+import dev.barrelmaker.obscura.kit.network.Jwt
+import dev.barrelmaker.obscura.kit.persistence.SessionStorage
+import dev.barrelmaker.obscura.kit.stores.DeviceStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+internal enum class TokenStatus {
+    FRESH,
+
+    /** The server refused the refresh token. The session has ended. */
+    REJECTED,
+
+    /** The refresh could not complete (network or 5xx). The session is kept. */
+    UNAVAILABLE,
+}
+
+internal data class Credentials(
+    val token: String,
+    val refreshToken: String,
+    val userId: String,
+    val deviceId: String,
+    val username: String,
+) {
+    fun toMap(): Map<String, String> = mapOf(
+        "token" to token, "refreshToken" to refreshToken, "userId" to userId, "deviceId" to deviceId, "username" to username,
+    )
+
+    companion object {
+        fun from(map: Map<String, String>): Credentials? {
+            val values = listOf("token", "refreshToken", "userId", "deviceId", "username").map { map[it] }
+            if (values.any { it.isNullOrBlank() }) return null
+            val (token, refreshToken, userId, deviceId, username) = values.map { it!! }
+            if (runCatching { Jwt.userId(token) }.getOrNull() != userId || Jwt.expiresAt(token) == null) return null
+            return Credentials(token, refreshToken, userId, deviceId, username)
+        }
+    }
+}
 
 /**
- * Handles register, login, loginAndProvision, logout, session restore, and token refresh.
+ * The session: credentials, their persistence, and token refresh. The only writer of [state] and
+ * of [SessionStorage].
  */
 internal class AuthManager(
-    private val ctx: ClientContext,
-    private val config: ObscuraConfig,
-    private val gateway: GatewayConnection,
+    private val api: APIClient,
+    private val signalStore: SignalStore,
+    private val devices: DeviceStore,
+    private val storage: SessionStorage,
+    private val deviceName: String,
     private val scope: CoroutineScope,
-    private val setAuthState: (AuthState) -> Unit,
-    /** Signs out and forgets the stored session; called once the server refuses the refresh token. */
-    private val onSessionRejected: suspend () -> Unit,
-    private val loggerProvider: () -> ObscuraLogger,
-    private val onLogout: suspend () -> Unit,
-    private val onWipeDevice: suspend () -> Unit,
-    private val onSessionChanged: () -> Unit
+    private val logger: () -> ObscuraLogger,
+    /** Ends the session after the server refused the refresh token. */
+    private val onRejected: suspend (Credentials, Long) -> Unit,
 ) {
-    private val session get() = ctx.session
-    private val api get() = ctx.api
-    private val signalStore get() = ctx.signalStore
-    private val devices get() = ctx.devices
-    private val refreshInProgress = java.util.concurrent.atomic.AtomicReference<Deferred<TokenStatus>?>(null)
-    private var consecutiveRefreshFailures = 0
-    var tokenRefreshJob: Job? = null
+    private val _state = MutableStateFlow(AuthState.LOGGED_OUT)
+    val state: StateFlow<AuthState> = _state.asStateFlow()
+
+    @Volatile var credentials: Credentials? = null
+        private set
+
+    private val lock = Any()
+    private var refreshInFlight: Deferred<TokenStatus>? = null
+    private var refreshLoop: Job? = null
+    private var generation = 0L
+    // Written only inside the single in-flight refresh.
+    @Volatile private var refreshFailures = 0
+
+    fun requireCredentials(): Credentials = credentials ?: throw ObscuraError.NotAuthenticated()
 
     suspend fun register(username: String, password: String) {
-        session.username = username
-        val (identityKeyPair, regId) = signalStore.generateIdentity()
-        val signedPreKey = SignalKeyUtils.generateSignedPreKey(signalStore, identityKeyPair, 1)
-        val oneTimePreKeys = SignalKeyUtils.generateOneTimePreKeys(signalStore, 1, 100)
-        val regResult = api.registerUser(username, password)
-        api.token = regResult.token
-        val provResult = api.provisionDevice(ProvisionDeviceRequest(
-            name = config.deviceName,
-            identityKey = identityKeyPair.publicKey.serialize().toBase64(),
-            registrationId = regId,
-            signedPreKey = signedPreKey.toApiJson(),
-            oneTimePreKeys = oneTimePreKeys.toApiJson()
-        ))
-        val deviceToken = provResult.token
-        api.token = deviceToken
-        session.refreshToken = provResult.refreshToken
-        session.userId = api.getUserId(deviceToken)
-        session.deviceId = provResult.deviceId.ifEmpty { null } ?: api.getDeviceId(deviceToken)
-
-        recordProvisionedDevice(config.deviceName)
-
-        setAuthState(AuthState.AUTHENTICATED)
-        delay(config.authRateLimitDelayMs)
+        validateLogin(username, password)
+        requireUnprovisioned()
+        provision(api.registerUser(username, password).token, username)
     }
 
-    /**
-     * Only [LoginScenario.EXISTING_DEVICE] changes client state. Every other outcome leaves the
-     * client logged out so the app can choose between loginAndProvision(), register() and an error.
-     */
     suspend fun login(username: String, password: String): LoginScenario {
-        val identity = devices.getIdentity()
-
-        if (identity?.deviceId != null) {
+        validateLogin(username, password)
+        val localDeviceId = devices.getIdentity()
+        if (localDeviceId != null) {
             try {
-                val result = api.loginWithDevice(username, password, identity.deviceId)
-                val token = result.token
-                // The server answers an unknown deviceId with a user-scoped token rather than an error.
-                val deviceId = result.deviceId ?: api.getDeviceId(token) ?: return LoginScenario.DEVICE_MISMATCH
-                api.token = token
-                session.refreshToken = result.refreshToken
-                session.userId = api.getUserId(token)
-                session.deviceId = deviceId
-                session.username = username
-
-                setAuthState(AuthState.AUTHENTICATED)
-                delay(config.authRateLimitDelayMs)
+                val response = api.login(username, password, localDeviceId)
+                // The server answers an unknown device id with a user-scoped token.
+                val deviceId = response.deviceId ?: return LoginScenario.DEVICE_MISMATCH
+                if (deviceId != localDeviceId || !signalStore.hasIdentity()) return LoginScenario.DEVICE_MISMATCH
+                start(Credentials(response.token, response.refreshToken, Jwt.userId(response.token), deviceId, username))
                 return LoginScenario.EXISTING_DEVICE
-            } catch (e: HttpException) {
-                // The user-scoped login below classifies 401/403.
-                if (e.statusCode != 401 && e.statusCode != 403) throw e
+            } catch (e: ObscuraError.Http) {
+                if (e.status !in REJECTION_STATUSES) throw e
             }
         }
-
         try {
-            api.loginWithDevice(username, password, null)
-        } catch (e: HttpException) {
-            return when (e.statusCode) {
-                401, 403 -> LoginScenario.INVALID_CREDENTIALS
-                else -> throw e
+            api.login(username, password, null)
+        } catch (e: ObscuraError.Http) {
+            if (e.status in REJECTION_STATUSES) return LoginScenario.INVALID_CREDENTIALS
+            throw e
+        }
+        return if (localDeviceId != null) LoginScenario.DEVICE_MISMATCH else LoginScenario.NEW_DEVICE
+    }
+
+    suspend fun loginAndProvision(username: String, password: String) {
+        validateLogin(username, password)
+        requireUnprovisioned()
+        provision(api.login(username, password, null).token, username)
+    }
+
+    /** Shared by [register] and [loginAndProvision]: new Signal keys, a new server device, a new session. */
+    private suspend fun provision(userToken: String, username: String) {
+        val response = api.provisionDevice(userToken, deviceName, SignalKeyUtils.generateDeviceKeys(signalStore))
+        val deviceId = response.deviceId ?: throw ObscuraError.ProtocolViolation("Provisioning returned no device id")
+        if (runCatching { java.util.UUID.fromString(deviceId) }.isFailure) {
+            throw ObscuraError.ProtocolViolation("Provisioning returned an invalid device id")
+        }
+        val credentials = Credentials(response.token, response.refreshToken, Jwt.userId(response.token), deviceId, username)
+        devices.storeIdentity(deviceId)
+        start(credentials)
+    }
+
+    /** Restore stored credentials. False when nothing usable is stored or the refresh token is refused. */
+    suspend fun restore(): Boolean {
+        val stored = synchronized(lock) { stored("load") { storage.load() } }?.let(Credentials::from)
+        if (stored == null || !signalStore.hasIdentity() || devices.getIdentity() != stored.deviceId) {
+            synchronized(lock) { stored("clear") { storage.clear() } }
+            return false
+        }
+        start(stored)
+        return ensureFreshToken() != TokenStatus.REJECTED
+    }
+
+    /** Revoke the refresh token on the server. Best effort. */
+    suspend fun revoke(current: Credentials) {
+        try {
+            api.logout(current.refreshToken, current.token)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger().log("logout: refresh token not revoked: ${e.message}")
+        }
+    }
+
+    fun end(expected: Credentials? = null, expectedGeneration: Long? = null): Credentials? = synchronized(lock) {
+        if ((expected != null && credentials != expected) ||
+            (expectedGeneration != null && generation != expectedGeneration)
+        ) return null
+        val previous = credentials
+        generation++
+        refreshLoop?.cancel()
+        refreshLoop = null
+        if (expected == null) refreshInFlight?.cancel()
+        refreshInFlight = null
+        credentials = null
+        _state.value = AuthState.LOGGED_OUT
+        stored("clear") { storage.clear() }
+        previous
+    }
+
+    suspend fun ensureFreshToken(): TokenStatus = refreshIfNeeded(force = false)
+
+    /** Concurrent callers share one refresh: the refresh token is single-use. */
+    suspend fun refresh(): TokenStatus = refreshIfNeeded(force = true)
+
+    private suspend fun refreshIfNeeded(force: Boolean): TokenStatus {
+        val attempt = synchronized(lock) {
+            val current = credentials ?: return TokenStatus.REJECTED
+            if (!force && secondsUntilExpiry(current.token) > FRESHNESS_MARGIN_S) return TokenStatus.FRESH
+            refreshInFlight?.takeIf { it.isActive } ?: run {
+                val version = generation
+                scope.async { performRefresh(current, version) }.also { refreshInFlight = it }
             }
         }
-        return if (identity?.deviceId != null) LoginScenario.DEVICE_MISMATCH else LoginScenario.NEW_DEVICE
+        return attempt.await()
     }
 
-    suspend fun loginAndProvision(username: String, password: String, deviceName: String = "Device 2") {
-        session.username = username
-
-        val loginResult = api.loginWithDevice(username, password, null)
-        api.token = loginResult.token
-        session.userId = api.getUserId(loginResult.token)
-
-        val (identityKeyPair, regId) = signalStore.generateIdentity()
-
-        val signedPreKey = SignalKeyUtils.generateSignedPreKey(signalStore, identityKeyPair, 1)
-        val oneTimePreKeys = SignalKeyUtils.generateOneTimePreKeys(signalStore, 1, 100)
-
-        val provResult = api.provisionDevice(ProvisionDeviceRequest(
-            name = deviceName,
-            identityKey = identityKeyPair.publicKey.serialize().toBase64(),
-            registrationId = regId,
-            signedPreKey = signedPreKey.toApiJson(),
-            oneTimePreKeys = oneTimePreKeys.toApiJson()
-        ))
-
-        val deviceToken = provResult.token
-        api.token = deviceToken
-        session.refreshToken = provResult.refreshToken
-        session.deviceId = provResult.deviceId.ifEmpty { null } ?: api.getDeviceId(deviceToken)
-
-        // Approval later reconciles the full account list.
-        recordProvisionedDevice(deviceName)
-
-        // Wait for DEVICE_LINK_APPROVAL only if another device exists to send it.
-        val serverDevices = api.listDevices()
-        val hasApprover = (0 until serverDevices.length()).any {
-            serverDevices.getJSONObject(it).getString("deviceId") != session.deviceId
-        }
-        setAuthState(if (hasApprover) AuthState.PENDING_APPROVAL else AuthState.AUTHENTICATED)
-        delay(config.authRateLimitDelayMs)
-    }
-
-    /** Store this device as the identity `login` checks, and list it as one of the user's devices. */
-    private suspend fun recordProvisionedDevice(deviceName: String) {
-        val deviceId = requireNotNull(session.deviceId) { "deviceId not set - device was not provisioned" }
-        val userId = requireNotNull(session.userId) { "userId not set - user was not resolved" }
-        devices.storeIdentity(DeviceIdentityData(deviceId))
-        devices.add(DeviceData(userId, deviceId, deviceName))
-    }
-
-    fun restoreSession(
-        token: String,
-        refreshToken: String?,
-        userId: String,
-        deviceId: String?,
-        username: String?,
-    ) {
-        api.token = token
-        session.refreshToken = refreshToken
-        session.userId = userId
-        session.deviceId = deviceId
-        session.username = username
-
-        setAuthState(AuthState.AUTHENTICATED)
-    }
-
-    fun hasSession(): Boolean = api.token != null && session.userId != null
-
-    suspend fun logout() {
-        tokenRefreshJob?.cancel()
-        onLogout()
-        api.token = null
-        session.userId = null
-        session.deviceId = null
-        session.username = null
-        session.refreshToken = null
-        setAuthState(AuthState.LOGGED_OUT)
-    }
-
-    suspend fun wipeDevice() {
-        tokenRefreshJob?.cancel()
-        onWipeDevice()
-        api.token = null
-        session.userId = null
-        session.deviceId = null
-        session.username = null
-        session.refreshToken = null
-        setAuthState(AuthState.LOGGED_OUT)
-    }
-
-    /**
-     * Refresh ahead of expiry for as long as the session lasts. A failed refresh is retried with
-     * backoff; only a rejection ends the loop, because only a rejection ends the session.
-     */
-    fun startTokenRefresh() {
-        tokenRefreshJob?.cancel()
-        tokenRefreshJob = scope.launch {
-            while (isActive) {
-                delay(if (consecutiveRefreshFailures == 0) getTokenRefreshDelay() else retryDelayMs(consecutiveRefreshFailures))
-                if (refreshTokens() == TokenStatus.REJECTED) break
+    private suspend fun performRefresh(current: Credentials, version: Long): TokenStatus {
+        val response = try {
+            api.refreshSession(current.refreshToken)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val failureCount = synchronized(lock) {
+                if (generation != version || credentials != current) {
+                    return if (credentials == null) TokenStatus.REJECTED else TokenStatus.FRESH
+                }
+                ++refreshFailures
+            }
+            if (e !is java.io.IOException && e !is ObscuraError.Http) throw e
+            logger().tokenRefreshFailed(failureCount, e.message ?: e.javaClass.simpleName)
+            if (e is ObscuraError.Http && e.status in REJECTION_STATUSES) {
+                onRejected(current, version)
+                return if (credentials == null) TokenStatus.REJECTED else TokenStatus.FRESH
+            } else {
+                return TokenStatus.UNAVAILABLE
             }
         }
+        return synchronized(lock) {
+            if (generation != version || credentials != current) {
+                return@synchronized if (credentials == null) TokenStatus.REJECTED else TokenStatus.FRESH
+            }
+            if (Jwt.userId(response.token) != current.userId || Jwt.expiresAt(response.token) == null ||
+                (response.deviceId != null && response.deviceId != current.deviceId)
+            ) throw ObscuraError.ProtocolViolation("Refresh returned credentials for another session")
+            val refreshed = current.copy(token = response.token, refreshToken = response.refreshToken)
+            stored("save") { storage.save(refreshed.toMap()) }
+            credentials = refreshed
+            refreshFailures = 0
+            TokenStatus.FRESH
+        }
     }
 
-    /**
-     * Exchange the refresh token for a new pair. A 401/403 (or no refresh token at all) means the
-     * session is over: sign out. Anything else (offline, timeout, 5xx) keeps the session.
-     */
-    suspend fun refreshTokens(): TokenStatus {
-        refreshInProgress.get()?.let { return it.await() }
+    private fun start(new: Credentials) {
+        synchronized(lock) {
+            stored("save") { storage.save(new.toMap()) }
+            generation++
+            refreshInFlight?.cancel()
+            refreshInFlight = null
+            credentials = new
+            refreshFailures = 0
+            refreshLoop?.cancel()
+            refreshLoop = scope.launch { refreshAheadOfExpiry() }
+            _state.value = AuthState.AUTHENTICATED
+        }
+    }
 
-        val deferred = scope.async {
-            val rt = session.refreshToken ?: return@async rejectSession()
+    private suspend fun refreshAheadOfExpiry() {
+        while (true) {
+            delay(if (refreshFailures == 0) refreshDelayMs() else retryDelayMs(refreshFailures))
             try {
-                val result = api.refreshSession(rt)
-                api.token = result.token
-                session.refreshToken = result.refreshToken
-                consecutiveRefreshFailures = 0
-                // Persist the rotated (single-use) refresh token — the background
-                // refresh loop otherwise leaves a consumed token in storage → 401
-                // on next launch. Mirrors iOS refreshTokenNow → onSessionChanged.
-                onSessionChanged()
-                TokenStatus.FRESH
+                if (refresh() == TokenStatus.REJECTED) return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                consecutiveRefreshFailures++
-                loggerProvider().tokenRefreshFailed(consecutiveRefreshFailures, e.message ?: "unknown")
-                if (e is HttpException && e.statusCode in REJECTION_STATUSES) rejectSession() else TokenStatus.UNAVAILABLE
+                logger().log("SESSION automatic refresh stopped: ${e.message}")
+                return
             }
         }
+    }
 
-        refreshInProgress.set(deferred)
-        try {
-            return deferred.await()
-        } finally {
-            refreshInProgress.set(null)
+    /** 80% of the token's remaining lifetime, at least 5 s. */
+    private fun refreshDelayMs(): Long {
+        val token = credentials?.token ?: return MIN_REFRESH_DELAY_MS
+        return (secondsUntilExpiry(token) * 800).coerceAtLeast(MIN_REFRESH_DELAY_MS)
+    }
+
+    private fun secondsUntilExpiry(token: String): Long =
+        (Jwt.expiresAt(token) ?: 0L) - System.currentTimeMillis() / 1000
+
+    private fun validateLogin(username: String, password: String) {
+        if (username.isBlank() || password.isBlank()) throw ObscuraError.InvalidArgument("Username and password must not be blank")
+    }
+
+    private suspend fun requireUnprovisioned() {
+        if (devices.getIdentity() != null || signalStore.hasIdentity()) {
+            throw ObscuraError.InvalidArgument("Wipe the local device before provisioning another")
         }
     }
 
-    suspend fun ensureFreshToken(): TokenStatus {
-        if (api.token == null) return TokenStatus.REJECTED
-        if (!isTokenExpired(60)) return TokenStatus.FRESH
-        return refreshTokens()
-    }
-
-    private suspend fun rejectSession(): TokenStatus {
-        onSessionRejected()
-        return TokenStatus.REJECTED
-    }
-
-    /** 5 s doubling to a 5 min cap. */
-    private fun retryDelayMs(failures: Int): Long = (5_000L shl (failures - 1).coerceAtMost(6)).coerceAtMost(300_000L)
-
-    private fun isTokenExpired(bufferSeconds: Long = 0): Boolean {
-        val token = api.token ?: return true
-        val payload = api.decodeToken(token) ?: return true
-        val exp = payload.optLong("exp", 0)
-        if (exp == 0L) return true
-        val now = System.currentTimeMillis() / 1000
-        return (exp - now) <= bufferSeconds
+    private inline fun <T> stored(operation: String, block: () -> T): T = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        throw ObscuraError.StorageFailed("Session storage $operation failed: ${e.message}", e)
     }
 
     private companion object {
         val REJECTION_STATUSES = setOf(401, 403)
-    }
+        const val FRESHNESS_MARGIN_S = 60L
+        const val MIN_REFRESH_DELAY_MS = 5_000L
 
-    private fun getTokenRefreshDelay(): Long {
-        val token = api.token ?: return 30_000
-        val payload = api.decodeToken(token) ?: return 30_000
-        val exp = payload.optLong("exp", 0)
-        if (exp == 0L) return 30_000
-        val now = System.currentTimeMillis() / 1000
-        val ttl = exp - now
-        if (ttl <= 0) return 5_000
-        return (ttl * 800).coerceAtLeast(5_000)
+        /** 5 s doubling to 5 min. */
+        fun retryDelayMs(failures: Int): Long = (5_000L shl (failures - 1).coerceAtMost(6)).coerceAtMost(300_000L)
     }
 }

@@ -1,37 +1,9 @@
--- The durable inbox.
+-- Decrypted inboxed messages, written before the server copy is acked. An ack deletes the server
+-- copy, so a row leaves only through the app's consume/discard or a device wipe.
 --
--- One row per successfully decrypted INBOXED message. The kit stores bytes it cannot read:
--- every column is either kit-owned identity or a declared client.proto field, and `payload` is
--- never parsed here.
---
--- AN ACK IS A DELETE. Once the kit acks, the server
--- destroys its copy and this row is the ONLY one. So the row must commit before the ack, and it may
--- only be removed by an explicit consume() or discard() from the app — never on reconnect, never on
--- logout, never on a cap or a timer.
---
--- ⚠️ The CREATE statements below are duplicated verbatim in `2.sqm`, and they must stay that way.
--- `sqlite_master` stores CREATE TABLE text LITERALLY — including comments — so an inline comment
--- here that is absent there makes a migrated database differ from a fresh one, and
--- `SchemaMigrationTests` fails. That is why the column notes live in this header.
---
--- Column notes, in declaration order:
---
---   id                  Monotonic per install; drain order. AUTOINCREMENT is NOT decoration — a
---                       plain INTEGER PRIMARY KEY aliases rowid, and SQLite REUSES rowids after
---                       deletion, so a drained-then-refilled inbox would hand out ids that go
---                       backwards while `peek` orders by id.
---   envelope_id         The dedupe key. A failed ack means the envelope is redelivered on
---                       reconnect; UNIQUE + INSERT OR IGNORE absorbs pending redeliveries.
---   kind                The payload oneof arm, e.g. 'APP_ENTRY'. Present because the record must
---                       describe all declared arms, not just AppEntry.
---   sender_user_id      Server-stamped `Envelope.sender_id`.
---   sender_device_id    The address of the Signal session that decrypted this — cryptographic
---                       attribution, so it can serve as the REPLACE tie-break.
---   model_key           }
---   entry_id            } AppEntry-derived, so NULL for every other kind — including an unknown
---   sent_at             } arm, which has no AppEntry to derive them from. sent_at is
---                       } clamped to now + 60s before it gets here.
---   payload             Opaque bytes. The kit MUST NOT parse this.
+-- AUTOINCREMENT because plain rowids are reused after deletion and `peek` orders by id.
+-- envelope_id UNIQUE with INSERT OR IGNORE absorbs redeliveries.
+-- model_key, entry_id and sent_at are NULL for every kind but APP_ENTRY.
 CREATE TABLE IF NOT EXISTS InboxRow (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     envelope_id TEXT NOT NULL UNIQUE,
@@ -44,41 +16,25 @@ CREATE TABLE IF NOT EXISTS InboxRow (
     payload BLOB NOT NULL
 );
 
--- Drain order. `peek` reads by id ascending and the depth count scans everything, so this is the
--- one index that earns its place.
-CREATE INDEX IF NOT EXISTS inbox_id_idx ON InboxRow(id);
-
--- INSERT OR IGNORE, paired with the UNIQUE above, is what makes redelivery a no-op rather than a
--- duplicate row. A duplicate would inflate inboxDepth(), inflate the app's processing counts, and
--- post a second notification for a message the user already has.
 insertRow:
 INSERT OR IGNORE INTO InboxRow(
     envelope_id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
--- Whether a given envelope is already stored. This is what `put` checks BEFORE and AFTER its
--- insert, instead of inferring "was a row added" from a row count: INSERT OR IGNORE suppresses every
--- constraint, not just `envelope_id UNIQUE`, so a NOT NULL or CHECK violation would otherwise look
--- exactly like a redelivery — and the caller ACKS on a redelivery.
+-- INSERT OR IGNORE ignores every constraint violation, not only the duplicate, so `put` checks for
+-- the row instead of counting changes.
 existsByEnvelopeId:
 SELECT EXISTS(SELECT 1 FROM InboxRow WHERE envelope_id = ?);
 
--- Rows in drain order. Side-effect free: peeking twice without consuming returns the same rows, and
--- that is the crash-safety property.
 peek:
 SELECT id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
 FROM InboxRow ORDER BY id ASC LIMIT ?;
 
--- consume() and discard() are the only app-driven ways a row leaves this table. They share this
--- statement; discard additionally logs.
 deleteByIds:
 DELETE FROM InboxRow WHERE id IN ?;
 
--- Depth is exposed so an inbox the app has stopped draining is visible.
 depth:
 SELECT COUNT(*) FROM InboxRow;
 
--- Device wipe only: destroys decrypted plaintext. It takes no selector so it cannot become an
--- eviction policy.
 deleteAll:
 DELETE FROM InboxRow;

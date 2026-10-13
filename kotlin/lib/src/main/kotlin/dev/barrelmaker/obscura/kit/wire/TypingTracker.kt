@@ -1,100 +1,70 @@
 package dev.barrelmaker.obscura.kit.wire
 
 import dev.barrelmaker.obscura.kit.TypingState
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 
-/** In-memory, auto-expiring typing events carried by `TypingSignal`. */
-internal class TypingTracker {
+/** Who is typing where, and the send throttle. In memory, per client. */
+internal class TypingTracker(private val scope: CoroutineScope) {
+    private val lock = Any()
+    // contextId -> senderDeviceId -> senderUserId
+    private val typing = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
+    private val expiries = mutableMapOf<Pair<String, String>, Job>()
+    private val lastSent = mutableMapOf<Pair<String, TypingState>, Long>()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    fun shouldSend(contextId: String, state: TypingState, nowMs: Long = System.currentTimeMillis()): Boolean =
+        synchronized(lock) {
+            val last = lastSent[contextId to state]
+            if (last != null && nowMs - last < THROTTLE_MS) return false
+            lastSent[contextId to state] = nowMs
+            true
+        }
 
-    private val activeByContext = MutableStateFlow<Map<String, Set<TypingEvent>>>(emptyMap())
-
-    data class TypingEvent(
-        val senderUserId: String,
-        val senderDeviceId: String,
-        val expiresAt: Long,
-    )
-
-    private val lastSent = mutableMapOf<String, Long>()
-    private val throttleMutex = Mutex()
-
-    suspend fun shouldSend(contextId: String, state: TypingState, senderDeviceId: String): Boolean {
-        val throttleKey = "$contextId:$state:$senderDeviceId"
-        val now = System.currentTimeMillis()
-        return throttleMutex.withLock {
-            val last = lastSent[throttleKey] ?: 0L
-            if (now - last < THROTTLE_MS) {
-                false
-            } else {
-                lastSent[throttleKey] = now
-                true
-            }
+    fun started(contextId: String, senderUserId: String, senderDeviceId: String) = synchronized(lock) {
+        val key = contextId to senderDeviceId
+        typing.update { it + (contextId to (it[contextId].orEmpty() + (senderDeviceId to senderUserId))) }
+        expiries.remove(key)?.cancel()
+        expiries[key] = scope.launch {
+            delay(EXPIRE_MS)
+            synchronized(lock) { if (expiries[key] === coroutineContext.job) remove(key) }
         }
     }
 
-    fun receive(
-        contextId: String,
-        senderUserId: String,
-        senderDeviceId: String,
-    ) {
-        val expiresAt = System.currentTimeMillis() + EXPIRE_MS
-        val event = TypingEvent(senderUserId, senderDeviceId, expiresAt)
-
-        // `update {}`, not read-then-assign: two envelopes for the same conversation are routed
-        // concurrently, and `value = value.toMutableMap().also { ... }` loses one of them outright.
-        activeByContext.update { current ->
-            val existing = current[contextId].orEmpty().filterNot {
-                it.senderDeviceId == senderDeviceId
-            }
-            current + (contextId to (existing + event).toSet())
-        }
-
-        scope.launch {
-            delay(EXPIRE_MS + 100) // small buffer
-            val now = System.currentTimeMillis()
-            val signals = activeByContext.value[contextId] ?: return@launch
-            val entry = signals.find { it.senderDeviceId == senderDeviceId } ?: return@launch
-            if (entry.expiresAt <= now) {
-                clear(contextId, senderDeviceId)
-            }
-        }
+    fun stopped(contextId: String, senderDeviceId: String) = synchronized(lock) {
+        val key = contextId to senderDeviceId
+        expiries.remove(key)?.cancel()
+        remove(key)
     }
 
-    fun clear(contextId: String, senderDeviceId: String) {
-        activeByContext.update { current ->
-            val existing = current[contextId]
-                ?.filterNot { it.senderDeviceId == senderDeviceId }
-                ?: return@update current
-            if (existing.isEmpty()) current - contextId
-            else current + (contextId to existing.toSet())
-        }
+    fun observe(contextId: String): Flow<List<String>> =
+        typing.map { it[contextId].orEmpty().values.distinct().sorted() }.distinctUntilChanged()
+
+    fun clear() = synchronized(lock) {
+        expiries.values.forEach { it.cancel() }
+        expiries.clear()
+        lastSent.clear()
+        typing.value = emptyMap()
     }
 
-    /** The users typing in [contextId], once each however many of their devices are. */
-    fun observe(contextId: String): Flow<List<String>> {
-        return activeByContext.map { contexts ->
-            val now = System.currentTimeMillis()
-            (contexts[contextId] ?: emptySet())
-                .filter { it.expiresAt > now }
-                .map { it.senderUserId }
-                .distinct()
+    private fun remove(key: Pair<String, String>) {
+        expiries.remove(key)
+        val (contextId, deviceId) = key
+        typing.update { current ->
+            val remaining = current[contextId].orEmpty() - deviceId
+            if (remaining.isEmpty()) current - contextId else current + (contextId to remaining)
         }
-    }
-
-    fun shutdown() {
-        scope.cancel()
-        activeByContext.value = emptyMap()
     }
 
     companion object {
-        const val EXPIRE_MS = 3000L
-        private const val THROTTLE_MS = 2000L
+        const val EXPIRE_MS = 5_000L
+        const val THROTTLE_MS = 2_000L
     }
 }

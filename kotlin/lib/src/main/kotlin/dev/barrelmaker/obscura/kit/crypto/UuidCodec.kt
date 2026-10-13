@@ -2,23 +2,16 @@ package dev.barrelmaker.obscura.kit.crypto
 
 import com.google.protobuf.ByteString
 import java.nio.ByteBuffer
-import java.util.*
+import java.util.UUID
 
-/**
- * Shared UUID ↔ ByteString codec used by Messenger.
- */
-object UuidCodec {
+internal object UuidCodec {
+    fun uuidToBytes(uuid: UUID): ByteString =
+        ByteString.copyFrom(ByteBuffer.allocate(16).putLong(uuid.mostSignificantBits).putLong(uuid.leastSignificantBits).array())
 
-    fun uuidToBytes(uuid: UUID): ByteString {
-        val bb = ByteBuffer.allocate(16)
-        bb.putLong(uuid.mostSignificantBits)
-        bb.putLong(uuid.leastSignificantBits)
-        return ByteString.copyFrom(bb.array())
-    }
-
-    fun bytesToUuid(bytes: ByteArray): UUID {
-        if (bytes.size < 16) return UUID(0, 0)
-        val bb = ByteBuffer.wrap(bytes)
-        return UUID(bb.getLong(), bb.getLong())
+    /** The canonical text form of a 16-byte UUID, or null for any other length. */
+    fun uuidString(bytes: ByteString): String? {
+        if (bytes.size() != 16) return null
+        val buffer = bytes.asReadOnlyByteBuffer()
+        return UUID(buffer.getLong(), buffer.getLong()).toString()
     }
 }

@@ -5,12 +5,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
-/**
- * Pure-logic tests for Base64Extensions and UuidCodec.
- * No network, no DB. These exist to lock in wire-format invariants —
- * anything serialized to or from these helpers crosses the network or
- * shows up in QR codes, so breakages here cause downstream parser failures.
- */
 class Base64ExtensionsTest {
 
     @Test
@@ -34,13 +28,11 @@ class Base64ExtensionsTest {
 
     @Test
     fun `standard encoder produces padding`() {
-        // 1 byte -> 4 chars with 2 = padding (canonical RFC 4648)
         assertEquals("AQ==", byteArrayOf(0x01).toBase64())
     }
 
     @Test
     fun `url decoder accepts dash and underscore variants`() {
-        // bytes that would encode to a string containing + and /
         val payload = byteArrayOf(0xFB.toByte(), 0xFF.toByte(), 0xBF.toByte())
         val urlSafe = java.util.Base64.getUrlEncoder().encodeToString(payload)
         assertArrayEquals(payload, urlSafe.fromBase64Url())

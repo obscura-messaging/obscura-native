@@ -1,22 +1,22 @@
 package dev.barrelmaker.obscura.kit
 
+/** [databasePath] null means an in-memory database. */
 data class ObscuraConfig(
     val apiUrl: String,
-    // The websocket URL is derived from apiUrl so the two endpoints cannot diverge.
-    val deviceName: String = "Kotlin Client",
-    val databasePath: String? = null, // null = in-memory (tests), path = file-backed (production)
-    // Client-side pacing for prod auth rate limits; env-overridable so CI can
-    // zero it against a rate-limit-disabled local container (parity with iOS)
-    val authRateLimitDelayMs: Long = System.getenv("AUTH_REQUEST_DELAY_MS")?.toLongOrNull() ?: 500L,
+    val deviceName: String,
+    val databasePath: String? = null,
 ) {
     init {
-        // Plain HTTP is allowed only for loopback (local containerized server
-        // in tests/CI). Parse the host exactly — a prefix check on the raw
-        // string would let "http://localhost@evil.com" or
-        // "http://localhost.evil.com" tunnel cleartext (incl. the auth token)
-        // to a remote host, since APIClient enables CLEARTEXT for any http:// URL.
-        val host = runCatching { java.net.URI(apiUrl).host }.getOrNull()
-        val isLoopback = apiUrl.startsWith("http://") && (host == "localhost" || host == "127.0.0.1" || host == "[::1]")
-        require(apiUrl.startsWith("https://") || isLoopback) { "API URL must use HTTPS: $apiUrl" }
+        // Parse the host exactly: a prefix check would let "http://localhost@evil.com" send cleartext
+        // to a remote host.
+        val uri = runCatching { java.net.URI(apiUrl) }.getOrNull()
+        val host = uri?.host
+        val isLoopback = uri?.scheme == "http" && host in setOf("localhost", "127.0.0.1", "[::1]")
+        if (host.isNullOrBlank() || uri?.userInfo != null || uri?.fragment != null || uri?.query != null ||
+            (uri?.port != -1 && uri?.port !in 1..65535) ||
+            !(uri?.scheme == "https" || isLoopback)
+        ) throw ObscuraError.InvalidArgument("API URL must use HTTPS (or loopback HTTP): $apiUrl")
+        if (deviceName.isBlank()) throw ObscuraError.InvalidArgument("deviceName must not be blank")
+        if (databasePath?.isBlank() == true) throw ObscuraError.InvalidArgument("databasePath must not be blank")
     }
 }

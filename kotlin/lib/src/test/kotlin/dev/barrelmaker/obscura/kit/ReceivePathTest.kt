@@ -1,251 +1,217 @@
 package dev.barrelmaker.obscura.kit
 
-import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
-import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
-import dev.barrelmaker.obscura.kit.stores.FriendStore
-import dev.barrelmaker.obscura.kit.stores.FriendStatus
-import dev.barrelmaker.obscura.kit.stores.InboxStore
 import com.google.protobuf.ByteString
+import dev.barrelmaker.obscura.kit.stores.FriendData
+import dev.barrelmaker.obscura.kit.stores.FriendStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.runBlocking
 import obscura.client.v1.Client
 import obscura.client.v1.Client.ClientMessage
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertArrayEquals
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/**
- * The receive path, unit-tested.
- *
- * **Why this file exists.** Until now no unit test constructed an `ObscuraClient`, so
- * `routeMessage`, `inboxMessage`, `clampFutureTimestamp` and every `handle*` were reachable only
- * from the integration suite — which needs a live, correctly configured `obscura-server`. That is
- * exactly where every shipped defect has been: a signature verified against a key from the same
- * message, a redelivery that notified twice, a typing indicator accepted into a conversation the
- * sender is not in. None of those needs a server to demonstrate.
- *
- * The client is built over an in-memory driver and never connects: the constructor wires managers
- * and opens a database, and `GatewayConnection` does not touch a socket until `connect()`. The
- * handlers are `internal` so this can call them directly with a hand-built `ClientMessage`, which
- * is the same thing `routeMessage` does after a successful decrypt.
- */
+/** [ObscuraClient.route] with hand-built decrypted messages: what each arm stores and announces. */
 class ReceivePathTest {
-
-    private val selfUserId = "019f025a-0000-7de6-84b6-000000000001"
-    private val selfDeviceId = "019f025a-0000-7de6-84b6-0000000000d1"
-    private val peerUserId = "019f025a-0000-7de6-84b6-000000000002"
-
-    /** An authenticated, connected-to-nothing client. */
-    private fun newClient(): ObscuraClient {
-        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
-        ObscuraDatabase.Schema.create(driver)
-        val client = ObscuraClient(ObscuraConfig(apiUrl = "https://obscura.invalid"), driver)
-        client.restoreSession(
-            token = "t", refreshToken = null, userId = selfUserId,
-            deviceId = selfDeviceId, username = "self",
-        )
-        return client
-    }
+    private val peer = "019f025a-0000-7de6-84b6-000000000002"
+    private val peerDevice = "019f025a-0000-7de6-84b6-0000000000d2"
 
     private fun appEntry(entryId: String, model: String = "pix", timestamp: Long = 1_700_000_000_000) =
-        ClientMessage.newBuilder()
-            .setTimestamp(timestamp)
-            .setAppEntry(obscura.client.v1.appEntry {
-                this.model = model
-                id = entryId
-                this.timestamp = timestamp
-                data = ByteString.copyFrom("payload".toByteArray())
-            })
-            .build()
+        ClientMessage.newBuilder().setTimestamp(timestamp).setAppEntry(obscura.client.v1.appEntry {
+            this.model = model
+            id = entryId
+            this.timestamp = timestamp
+            data = ByteString.copyFrom("payload".toByteArray())
+        }).build()
 
-    // ── Clamping a peer-supplied timestamp ────────────────────────────────────
+    private fun friendRequest(username: String) = ClientMessage.newBuilder()
+        .setFriendRequest(obscura.client.v1.friendRequest { this.username = username }).build()
 
-    @Test
-    fun `a past timestamp is stored unchanged`() {
-        val c = newClient()
-        assertEquals(1_700_000_000_000L, c.clampFutureTimestamp(1_700_000_000_000L))
-    }
-
-    /**
-     * Without the cap a peer sets `sentAt` far ahead and wins every REPLACE conflict forever — the
-     * tie-break can only order writes it can compare honestly.
-     */
-    @Test
-    fun `a far-future timestamp is clamped to roughly now plus a minute`() {
-        val c = newClient()
-        val clamped = c.clampFutureTimestamp(Long.MAX_VALUE / 2)
-        val cap = System.currentTimeMillis() + 60_000L
-        assertTrue(clamped <= cap, "must not exceed the cap")
-        assertTrue(clamped > cap - 5_000L, "must be the cap, not something far below it")
-    }
-
-    /**
-     * **The documented cross-kit divergence, and the branch that had no test.**
-     *
-     * `AppEntry.timestamp` is proto3 `uint64`, which protobuf-java surfaces as a SIGNED Long, so a
-     * peer sending >= 2^63 arrives here NEGATIVE and sails under any `minOf` cap. Swift compares in
-     * UInt64 space and correctly yields the cap, so identical wire bytes stored roughly -9.2e18 on
-     * Android and now+60s on iOS.
-     */
-    @Test
-    fun `a uint64 timestamp above 2 to the 63 arrives negative and still clamps to the cap`() {
-        val c = newClient()
-        val asSigned = java.lang.Long.parseUnsignedLong("18446744073709551615") // 2^64 - 1
-        assertTrue(asSigned < 0, "precondition: protobuf-java hands this back as a negative Long")
-
-        val clamped = c.clampFutureTimestamp(asSigned)
-
-        val cap = System.currentTimeMillis() + 60_000L
-        assertTrue(clamped > 0, "a negative sentAt must never be stored — it sorts before everything")
-        assertTrue(clamped <= cap && clamped > cap - 5_000L, "it must land on the cap, as Swift does")
-    }
-
-    // ── A redelivery must not notify twice ────────────────────────────────────
-
-    /**
-     * Persist-then-ack GUARANTEES redelivery, so this is a normal path. `Inbox.sq` says the dedupe
-     * exists so a duplicate cannot "inflate the app's processing counts, and post a second
-     * notification for a message the user already has" — which was false while the emits fired
-     * unconditionally.
-     */
-    @Test
-    fun `a redelivered envelope is stored once and reported as not-new`() = runBlocking {
-        val c = newClient()
-        val msg = appEntry("entry-1")
-
-        val first = c.routeMessage(msg, peerUserId, "dev-peer", "env-1")
-        val second = c.routeMessage(msg, peerUserId, "dev-peer", "env-1")
-
-        assertTrue(first, "a fresh envelope must be announced to the app")
-        assertFalse(second, "a redelivery must be absorbed silently — it is still acked, not notified")
-        assertEquals(1L, InboxStore(c.db).depth())
-    }
-
-    @Test
-    fun `a distinct envelope carrying the same entry is a separate row`() = runBlocking {
-        val c = newClient()
-
-        assertTrue(c.routeMessage(appEntry("entry-1"), peerUserId, "dev-peer", "env-1"))
-        assertTrue(c.routeMessage(appEntry("entry-1"), peerUserId, "dev-peer", "env-2"))
-
-        assertEquals(2L, InboxStore(c.db).depth(),
-            "dedupe keys on the envelope id, not on the app's entry id")
-    }
-
-    @Test
-    fun `an inbox row records the authenticated sender, never the payload`() = runBlocking {
-        val c = newClient()
-        FriendStore(c.db).add(peerUserId, "alice", FriendStatus.ACCEPTED)
-
-        c.routeMessage(appEntry("entry-1"), peerUserId, "dev-peer", "env-1")
-
-        val row = InboxStore(c.db).peek().single()
-        assertEquals(peerUserId, row.senderUserId)
-        assertEquals("dev-peer", row.senderDeviceId)
-        assertEquals("APP_ENTRY", row.kind)
-        assertEquals("pix", row.modelKey)
-    }
-
-    // ── DEVICE_ANNOUNCE ───────────────────────────────────────────────────────
-
-    private fun announce(deviceIds: List<String>, timestamp: Long = 1_700_000_000_000) =
-        ClientMessage.newBuilder()
-            .setTimestamp(timestamp)
-            .setDeviceAnnounce(obscura.client.v1.deviceAnnounce {
-                for (id in deviceIds) {
-                    devices.add(obscura.client.v1.deviceInfo {
-                        this.id = id
-                        name = "D"
-                    })
-                }
-            })
-            .build()
-
-    @Test
-    fun `an announce from a friend replaces the device list`() = runBlocking {
-        val c = newClient()
-        FriendStore(c.db).add(peerUserId, "alice", FriendStatus.ACCEPTED)
-
-        c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)
-        c.handleDeviceAnnounce(announce(listOf("dev-stale"), timestamp = 1_600_000_000_000), peerUserId)
-
-        assertEquals(listOf("dev-a"), c.devices.devicesOf(peerUserId).map { it.deviceId })
-    }
-
-    @Test
-    fun `removing a friend forgets the friendship and devices, and their announcements stop applying`() = runBlocking {
-        val c = newClient()
-        FriendStore(c.db).add(peerUserId, "alice", FriendStatus.ACCEPTED)
-        c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)
-
-        c.removeFriend(peerUserId)
-        c.handleDeviceAnnounce(announce(listOf("dev-b"), timestamp = 1_800_000_000_000), peerUserId)
-
-        assertNull(FriendStore(c.db).get(peerUserId))
-        assertEquals(emptyList<Any>(), c.devices.devicesOf(peerUserId))
-    }
-
-    @Test
-    fun `an announce from an unknown user creates neither a friend nor devices`() = runBlocking {
-        val c = newClient()
-        c.handleDeviceAnnounce(announce(listOf("dev-a")), peerUserId)
-        assertNull(FriendStore(c.db).get(peerUserId))
-        assertEquals(emptyList<Any>(), c.devices.devicesOf(peerUserId))
-    }
-
-    // ── TYPING_SIGNAL ─────────────────────────────────────────────────────────
+    private fun friendAccept() = ClientMessage.newBuilder().setFriendAccept(obscura.client.v1.friendAccept {}).build()
 
     private fun typing(contextId: String, state: Client.TypingState) = ClientMessage.newBuilder()
-        .setTimestamp(System.currentTimeMillis())
         .setTypingSignal(obscura.client.v1.typingSignal {
             this.contextId = contextId
             this.state = state
         }).build()
 
+    private suspend fun ObscuraClient.receive(message: ClientMessage, envelopeId: String = "env-1", device: String = peerDevice) =
+        route(message, peer, device, envelopeId)
+
+    // ── Timestamps ────────────────────────────────────────────
+
     @Test
-    fun `a started typing signal is visible under its opaque context`() = runBlocking {
-        val c = newClient()
-        FriendStore(c.db).add(peerUserId, "alice", FriendStatus.ACCEPTED)
-        c.handleTypingSignal(
-            typing("thread-123", Client.TypingState.TYPING_STATE_STARTED),
-            peerUserId,
-            "dev-peer",
-        )
-        assertEquals(listOf(peerUserId), c.observeTyping("thread-123").first())
+    fun `a past timestamp is unchanged and a future one is capped at now plus a minute`() {
+        assertEquals(1_700_000_000_000L, clampFutureTimestamp(1_700_000_000_000L, nowMs = 1_800_000_000_000L))
+        assertEquals(1_000L + 60_000L, clampFutureTimestamp(Long.MAX_VALUE / 2, nowMs = 1_000L))
     }
 
     @Test
-    fun `a user typing on two devices is one typer, named by user id`() = runBlocking {
-        val c = newClient()
-        for (device in listOf("dev-phone", "dev-laptop")) {
-            c.handleTypingSignal(typing("thread-123", Client.TypingState.TYPING_STATE_STARTED), peerUserId, device)
-        }
-        assertEquals(listOf(peerUserId), c.observeTyping("thread-123").first())
+    fun `a uint64 above 2 to the 63 arrives negative and is capped`() {
+        val asSigned = java.lang.Long.parseUnsignedLong("18446744073709551615")
+        assertEquals(61_000L, clampFutureTimestamp(asSigned, nowMs = 1_000L))
     }
 
     @Test
-    fun `a stopped typing signal clears the sender device`() = runBlocking {
-        val c = newClient()
-        c.handleTypingSignal(
-            typing("thread-123", Client.TypingState.TYPING_STATE_STARTED),
-            peerUserId,
-            "dev-peer",
-        )
-        c.handleTypingSignal(
-            typing("thread-123", Client.TypingState.TYPING_STATE_STOPPED),
-            peerUserId,
-            "dev-peer",
-        )
-        assertEquals(emptyList<String>(), c.observeTyping("thread-123").first())
+    fun `a stored entry's sentAt is clamped`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(appEntry("e", timestamp = Long.MAX_VALUE))
+        assertTrue(c.inbox.peek().single().sentAt!! <= System.currentTimeMillis() + 60_000L)
+    }
+
+    // ── Inbox ─────────────────────────────────────────────────
+
+    @Test
+    fun `a new entry is inboxed and announced once, a redelivery neither`() = runBlocking {
+        val c = authenticatedClient()
+
+        c.receive(appEntry("entry-1"), envelopeId = "env-1")
+        c.receive(appEntry("entry-1"), envelopeId = "env-1")
+
+        assertEquals(1L, c.inbox.depth())
+        assertEquals("pix", c.messageReceived.tryReceive().getOrNull())
+        assertNull(c.messageReceived.tryReceive().getOrNull())
     }
 
     @Test
-    fun `an unspecified typing state is ignored`() = runBlocking {
-        val c = newClient()
-        c.handleTypingSignal(
-            typing("thread-123", Client.TypingState.TYPING_STATE_UNSPECIFIED),
-            peerUserId,
-            "dev-peer",
-        )
-        assertEquals(emptyList<String>(), c.observeTyping("thread-123").first())
+    fun `a distinct envelope carrying the same entry is a separate row`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(appEntry("entry-1"), envelopeId = "env-1")
+        c.receive(appEntry("entry-1"), envelopeId = "env-2")
+        assertEquals(2L, c.inbox.depth())
+    }
+
+    @Test
+    fun `an inbox row records the authenticated sender`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(appEntry("entry-1"))
+
+        val row = c.inbox.peek().single()
+        assertEquals(peer, row.senderUserId)
+        assertEquals(peerDevice, row.senderDeviceId)
+        assertEquals("APP_ENTRY", row.kind)
+        assertEquals("pix", row.modelKey)
+        assertEquals("entry-1", row.entryId)
+        assertArrayEquals("payload".toByteArray(), row.payload)
+    }
+
+    @Test
+    fun `an unknown arm is inboxed whole as UNKNOWN and not announced`() = runBlocking {
+        val c = authenticatedClient()
+        val unknown = ClientMessage.newBuilder().setTimestamp(5).build()
+
+        c.receive(unknown)
+
+        val row = c.inbox.peek().single()
+        assertEquals("UNKNOWN", row.kind)
+        assertNull(row.modelKey)
+        assertNull(row.sentAt)
+        assertArrayEquals(unknown.toByteArray(), row.payload)
+        assertNull(c.messageReceived.tryReceive().getOrNull())
+    }
+
+    @Test
+    fun `the wake-up stream keeps the newest 100`() = runBlocking {
+        val c = authenticatedClient()
+        repeat(101) { c.receive(appEntry("e$it", model = "m$it"), envelopeId = "env-$it") }
+
+        val keys = generateSequence { c.messageReceived.tryReceive().getOrNull() }.toList()
+        assertEquals((1..100).map { "m$it" }, keys)
+    }
+
+    // ── Friends ───────────────────────────────────────────────
+
+    @Test
+    fun `a request from a stranger is stored as pending with its username`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(friendRequest("alice"))
+        assertEquals(listOf(FriendData(peer, "alice", FriendStatus.PENDING_RECEIVED)), c.getFriends())
+        assertEquals(0L, c.inbox.depth())
+    }
+
+    @Test
+    fun `a request from a known peer changes neither name nor status`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(friendRequest("alice"), envelopeId = "env-1")
+        c.receive(friendRequest("mallory"), envelopeId = "env-2")
+        assertEquals(listOf(FriendData(peer, "alice", FriendStatus.PENDING_RECEIVED)), c.getFriends())
+    }
+
+    @Test
+    fun `an unsolicited accept is ignored`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(friendAccept())
+        assertEquals(emptyList<FriendData>(), c.getFriends())
+
+        c.receive(friendRequest("alice"), envelopeId = "env-2")
+        c.receive(friendAccept(), envelopeId = "env-3")
+        assertEquals(FriendStatus.PENDING_RECEIVED, c.getFriends().single().status)
+    }
+
+    @Test
+    fun `an accepted peer cannot rename itself or regress its friendship`() = runBlocking {
+        val c = authenticatedClient()
+        c.db.friendQueries.insert(peer, "alice", FriendStatus.ACCEPTED.value)
+        c.receive(friendRequest("mallory"))
+        c.receive(friendAccept(), envelopeId = "env-2")
+        assertEquals(listOf(FriendData(peer, "alice", FriendStatus.ACCEPTED)), c.getFriends())
+    }
+
+    @Test
+    fun `removing a friend forgets the friendship and its devices`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(friendRequest("alice"))
+        c.devices.replace(peer, listOf(peerDevice))
+
+        c.removeFriend(peer)
+
+        assertEquals(emptyList<FriendData>(), c.getFriends())
+        assertEquals(emptyList<String>(), c.devices.devicesOf(peer))
+    }
+
+    @Test
+    fun `friendsChanged emits on collection and after a change`() = runBlocking {
+        val c = authenticatedClient()
+        val changes = Channel<Unit>(Channel.UNLIMITED)
+        val collector = launch(Dispatchers.Default) { c.friendsChanged.collect { changes.send(it) } }
+
+        withTimeout(5_000) { changes.receive() }
+        c.receive(friendRequest("alice"))
+        withTimeout(5_000) { changes.receive() }
+
+        collector.cancel()
+    }
+
+    // ── Typing ────────────────────────────────────────────────
+
+    @Test
+    fun `typing is reported by user id, once per user, sorted, until stopped`() = runBlocking {
+        val c = authenticatedClient()
+        val other = "019f025a-0000-7de6-84b6-000000000000"
+        c.receive(typing("thread", Client.TypingState.TYPING_STATE_STARTED), device = "phone")
+        c.receive(typing("thread", Client.TypingState.TYPING_STATE_STARTED), device = "laptop")
+        c.route(typing("thread", Client.TypingState.TYPING_STATE_STARTED), other, "other-phone", "env-x")
+
+        assertEquals(listOf(other, peer), c.observeTyping("thread").first())
+
+        c.receive(typing("thread", Client.TypingState.TYPING_STATE_STOPPED), device = "phone")
+        c.receive(typing("thread", Client.TypingState.TYPING_STATE_STOPPED), device = "laptop")
+        assertEquals(listOf(other), c.observeTyping("thread").first())
+        assertEquals(0L, c.inbox.depth())
+    }
+
+    @Test
+    fun `an unspecified typing state or blank context is ignored`() = runBlocking {
+        val c = authenticatedClient()
+        c.receive(typing("thread", Client.TypingState.TYPING_STATE_UNSPECIFIED))
+        c.receive(typing(" ", Client.TypingState.TYPING_STATE_STARTED))
+        assertEquals(emptyList<String>(), c.observeTyping("thread").first())
+        assertEquals(emptyList<String>(), c.observeTyping("thread").first())
     }
 }

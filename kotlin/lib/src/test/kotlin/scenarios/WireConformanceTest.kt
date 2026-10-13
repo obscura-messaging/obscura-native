@@ -10,15 +10,6 @@ import org.junit.jupiter.api.DynamicTest
 import org.junit.jupiter.api.TestFactory
 import java.io.File
 
-/**
- * Vector-driven client-wire conformance, consuming the shared
- * `protocol/conformance/wire.json`. Both platforms run the
- * same file.
- *
- * Pins the signal enum <-> app-facing-form mapping and that a AppEntry
- * round-trips through the wire by VALUE.
- * Byte-canonicity is intentionally NOT asserted.
- */
 class WireConformanceTest {
 
     @TestFactory
@@ -30,7 +21,7 @@ class WireConformanceTest {
             val wire = c.getString("wire"); val app = c.getString("app")
             tests.add(dyn("messageType $wire -> \"$app\"") {
                 val case = Client.ClientMessage.PayloadCase.valueOf(wire.uppercase())
-                assertEquals(app, WireCodec.decodeType(case))
+                assertEquals(app, WireCodec.kind(case))
             })
         }
 
@@ -51,7 +42,6 @@ class WireConformanceTest {
         return tests
     }
 
-    /** Serialize to protobuf bytes and parse back — a true wire round-trip. */
     private fun roundTrip(ms: JSONObject) {
         val model = ms.getString("model")
         val id = ms.getString("id")
@@ -70,7 +60,6 @@ class WireConformanceTest {
         assertEquals(model, decoded.model, "model")
         assertEquals(id, decoded.id, "id")
         assertEquals(ts, decoded.timestamp, "timestamp")
-        // data round-trips by VALUE (parsed map), not bytes — key order is irrelevant.
         assertEquals(dataMap, JSONObject(String(decoded.data.toByteArray())).toMap(), "data value")
     }
 
