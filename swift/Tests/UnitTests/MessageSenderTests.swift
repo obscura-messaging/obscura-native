@@ -73,9 +73,7 @@ final class MessageSenderTests: XCTestCase {
         _ = await send(alice, to: bob, "first")
         let firstKey = try await bob.receive().first?.baseKey
         let bobTablet = try await server.register(bob.userId)
-        try await alice.directory.replace(bob.userId, devices: [
-            Device(userId: bob.userId, deviceId: bob.deviceId), Device(userId: bob.userId, deviceId: bobTablet.deviceId),
-        ])
+        try await alice.directory.replace(userId: bob.userId, deviceIds: [bob.deviceId, bobTablet.deviceId])
 
         let results = await send(alice, to: bob, "second")
         XCTAssertEqual(Set(results.map(\.deviceId)), [bob.deviceId, bobTablet.deviceId])
@@ -97,7 +95,7 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(second, [accepted(bobNew)])
         let newDeviceGot = ids(try await bobNew.receive())
         XCTAssertEqual(newDeviceGot, ["second"])
-        let listed = try await alice.directory.devices(of: bob.userId).map(\.deviceId)
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
         XCTAssertEqual(listed, [bobNew.deviceId])
 
         _ = await send(alice, to: bob, "third")
@@ -105,7 +103,7 @@ final class MessageSenderTests: XCTestCase {
     }
 
     func testSelfSyncNeverTargetsThisDeviceAndASingleDeviceFetchesNothing() async throws {
-        try await alice.directory.add(Device(userId: alice.userId, deviceId: alice.deviceId))
+        try await alice.directory.add(userId: alice.userId, deviceId: alice.deviceId)
 
         let results = await send(alice, to: alice, "note")
         XCTAssertEqual(results, [])
@@ -128,7 +126,7 @@ final class MessageSenderTests: XCTestCase {
     func testConcurrentFirstSendsShareOneFetch() async throws {
         let (alice, bob) = (alice!, bob!)
         let results = await withTaskGroup(of: [SubmissionResult].self) { group in
-            for i in 1...5 { group.addTask { await alice.sender.send(to: bob.userId, self.entry("c\(i)")) } }
+            for i in 1...5 { group.addTask { await alice.sender.send(to: bob.userId, self.entry("c\(i)"), acceptedDeviceIds: []) } }
             return await group.reduce(into: []) { $0.append($1) }
         }
 
@@ -140,7 +138,7 @@ final class MessageSenderTests: XCTestCase {
 
     func testAUserWithNoDevicesIsRejected() async throws {
         let ghost = user()
-        let results = await alice.sender.send(to: ghost, entry("lost"))
+        let results = await alice.sender.send(to: ghost, entry("lost"), acceptedDeviceIds: [])
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.userId, ghost)
@@ -149,7 +147,7 @@ final class MessageSenderTests: XCTestCase {
     }
 
     func testDevicesWithAcceptedEvidenceAreNotResentAndNeedNoSession() async throws {
-        try await alice.directory.add(Device(userId: bob.userId, deviceId: bob.deviceId))
+        try await alice.directory.add(userId: bob.userId, deviceId: bob.deviceId)
 
         let results = await send(alice, to: bob, "retry", accepted: [bob.deviceId])
         XCTAssertEqual(results, [accepted(bob)])
@@ -175,7 +173,7 @@ final class MessageSenderTests: XCTestCase {
         _ = try await bob.receive()
 
         try bob.rekey()
-        try alice.store.deleteAllSessions()
+        try alice.forgetSessions()
 
         let after = await send(alice, to: bob, "after")
         XCTAssertEqual(after, [accepted(bob)])
@@ -193,7 +191,6 @@ final class MessageSenderTests: XCTestCase {
         _ = try await alice.receive()
 
         try bob.rekey()
-        try bob.store.deleteAllSessions()
         _ = await send(bob, to: alice, "from-new-identity")
         let aliceGot = ids(try await alice.receive())
         XCTAssertEqual(aliceGot, ["from-new-identity"])

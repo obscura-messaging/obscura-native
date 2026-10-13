@@ -4,100 +4,191 @@ import XCTest
 
 /// Restoring a stored session whose access token has expired, against each refresh outcome.
 final class SessionRestoreTests: XCTestCase {
-    private final class MemoryStorage: SessionStorage {
-        var data: [String: Any]?
-        init(_ data: [String: Any]?) { self.data = data }
-        func save(_ data: [String: Any]) { self.data = data }
-        func load() -> [String: Any]? { data }
-        func clear() { data = nil }
-    }
-
     override func setUp() {
-        RefreshProtocol.outcome = .status(503)
-        URLProtocol.registerClass(RefreshProtocol.self)
+        StubProtocol.outcome = .status(503)
+        URLProtocol.registerClass(StubProtocol.self)
     }
 
     override func tearDown() {
-        URLProtocol.unregisterClass(RefreshProtocol.self)
+        URLProtocol.unregisterClass(StubProtocol.self)
     }
 
-    private static func jwt(exp: Int) -> String {
+    static func jwt(exp: Int) -> String {
         func encode(_ s: String) -> String {
             Data(s.utf8).base64EncodedString()
                 .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
                 .replacingOccurrences(of: "=", with: "")
         }
-        return "\(encode(#"{"alg":"none"}"#)).\(encode("{\"exp\":\(exp)}")).sig"
+        return "\(encode(#"{"alg":"none"}"#)).\(encode("{\"exp\":\(exp),\"sub\":\"u1\",\"device_id\":\"d1\"}")).sig"
     }
 
-    private func restore() async throws -> (ObscuraClient, MemoryStorage) {
-        let storage = MemoryStorage(["token": Self.jwt(exp: 1), "refreshToken": "rt", "userId": "u1",
-                                     "deviceId": "d1", "username": "alice"])
-        let client = try ObscuraClient(apiURL: "https://\(RefreshProtocol.host)", logger: NoOpLogger())
-        client.sessionStorage = storage
-        try await client.restorePersistedSession()
-        return (client, storage)
+    private static let stored = ["token": jwt(exp: 1), "refreshToken": "rt", "userId": "u1", "deviceId": "d1",
+                                 "username": "alice"]
+
+    private func client(_ storage: MemorySessionStorage, identity: Bool = true) throws -> ObscuraClient {
+        let db = try ObscuraDatabase.inMemory()
+        if identity { try PersistentSignalStore(db: db, logger: SilentLogger()).install(SignalKeys.generate()) }
+        return try makeClient(apiURL: "https://\(StubProtocol.host)", database: db, storage: storage)
     }
 
     func testAServerErrorKeepsTheSessionForAnOfflineLaunch() async throws {
-        let (client, storage) = try await restore()
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
 
+        let restored = await client.restorePersistedSession()
+
+        XCTAssertTrue(restored)
         XCTAssertEqual(client.authState, .authenticated)
-        XCTAssertEqual(storage.data?["refreshToken"] as? String, "rt")
+        XCTAssertEqual(client.connectionState, .disconnected)
+        XCTAssertEqual(storage.session?["refreshToken"], "rt")
     }
 
     func testAnUnreachableServerKeepsTheSession() async throws {
-        RefreshProtocol.outcome = .offline
-        let (client, storage) = try await restore()
+        StubProtocol.outcome = .offline
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
 
+        let restored = await client.restorePersistedSession()
+
+        XCTAssertTrue(restored)
         XCTAssertEqual(client.authState, .authenticated)
-        XCTAssertEqual(storage.data?["refreshToken"] as? String, "rt")
+        XCTAssertEqual(storage.session?["refreshToken"], "rt")
     }
 
     func testARejectedRefreshTokenSignsOutAndForgetsTheSession() async throws {
-        RefreshProtocol.outcome = .status(401)
-        let storage = MemoryStorage(["token": Self.jwt(exp: 1), "refreshToken": "rt", "userId": "u1",
-                                     "deviceId": "d1", "username": "alice"])
-        let client = try ObscuraClient(apiURL: "https://\(RefreshProtocol.host)", logger: NoOpLogger())
-        client.sessionStorage = storage
+        StubProtocol.outcome = .status(401)
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
 
-        do {
-            try await client.restorePersistedSession()
-            XCTFail("a rejected refresh token must not restore")
-        } catch {}
+        let restored = await client.restorePersistedSession()
 
+        XCTAssertFalse(restored)
         XCTAssertEqual(client.authState, .loggedOut)
-        XCTAssertNil(storage.data)
+        XCTAssertNil(storage.session)
     }
 
-    func testASessionWithNoRefreshTokenIsRejected() async throws {
-        let client = try ObscuraClient(apiURL: "https://\(RefreshProtocol.host)", logger: NoOpLogger())
-        await client.restoreSession(token: Self.jwt(exp: 1), refreshToken: nil, userId: "u1",
-                                    deviceId: "d1", username: "alice")
+    func testARefreshRotatesTheStoredTokens() async throws {
+        let fresh = Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600)
+        StubProtocol.outcome = .refreshed(token: fresh, refreshToken: "rt2")
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
 
-        let status = await client.ensureFreshToken()
+        _ = await client.restorePersistedSession()
 
-        XCTAssertEqual(status, .rejected)
+        XCTAssertEqual(storage.session?["token"], fresh)
+        XCTAssertEqual(storage.session?["refreshToken"], "rt2")
+        XCTAssertEqual(Set(storage.session?.keys ?? [:].keys), ["token", "refreshToken", "userId", "deviceId", "username"])
+    }
+
+    func testConcurrentRefreshesShareOneRequest() async throws {
+        let fresh = Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600)
+        StubProtocol.outcome = .refreshed(token: fresh, refreshToken: "rt2")
+        StubProtocol.requests.withLock { $0 = 0 }
+        let client = try client(MemorySessionStorage(Self.stored))
+        _ = await client.restorePersistedSession()
+        StubProtocol.requests.withLock { $0 = 0 }
+
+        async let a = client.refresh()
+        async let b = client.refresh()
+        async let c = client.refresh()
+        let statuses = await [a, b, c]
+
+        XCTAssertEqual(statuses, [.fresh, .fresh, .fresh])
+        XCTAssertEqual(StubProtocol.requests.withLock { $0 }, 1)
+    }
+
+    func testAStoredSessionWithoutASignalIdentityIsNotRestored() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage, identity: false)
+
+        let restored = await client.restorePersistedSession()
+
+        XCTAssertFalse(restored)
         XCTAssertEqual(client.authState, .loggedOut)
+        XCTAssertNil(storage.session)
+    }
+
+    func testAnIncompleteStoredSessionIsNotRestored() async throws {
+        var partial = Self.stored
+        partial["refreshToken"] = nil
+        let storage = MemorySessionStorage(partial)
+        let client = try client(storage)
+
+        let restored = await client.restorePersistedSession()
+
+        XCTAssertFalse(restored)
+        XCTAssertNil(storage.session)
+    }
+
+    func testNothingStoredIsNotRestored() async throws {
+        let restored = await (try client(MemorySessionStorage())).restorePersistedSession()
+        XCTAssertFalse(restored)
+    }
+
+    func testLogoutClearsStorageAndKeepsLocalData() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        _ = await client.restorePersistedSession()
+        try await client.friends.add("peer", username: "bob", status: .accepted)
+
+        await client.logout()
+
+        XCTAssertEqual(client.authState, .loggedOut)
+        XCTAssertNil(storage.session)
+        let userId = await client.userId
+        XCTAssertNil(userId)
+        let friends = try await client.getFriends()
+        XCTAssertEqual(friends.map(\.userId), ["peer"])
+        XCTAssertTrue(try client.signalStore.hasIdentity())
+    }
+
+    func testWipeDeviceLogsOutAndDeletesLocalData() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        _ = await client.restorePersistedSession()
+        try await client.friends.add("peer", username: "bob", status: .accepted)
+
+        try await client.wipeDevice()
+
+        XCTAssertEqual(client.authState, .loggedOut)
+        XCTAssertNil(storage.session)
+        let friends = try await client.getFriends()
+        XCTAssertEqual(friends, [])
+        XCTAssertFalse(try client.signalStore.hasIdentity())
     }
 }
 
-private final class RefreshProtocol: URLProtocol {
-    enum Outcome { case status(Int), offline }
+final class StubProtocol: URLProtocol {
+    enum Outcome {
+        case status(Int)
+        case offline
+        case refreshed(token: String, refreshToken: String)
+    }
+
     static let host = "restore-unit.invalid"
     nonisolated(unsafe) static var outcome = Outcome.status(503)
+    static let requests = Locked(0)
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == host }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        Self.requests.withLock { $0 += 1 }
+        func respond(_ status: Int, _ body: Data) {
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                                                                  headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+        }
         switch Self.outcome {
         case .offline:
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
         case .status(let code):
-            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil,
-                                                                  headerFields: nil)!, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data("{}".utf8))
-            client?.urlProtocolDidFinishLoading(self)
+            respond(code, Data("{}".utf8))
+        case .refreshed(let token, let refreshToken):
+            guard request.url?.path == "/v1/sessions/refresh" else { return respond(503, Data()) }
+            // Slow enough that concurrent callers overlap.
+            Thread.sleep(forTimeInterval: 0.2)
+            respond(200, try! JSONSerialization.data(withJSONObject: ["token": token, "refreshToken": refreshToken]))
         }
     }
     override func stopLoading() {}

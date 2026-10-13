@@ -10,7 +10,7 @@ public struct SubmissionResult: Codable, Sendable, Equatable {
     public let status: SubmissionStatus
     public let error: String?
 
-    public init(userId: String, deviceId: String?, status: SubmissionStatus, error: String? = nil) {
+    init(userId: String, deviceId: String?, status: SubmissionStatus, error: String? = nil) {
         self.userId = userId
         self.deviceId = deviceId
         self.status = status
@@ -43,7 +43,7 @@ func submissionResults(
     let failures = response.failedSubmissions
     guard failures.allSatisfy({ ids.contains($0.submissionID) }),
           Set(failures.map(\.submissionID)).count == failures.count else {
-        throw Messenger.MessengerError.invalidResponse("Unknown or duplicate submission IDs")
+        throw ObscuraError.protocolViolation("unknown or duplicate submission ids in send response")
     }
     let byId = Dictionary(uniqueKeysWithValues: failures.map { ($0.submissionID, $0) })
     return submissions.map { submission in
@@ -51,17 +51,11 @@ func submissionResults(
         return Submitted(
             SubmissionResult(
                 userId: userId,
-                deviceId: uuidFromBytes(submission.deviceID),
+                deviceId: uuidString(submission.deviceID),
                 status: failure == nil ? .accepted : .rejected,
                 error: failure.map { $0.errorMessage.isEmpty ? "\($0.errorCode)" : $0.errorMessage }
             ),
             deviceMissing: failure?.errorCode == .invalidDevice
         )
     }
-}
-
-func uuidFromBytes(_ data: Data) -> String {
-    let hex = data.map { String(format: "%02x", $0) }.joined()
-    return [hex.prefix(8), hex.dropFirst(8).prefix(4), hex.dropFirst(12).prefix(4),
-            hex.dropFirst(16).prefix(4), hex.dropFirst(20)].joined(separator: "-")
 }

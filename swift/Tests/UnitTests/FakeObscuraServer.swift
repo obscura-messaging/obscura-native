@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import LibSignalClient
 @testable import ObscuraKit
 
@@ -64,7 +65,7 @@ final class FakeObscuraServer: @unchecked Sendable {
             let request = try! Obscura_V1_SendMessageRequest(serializedBytes: body)
             var response = Obscura_V1_SendMessageResponse()
             for submission in request.messages {
-                if let target = devices[uuidFromBytes(submission.deviceID)] {
+                if let target = devices[uuidString(submission.deviceID)!] {
                     target.mailbox.append((senderDeviceId, submission.message))
                 } else {
                     var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
@@ -113,46 +114,44 @@ struct Received {
     let baseKey: PublicKey?
 }
 
-/// A real Signal device: its own store, keys, directory and ``MessageSender``.
+/// A real Signal device: its own store, keys, directory and `MessageSender`.
 final class FakeDevice: @unchecked Sendable {
     let userId: String
     let deviceId = UUID().uuidString.lowercased()
+    let db: DatabaseQueue
     let store: PersistentSignalStore
     let directory: DeviceStore
     let messenger: Messenger
     let sender: MessageSender
-    let logger = RecordingLogger(delegate: NoOpLogger())
+    let logger = RecordingLogger(SilentLogger())
     fileprivate var mailbox: [(senderDeviceId: String, message: Data)] = []
-    private var unusedPreKeys: [(id: UInt32, publicKey: PublicKey)] = []
+    private var unusedPreKeys: [PreKeyRecord] = []
     private let corruptBundle: Bool
 
     init(userId: String, corruptBundle: Bool) async throws {
         self.userId = userId
         self.corruptBundle = corruptBundle
-        store = try PersistentSignalStore()
-        store.logger = logger
-        directory = try DeviceStore()
-        let api = APIClient(baseURL: FakeObscuraServer.baseURL)
+        db = try ObscuraDatabase.inMemory()
+        store = PersistentSignalStore(db: db, logger: logger)
+        directory = DeviceStore(db: db)
+        let api = try APIClient(baseURL: FakeObscuraServer.baseURL)
         messenger = Messenger(api: api, store: store)
-        sender = MessageSender(messenger: messenger, devices: directory, api: api, selfDeviceId: deviceId)
+        sender = MessageSender(messenger: messenger, devices: directory, api: api, logger: logger, selfDeviceId: deviceId)
         try rekey()
         await api.setToken(deviceId)
     }
 
     var remainingPreKeys: Int { unusedPreKeys.count }
 
-    /// Replace this device's identity and prekeys, as a takeover does.
+    /// Replace this device's identity and prekeys, as a reinstall does. Drops every session.
     func rekey() throws {
-        let (identity, _) = store.generateIdentity()
-        let signedPreKey = PrivateKey.generate()
-        let signature = identity.privateKey.generateSignature(message: signedPreKey.publicKey.serialize())
-        try store.storeSignedPreKey(SignedPreKeyRecord(id: 1, timestamp: 0, privateKey: signedPreKey, signature: signature),
-                                    id: 1, context: NullContext())
-        unusedPreKeys = try (1...100).map { id in
-            let key = PrivateKey.generate()
-            try store.storePreKey(PreKeyRecord(id: UInt32(id), publicKey: key.publicKey, privateKey: key), id: UInt32(id), context: NullContext())
-            return (UInt32(id), key.publicKey)
-        }
+        let keys = try SignalKeys.generate()
+        try store.install(keys)
+        unusedPreKeys = keys.preKeys
+    }
+
+    func forgetSessions() throws {
+        try db.write { db in try db.execute(sql: "DELETE FROM signal_sessions") }
     }
 
     fileprivate func consumeBundle() -> [String: Any] {
@@ -181,8 +180,7 @@ final class FakeDevice: @unchecked Sendable {
         for (senderDeviceId, data) in delivered {
             let encrypted = try Obscura_Client_V1_EncryptedMessage(serializedBytes: data)
             let isPreKey = encrypted.type == .prekeyMessage
-            let plaintext = try await messenger.decrypt(senderDeviceUuid: senderDeviceId, content: encrypted.content,
-                                                        messageType: isPreKey ? 1 : 2)
+            let plaintext = try await messenger.decrypt(senderDeviceUuid: senderDeviceId, encrypted)
             received.append(Received(
                 message: try Obscura_Client_V1_ClientMessage(serializedBytes: Data(plaintext)),
                 type: encrypted.type,

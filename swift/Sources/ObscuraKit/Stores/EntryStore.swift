@@ -1,14 +1,8 @@
 import Foundation
 import GRDB
 
-/// One stored entry. `data` and `localMetadata` are opaque strings the kit never parses.
-///
-/// `sentAt` and `authorDeviceId` are carried because the app's merge needs them — REPLACE is a total
-/// order on `(sentAt, authorDeviceId)`. They are metadata in columns beside the
-/// payload, not fields the kit reads out of it.
-///
-/// `localMetadata` is app-owned local-only bookkeeping. It is persisted beside the entry and is
-/// never serialized into `AppEntry` or sent to another device.
+/// One stored entry. `data` and `localMetadata` are opaque to the kit; `localMetadata` never leaves
+/// this device.
 public struct StoredEntry: Sendable, Equatable {
     public let id: String
     public let data: String
@@ -16,13 +10,7 @@ public struct StoredEntry: Sendable, Equatable {
     public let authorDeviceId: String
     public let localMetadata: String?
 
-    public init(
-        id: String,
-        data: String,
-        sentAt: UInt64,
-        authorDeviceId: String,
-        localMetadata: String? = nil
-    ) {
+    public init(id: String, data: String, sentAt: UInt64, authorDeviceId: String, localMetadata: String?) {
         self.id = id
         self.data = data
         self.sentAt = sentAt
@@ -31,83 +19,46 @@ public struct StoredEntry: Sendable, Equatable {
     }
 }
 
-/// Raw storage for application entries. The API is
-/// `put` / `get` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before writing. This
-/// store has no schema parser, query layer, merge engine, or expiry policy: the app decides *when*
-/// an entry goes away, and `erase` guarantees *how*.
+/// The app's entries, keyed by `(model, id)`. `put` is a blind upsert; the app resolves merges.
 public actor EntryStore {
     private let db: DatabaseQueue
 
-    public init(db: DatabaseQueue) throws {
+    init(db: DatabaseQueue) {
         self.db = db
-        try ObscuraSchema.migrate(db)
     }
 
-    public init() throws {
-        self.db = try DatabaseQueue()
-        try db.write { db in try db.execute(sql: "PRAGMA secure_delete = ON") }
-        try ObscuraSchema.migrate(db)
-    }
-
-    /// Write an entry, replacing any existing one with the same `(model, id)`.
-    ///
-    /// `data` is stored verbatim and not validated as JSON: the kit may not read its shape.
     public func put(model: String, entry: StoredEntry) async throws {
-        // Saturating, not `Int64(_:)`: that TRAPS above `Int64.max`, and a trap is not catchable.
-        // `sentAt` reaches here from a peer's `AppEntry.timestamp` by way of the inbox and the
-        // app's merge, so it is untrusted `uint64` that crossed a bridge. `InboxStore.peek`
-        // documents the mirror image of this at the READ end (a negative `sent_at` from Kotlin's
-        // signed Long); the write end was left un-hardened.
-        let sentAt = Int64(clamping: entry.sentAt)
         try await db.write { db in
             try db.execute(sql: """
-                INSERT OR REPLACE INTO model_entries
-                    (model_name, id, data, timestamp, author_device_id, local_metadata)
+                INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_device_id, local_metadata)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, arguments: [
-                model, entry.id, entry.data, sentAt, entry.authorDeviceId, entry.localMetadata,
+                model, entry.id, entry.data, Int64(clamping: entry.sentAt), entry.authorDeviceId, entry.localMetadata,
             ])
         }
     }
 
-    /// The live entries among `ids` for a model, in no guaranteed order. Missing ids are absent.
     public func get(model: String, ids: [String]) async throws -> [StoredEntry] {
         if ids.isEmpty { return [] }
         return try await db.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT id, data, timestamp, author_device_id, local_metadata
-                FROM model_entries WHERE model_name = ? AND id IN (\(databaseQuestionMarks(count: ids.count)))
+                SELECT * FROM model_entries WHERE model_name = ? AND id IN (\(questionMarks(ids.count)))
             """, arguments: StatementArguments([model] + ids)).map(Self.entry)
         }
     }
 
-    /// Every live entry for a model, in no guaranteed order.
     public func all(model: String) async throws -> [StoredEntry] {
         try await db.read { db in
-            try Row.fetchAll(db, sql: """
-                SELECT id, data, timestamp, author_device_id, local_metadata
-                FROM model_entries WHERE model_name = ?
-            """, arguments: [model]).map(Self.entry)
+            try Row.fetchAll(db, sql: "SELECT * FROM model_entries WHERE model_name = ?", arguments: [model]).map(Self.entry)
         }
     }
 
-    /// Remove entries so their contents are unrecoverable from the database files.
-    ///
-    /// The rows are deleted under `secure_delete`, so SQLite zeroes the freed pages; the pragma is
-    /// set in the deleting write rather than trusted from open time. The WAL is then checkpointed and
-    /// truncated once, because in WAL mode the pre-delete pages would otherwise survive in the `-wal`
-    /// file until the next checkpoint. Erasing entries that do not exist is a no-op. Not
-    /// synchronized to peers: each device erases its own copy.
+    /// Deleted under `secure_delete`, so freed pages are zeroed. Each device erases its own copy.
     public func erase(model: String, ids: [String]) async throws {
         if ids.isEmpty { return }
         try await db.write { db in
-            try db.execute(sql: "PRAGMA secure_delete = ON")
-            try db.execute(
-                sql: "DELETE FROM model_entries WHERE model_name = ? AND id IN (\(databaseQuestionMarks(count: ids.count)))",
-                arguments: StatementArguments([model] + ids))
-        }
-        try await db.writeWithoutTransaction { db in
-            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            try db.execute(sql: "DELETE FROM model_entries WHERE model_name = ? AND id IN (\(questionMarks(ids.count)))",
+                           arguments: StatementArguments([model] + ids))
         }
     }
 
@@ -115,18 +66,9 @@ public actor EntryStore {
         StoredEntry(
             id: row["id"],
             data: row["data"],
-            // `max(0, …)` before the conversion, for the same reason `InboxStore.peek`
-            // saturates: `UInt64(_:)` TRAPS on a negative, and a row written by a peer kit
-            // (Kotlin surfaces proto3 `uint64` as a signed Long) must never crash a read.
             sentAt: UInt64(max(0, row["timestamp"] as Int64)),
             authorDeviceId: row["author_device_id"],
             localMetadata: row["local_metadata"]
         )
-    }
-
-    func wipe() async throws {
-        try await db.write { db in
-            try db.execute(sql: "DELETE FROM model_entries")
-        }
     }
 }

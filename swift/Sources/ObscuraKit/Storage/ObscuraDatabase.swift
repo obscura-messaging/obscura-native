@@ -1,0 +1,110 @@
+import Foundation
+import GRDB
+
+enum ObscuraDatabase {
+    static let tables = [
+        "friends", "device_identity", "devices",
+        "signal_local_identity", "signal_identities", "signal_prekeys", "signal_signed_prekeys", "signal_sessions",
+        "inbox_rows", "model_entries",
+    ]
+
+    /// SQLCipher-encrypted with a per-user key from the Keychain.
+    static func open(path: String, key: Data) throws -> DatabaseQueue {
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.usePassphrase(key)
+            try db.execute(sql: "PRAGMA kdf_iter = 1") // the key is already 256 bits of entropy
+            try db.execute(sql: "PRAGMA cipher_page_size = 4096")
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+        }
+        let db = try DatabaseQueue(path: path, configuration: config)
+        try migrator.migrate(db)
+        return db
+    }
+
+    static func inMemory() throws -> DatabaseQueue {
+        var config = Configuration()
+        config.prepareDatabase { db in try db.execute(sql: "PRAGMA secure_delete = ON") }
+        let db = try DatabaseQueue(configuration: config)
+        try migrator.migrate(db)
+        return db
+    }
+
+    static func wipe(_ db: DatabaseQueue) async throws {
+        try await db.write { db in
+            for table in tables { try db.execute(sql: "DELETE FROM \(table)") }
+        }
+    }
+
+    /// Pre-release: installs clear app data when this schema changes.
+    static var migrator: DatabaseMigrator {
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("v1") { db in
+            try db.execute(sql: """
+                CREATE TABLE friends (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE device_identity (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    device_id TEXT NOT NULL
+                );
+                CREATE TABLE devices (
+                    user_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    PRIMARY KEY (user_id, device_id)
+                );
+                CREATE TABLE signal_local_identity (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    key_pair BLOB NOT NULL,
+                    registration_id INTEGER NOT NULL
+                );
+                CREATE TABLE signal_identities (
+                    address TEXT PRIMARY KEY,
+                    key_data BLOB NOT NULL
+                );
+                CREATE TABLE signal_prekeys (
+                    key_id INTEGER PRIMARY KEY,
+                    record BLOB NOT NULL
+                );
+                CREATE TABLE signal_signed_prekeys (
+                    key_id INTEGER PRIMARY KEY,
+                    record BLOB NOT NULL
+                );
+                CREATE TABLE signal_sessions (
+                    address TEXT PRIMARY KEY,
+                    record BLOB NOT NULL
+                );
+                CREATE TABLE inbox_rows (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    envelope_id TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL,
+                    sender_user_id TEXT NOT NULL,
+                    sender_device_id TEXT,
+                    model_key TEXT,
+                    entry_id TEXT,
+                    sent_at INTEGER,
+                    payload BLOB NOT NULL
+                );
+                CREATE TABLE model_entries (
+                    model_name TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    author_device_id TEXT NOT NULL,
+                    local_metadata TEXT,
+                    PRIMARY KEY (model_name, id)
+                );
+                """)
+        }
+        return migrator
+    }
+}
+
+/// `?, ?, ?` for an `IN` clause.
+func questionMarks(_ count: Int) -> String {
+    Array(repeating: "?", count: count).joined(separator: ", ")
+}

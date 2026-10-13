@@ -1,250 +1,148 @@
 import Foundation
 import CryptoKit
 
-/// HTTP API Client for Obscura Server
-public actor APIClient {
-    public let baseURL: String
+actor APIClient {
+    nonisolated let baseURL: URL
     private var token: String?
-
-    public init(baseURL: String) {
-        // Cleartext HTTP is allowed only for loopback (containerized test server).
-        let isLoopback = baseURL.hasPrefix("http://localhost")
-            || baseURL.hasPrefix("http://127.0.0.1")
-            || baseURL.hasPrefix("http://[::1]")
-        precondition(baseURL.hasPrefix("https://") || isLoopback,
-                     "API URL must use HTTPS (cleartext allowed only for loopback)")
-        self.baseURL = baseURL
-    }
-
-    // MARK: - Token Management
-
-    public func setToken(_ t: String) { token = t }
-    public func getToken() -> String? { token }
-    public func clearToken() { token = nil }
-
-    public nonisolated static func decodeJWT(_ jwt: String) -> [String: Any]? {
-        let parts = jwt.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-
-        var base64 = String(parts[1])
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 { base64.append("=") }
-
-        guard let data = Data(base64Encoded: base64),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return json
-    }
-
-    public nonisolated static func extractUserId(_ jwt: String) -> String? {
-        guard let payload = decodeJWT(jwt) else { return nil }
-        return (payload["sub"] as? String)
-            ?? (payload["user_id"] as? String)
-            ?? (payload["userId"] as? String)
-            ?? (payload["id"] as? String)
-    }
-
-    public nonisolated static func extractDeviceId(_ jwt: String) -> String? {
-        guard let payload = decodeJWT(jwt) else { return nil }
-        return (payload["device_id"] as? String)
-            ?? (payload["deviceId"] as? String)
-    }
-
-    // MARK: - Generic Request
-
-    public struct APIError: LocalizedError {
-        public let status: Int
-        public let body: String
-
-        public var errorDescription: String? {
-            "HTTP \(status)"
-        }
-    }
-
-    private func request(
-        _ path: String,
-        method: String = "GET",
-        body: Data? = nil,
-        contentType: String = "application/json",
-        auth: Bool = true,
-        extraHeaders: [String: String] = [:]
-    ) async throws -> (Data, HTTPURLResponse) {
-        guard let url = URL(string: "\(baseURL)\(path)") else {
-            throw APIError(status: 0, body: "Invalid URL: \(baseURL)\(path)")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
-        if auth, let token = token {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        for (key, value) in extraHeaders {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
-        request.httpBody = body
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError(status: 0, body: "Not HTTP response")
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let bodyStr = String(data: data, encoding: .utf8) ?? ""
-            throw APIError(status: httpResponse.statusCode, body: bodyStr)
-        }
-
-        return (data, httpResponse)
-    }
-
+    private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    private func jsonRequest<T: Decodable>(_ type: T.Type, _ path: String, method: String = "GET", body: (any Encodable)? = nil, auth: Bool = true) async throws -> T {
-        var bodyData: Data? = nil
-        if let body = body {
-            bodyData = try JSONEncoder().encode(body)
+    init(baseURL: String) throws {
+        let loopback = ["http://localhost", "http://127.0.0.1", "http://[::1]"].contains { baseURL.hasPrefix($0) }
+        guard baseURL.hasPrefix("https://") || loopback, let url = URL(string: baseURL) else {
+            throw ObscuraError.invalidArgument("apiURL must be https (http only for loopback): \(baseURL)")
         }
-        let (data, _) = try await request(path, method: method, body: bodyData, auth: auth)
-        if data.isEmpty {
-            // Some endpoints return empty body on success; try decoding anyway
+        self.baseURL = url
+    }
+
+    func setToken(_ token: String?) {
+        self.token = token
+    }
+
+    // MARK: - JWT
+
+    static func claims(_ jwt: String) -> [String: Any]? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64.append("=") }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    static func userId(_ jwt: String) -> String? { claims(jwt)?["sub"] as? String }
+    static func deviceId(_ jwt: String) -> String? { claims(jwt)?["device_id"] as? String }
+    static func expiry(_ jwt: String) -> TimeInterval? { claims(jwt)?["exp"] as? TimeInterval }
+
+    // MARK: - Transport
+
+    static let maxRetries = 2
+
+    /// Seconds to wait before retrying a 429/503. The server floors sub-second waits to 0.
+    static func retryDelay(retryAfter: String?) -> UInt64 {
+        let seconds = retryAfter.flatMap { UInt64($0.trimmingCharacters(in: .whitespaces)) } ?? 1
+        return min(max(seconds, 1), 10)
+    }
+
+    private func request(_ path: String, method: String = "GET", body: Data? = nil,
+                         contentType: String = "application/json", headers: [String: String] = [:],
+                         bearer: String? = nil) async throws -> Data {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        if let token = bearer ?? token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+
+        var retries = 0
+        while true {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw ObscuraError.protocolViolation("non-HTTP response for \(path)")
+            }
+            if (200..<300).contains(http.statusCode) { return data }
+            if [429, 503].contains(http.statusCode), retries < Self.maxRetries {
+                retries += 1
+                let delay = Self.retryDelay(retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                continue
+            }
+            throw ObscuraError.http(status: http.statusCode, body: String(decoding: data, as: UTF8.self))
         }
-        return try decoder.decode(T.self, from: data)
     }
 
-    /// Fire-and-forget JSON request (for endpoints where we don't need the response body)
-    private func jsonRequestVoid(_ path: String, method: String = "GET", body: (any Encodable)? = nil, auth: Bool = true) async throws {
-        var bodyData: Data? = nil
-        if let body = body {
-            bodyData = try JSONEncoder().encode(body)
-        }
-        _ = try await request(path, method: method, body: bodyData, auth: auth)
+    private func json<T: Decodable>(_ path: String, method: String = "GET", body: (any Encodable)? = nil) async throws -> T {
+        try decoder.decode(T.self, from: await request(path, method: method, body: body.map { try encoder.encode($0) }))
     }
 
-    // MARK: - Auth
-
-    public func registerUser(_ username: String, _ password: String) async throws -> AuthResponse {
-        try await jsonRequest(AuthResponse.self, "/v1/users", method: "POST",
-                              body: ["username": username, "password": password], auth: false)
+    private func call(_ path: String, method: String, body: any Encodable) async throws {
+        _ = try await request(path, method: method, body: encoder.encode(body))
     }
 
-    public func loginWithDevice(_ username: String, _ password: String, deviceId: String? = nil) async throws -> AuthResponse {
-        var body: [String: String] = ["username": username, "password": password]
-        if let deviceId = deviceId { body["deviceId"] = deviceId }
-        return try await jsonRequest(AuthResponse.self, "/v1/sessions", method: "POST", body: body, auth: false)
+    // MARK: - Endpoints
+
+    func registerUser(_ username: String, _ password: String) async throws -> AuthResponse {
+        try await json("v1/users", method: "POST", body: ["username": username, "password": password])
     }
 
-    public func refreshSession(_ refreshToken: String) async throws -> AuthResponse {
-        try await jsonRequest(AuthResponse.self, "/v1/sessions/refresh", method: "POST",
-                              body: ["refreshToken": refreshToken], auth: false)
+    func login(_ username: String, _ password: String, deviceId: String?) async throws -> AuthResponse {
+        var body = ["username": username, "password": password]
+        body["deviceId"] = deviceId
+        return try await json("v1/sessions", method: "POST", body: body)
     }
 
-    public func logout(_ refreshToken: String) async throws {
-        try await jsonRequestVoid("/v1/sessions", method: "DELETE", body: ["refreshToken": refreshToken])
+    func refreshSession(_ refreshToken: String) async throws -> AuthResponse {
+        try await json("v1/sessions/refresh", method: "POST", body: ["refreshToken": refreshToken])
     }
 
-    // MARK: - Devices
+    /// Takes the session's access token explicitly: the client has already forgotten it.
+    func logout(_ refreshToken: String, token: String) async throws {
+        _ = try await request("v1/sessions", method: "DELETE", body: encoder.encode(["refreshToken": refreshToken]), bearer: token)
+    }
 
-    public func provisionDevice(name: String, identityKey: String, registrationId: Int,
-                                 signedPreKey: SignedPreKeyUpload, oneTimePreKeys: [PreKeyUpload]) async throws -> AuthResponse {
-        struct ProvisionRequest: Encodable {
+    func provisionDevice(name: String, keys: DeviceKeysUpload) async throws -> AuthResponse {
+        struct Provision: Encodable {
             let name: String
             let identityKey: String
             let registrationId: Int
             let signedPreKey: SignedPreKeyUpload
             let oneTimePreKeys: [PreKeyUpload]
         }
-        let body = ProvisionRequest(name: name, identityKey: identityKey, registrationId: registrationId,
-                                     signedPreKey: signedPreKey, oneTimePreKeys: oneTimePreKeys)
-        return try await jsonRequest(AuthResponse.self, "/v1/devices", method: "POST", body: body)
+        return try await json("v1/devices", method: "POST", body: Provision(
+            name: name, identityKey: keys.identityKey, registrationId: keys.registrationId,
+            signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys))
     }
 
-    public func listDevices() async throws -> [DeviceResponse] {
-        let (data, _) = try await request("/v1/devices")
-        // Server may return a bare array or a wrapped {"devices": [...]}
-        if let devices = try? decoder.decode([DeviceResponse].self, from: data) {
-            return devices
-        }
-        let wrapper = try decoder.decode(DeviceListWrapper.self, from: data)
-        return wrapper.devices
+    func uploadDeviceKeys(_ keys: DeviceKeysUpload) async throws {
+        try await call("v1/devices/keys", method: "POST", body: keys)
     }
 
-    private struct DeviceListWrapper: Decodable {
-        let devices: [DeviceResponse]
+    /// Consumes one one-time prekey on every device of `userId`.
+    func fetchPreKeyBundles(_ userId: String) async throws -> [PreKeyBundleResponse] {
+        try await json("v1/users/\(userId)")
     }
 
-    public func getDevice(_ deviceId: String) async throws -> DeviceResponse {
-        try await jsonRequest(DeviceResponse.self, "/v1/devices/\(urlEncode(deviceId))")
+    func sendMessage(_ protobuf: Data) async throws -> Data {
+        let idempotencyKey = SHA256.hash(data: protobuf).prefix(16).map { String(format: "%02x", $0) }.joined()
+        return try await request("v1/messages", method: "POST", body: protobuf, contentType: "application/x-protobuf",
+                                 headers: ["Idempotency-Key": idempotencyKey])
     }
 
-    public func deleteDevice(_ deviceId: String) async throws {
-        try await jsonRequestVoid("/v1/devices/\(urlEncode(deviceId))", method: "DELETE")
+    func uploadAttachment(_ blob: Data) async throws -> AttachmentResponse {
+        try decoder.decode(AttachmentResponse.self, from: await request(
+            "v1/attachments", method: "POST", body: blob, contentType: "application/octet-stream"))
     }
 
-    // MARK: - Keys
-
-    public func uploadDeviceKeys(identityKey: String, registrationId: Int,
-                                  signedPreKey: SignedPreKeyUpload, oneTimePreKeys: [PreKeyUpload]) async throws {
-        struct KeysRequest: Encodable {
-            let identityKey: String
-            let registrationId: Int
-            let signedPreKey: SignedPreKeyUpload
-            let oneTimePreKeys: [PreKeyUpload]
-        }
-        let body = KeysRequest(identityKey: identityKey, registrationId: registrationId,
-                                signedPreKey: signedPreKey, oneTimePreKeys: oneTimePreKeys)
-        try await jsonRequestVoid("/v1/devices/keys", method: "POST", body: body)
+    func fetchAttachment(_ id: String) async throws -> Data {
+        try await request("v1/attachments/\(id)")
     }
 
-    public func fetchPreKeyBundles(_ userId: String) async throws -> [PreKeyBundleResponse] {
-        let (data, _) = try await request("/v1/users/\(urlEncode(userId))")
-        return try decoder.decode([PreKeyBundleResponse].self, from: data)
-    }
-
-    // MARK: - Messaging (Protobuf)
-
-    @discardableResult
-    public func sendMessage(_ protobufData: Data) async throws -> Data {
-        let hash = SHA256.hash(data: protobufData)
-        let idempotencyKey = Array(hash).prefix(16).map { String(format: "%02x", $0) }.joined()
-        let (data, _) = try await request("/v1/messages", method: "POST", body: protobufData,
-                              contentType: "application/x-protobuf",
-                              extraHeaders: ["Idempotency-Key": idempotencyKey])
-        return data
-    }
-
-    // MARK: - Attachments
-
-    public func uploadAttachment(_ blob: Data) async throws -> AttachmentResponse {
-        let (data, _) = try await request("/v1/attachments", method: "POST", body: blob,
-                                          contentType: "application/octet-stream")
-        return try decoder.decode(AttachmentResponse.self, from: data)
-    }
-
-    public func fetchAttachment(_ id: String) async throws -> Data {
-        let (data, _) = try await request("/v1/attachments/\(urlEncode(id))")
-        return data
-    }
-
-    // MARK: - Gateway
-
-    public func fetchGatewayTicket() async throws -> String {
-        let response = try await jsonRequest(GatewayTicketResponse.self, "/v1/gateway/ticket", method: "POST")
+    func fetchGatewayTicket() async throws -> String {
+        let response: GatewayTicketResponse = try await json("v1/gateway/ticket", method: "POST")
         return response.ticket
     }
 
-    // MARK: - Push
-
-    public func registerPushToken(_ token: String, type: String = "apns") async throws {
-        try await jsonRequestVoid("/v1/push-tokens", method: "PUT", body: ["token": token, "type": type])
-    }
-
-    // MARK: - Helpers
-
-    private func urlEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    func registerPushToken(_ pushToken: String) async throws {
+        try await call("v1/push-tokens", method: "PUT", body: ["token": pushToken, "type": "apns"])
     }
 }
