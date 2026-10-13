@@ -1197,7 +1197,8 @@ public class ObscuraClient {
         }
     }
 
-    /// Who is currently typing in a context, by display name.
+    /// Who is currently typing in a context, as user IDs. The host resolves names through its
+    /// friend graph and decides whose typing to show.
     ///
     /// Auto-expires; a signal with no refresh disappears on its own.
     public nonisolated func observeTyping(contextId: String) -> TypingObservation {
@@ -1649,8 +1650,6 @@ public class ObscuraClient {
         guard !signal.contextID.isEmpty,
               let state = WireCodec.decodeTypingState(signal.state) else { return }
 
-        let username = await friends.getAccepted()
-            .first(where: { $0.userId == sourceUserId })?.username ?? sourceUserId
         if state == .stopped {
             await TypingStateRegistry.shared.tracker.remove(
                 contextId: signal.contextID, senderDeviceId: senderDeviceId)
@@ -1659,7 +1658,6 @@ public class ObscuraClient {
                 contextId: signal.contextID,
                 senderUserId: sourceUserId,
                 senderDeviceId: senderDeviceId,
-                senderDisplayName: username,
                 timestamp: msg.timestamp
             ))
         }

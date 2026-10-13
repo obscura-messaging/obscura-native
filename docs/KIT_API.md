@@ -107,7 +107,7 @@ the app can show that the safety number changed.
 **Takeover** generates a new identity and prekeys, clears every session, and
 announces this device's list to accepted friends, whose devices then replace
 their sessions. The server ends the device's connection and deletes its queued
-messages; the caller connects again.
+messages; the kit reconnects.
 
 **Sender names** come from the local friend graph keyed by `sender_id`, never
 from a payload. The one exception is a `FriendRequest` from someone not yet in
@@ -163,7 +163,9 @@ either.
 **Typing:** the caller names recipients. `TypingSignal.context_id` is opaque and
 MUST NOT be parsed or used to derive recipients. `STARTED` refreshes the sender
 device's short-lived state, `STOPPED` clears it, other states are ignored. Typing
-state is in-memory, throttled and expiring.
+state is in-memory, throttled and expiring. `observeTyping` reports typers as
+user IDs, once per user; the app resolves names and decides whose typing to show,
+because a context id names nothing the kit can authorize.
 
 ## Inbox
 
@@ -318,6 +320,4 @@ unconnected rather than discarding it.
 - A `DEVICE_ANNOUNCE` is ordered only by its sender-declared (clamped)
   timestamp: last writer wins, with no other freshness check.
 - Partial-recipient send failures are invisible to the app.
-- Kotlin does not complete a close the server initiates, so after one (for
-  example a takeover) the client still reports `CONNECTED` on a dead socket.
 - Consumed inbox envelope ids have no durable tombstone.
