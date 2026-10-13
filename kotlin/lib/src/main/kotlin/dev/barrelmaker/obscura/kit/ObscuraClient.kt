@@ -24,6 +24,7 @@ import dev.barrelmaker.obscura.kit.stores.FriendStore
 import dev.barrelmaker.obscura.kit.stores.InboxInsert
 import dev.barrelmaker.obscura.kit.stores.InboxStore
 import dev.barrelmaker.obscura.kit.stores.pragma
+import dev.barrelmaker.obscura.kit.stores.truncateWal
 import dev.barrelmaker.obscura.kit.wire.PayloadDisposition
 import dev.barrelmaker.obscura.kit.wire.TypingTracker
 import dev.barrelmaker.obscura.kit.wire.WireCodec
@@ -178,7 +179,7 @@ class ObscuraClient(
                 db.inboxQueries.deleteAll()
                 signalStore.clear()
             }
-            sqlDriver.pragma("PRAGMA wal_checkpoint(TRUNCATE)")
+            sqlDriver.truncateWal()
         }
     }
 
