@@ -201,6 +201,10 @@ accept reply without changing that relationship, so an independent new
 installation can explicitly re-add the peer. An accept promotes only a
 pending-sent relationship.
 
+Outgoing requests are recorded as pending-sent before submission, so a fast
+accept cannot arrive before local intent exists. Failure cleanup must not
+undo a relationship accepted while submission was in flight.
+
 Incoming entry timestamps are capped at local `now + 60 s`. The inbound
 Signal address is `(senderDeviceUUID, 1)`; attribution comes from this
 session and the server envelope, never application data.
