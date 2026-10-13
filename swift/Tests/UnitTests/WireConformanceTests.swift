@@ -19,8 +19,6 @@ final class WireConformanceTests: XCTestCase {
     private let payloadByWire: [String: Obscura_Client_V1_ClientMessage.OneOf_Payload] = [
         "friend_request": .friendRequest(Obscura_Client_V1_FriendRequest()),
         "friend_accept": .friendAccept(Obscura_Client_V1_FriendAccept()),
-        "device_link_approval": .deviceLinkApproval(Obscura_Client_V1_DeviceLinkApproval()),
-        "device_announce": .deviceAnnounce(Obscura_Client_V1_DeviceAnnounce()),
         "app_entry": .appEntry(Obscura_Client_V1_AppEntry()),
         "typing_signal": .typingSignal(Obscura_Client_V1_TypingSignal()),
     ]
@@ -35,7 +33,7 @@ final class WireConformanceTests: XCTestCase {
         for m in (v["messageTypes"] as? [[String: Any]] ?? []) {
             let wire = m["wire"] as? String ?? "", app = m["app"] as? String ?? ""
             guard let p = payloadByWire[wire] else { XCTFail("unmapped wire messageType \(wire)"); continue }
-            XCTAssertEqual(WireCodec.decodeMessageType(p), app, "messageType \(wire) -> \(app)")
+            XCTAssertEqual(WireCodec.messageKind(p), app, "messageType \(wire) -> \(app)")
         }
 
         for m in (v["typingStates"] as? [[String: Any]] ?? []) {
@@ -68,7 +66,7 @@ final class WireConformanceTests: XCTestCase {
         proto.timestamp = ts
         proto.data = try JSONSerialization.data(withJSONObject: dataMap)
 
-        let decoded = try Obscura_Client_V1_AppEntry(serializedData: proto.serializedData())
+        let decoded = try Obscura_Client_V1_AppEntry(serializedBytes: proto.serializedData())
 
         XCTAssertEqual(decoded.model, model, "[\(name)] model")
         XCTAssertEqual(decoded.id, id, "[\(name)] id")

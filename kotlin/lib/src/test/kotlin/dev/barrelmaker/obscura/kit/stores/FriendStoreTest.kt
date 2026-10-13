@@ -6,7 +6,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
-/** FriendStore is the source of truth for who the user knows and the friendship state. */
 class FriendStoreTest {
 
     private fun newDomain() = FriendStore(newInMemoryDatabase())
@@ -24,13 +23,12 @@ class FriendStoreTest {
     }
 
     @Test
-    fun `getAccepted filters out pending friends`() = runTest {
+    fun `getAll lists every friend in name order`() = runTest {
         val d = newDomain()
-        d.add("u1", "alice", FriendStatus.ACCEPTED)
         d.add("u2", "bob", FriendStatus.PENDING_SENT)
-        d.add("u3", "carol", FriendStatus.PENDING_RECEIVED)
+        d.add("u1", "alice", FriendStatus.ACCEPTED)
 
-        assertEquals(listOf("alice"), d.getAccepted().map { it.username })
+        assertEquals(listOf("alice", "bob"), d.getAll().map { it.username })
     }
 
     @Test
@@ -55,15 +53,15 @@ class FriendStoreTest {
     }
 
     @Test
-    fun `the link export round-trips friends with their devices and drops unknown statuses`() {
-        val friends = listOf(
-            LinkedFriend(FriendData("u1", "alice", FriendStatus.ACCEPTED), listOf(DeviceData("u1", "d1", "Phone"))),
-            LinkedFriend(FriendData("u2", "bob", FriendStatus.PENDING_SENT), emptyList()),
-        )
-        assertEquals(friends, FriendExport.decode(FriendExport.encode(friends)))
-        assertEquals(
-            emptyList<LinkedFriend>(),
-            FriendExport.decode("""[{"userId":"u3","username":"eve","status":"bogus","devices":[]}]"""),
-        )
+    fun `request preparation preserves existing records and conditional cleanup never deletes accepted friendship`() = runTest {
+        val d = newDomain()
+        assertNull(d.prepareRequest("new", "alice"))
+        assertEquals(FriendData("new", "alice", FriendStatus.PENDING_SENT), d.get("new"))
+        d.removePendingRequest("new")
+        assertNull(d.get("new"))
+        d.add("accepted", "trusted name", FriendStatus.ACCEPTED)
+        assertEquals(FriendData("accepted", "trusted name", FriendStatus.ACCEPTED), d.prepareRequest("accepted", "spoof"))
+        d.removePendingRequest("accepted")
+        assertEquals(FriendData("accepted", "trusted name", FriendStatus.ACCEPTED), d.get("accepted"))
     }
 }

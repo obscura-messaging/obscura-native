@@ -21,11 +21,12 @@ message EncryptedMessage {
 message ClientMessage {
   uint64 timestamp = 1;
 
+  reserved 4, 5;
+  reserved "device_link_approval", "device_announce";
+
   oneof payload {
     FriendRequest friend_request = 2;
     FriendAccept friend_accept = 3;
-    DeviceLinkApproval device_link_approval = 4;
-    DeviceAnnounce device_announce = 5;
     AppEntry app_entry = 6;
     TypingSignal typing_signal = 7;
   }
@@ -36,21 +37,6 @@ message FriendRequest {
 }
 
 message FriendAccept {}
-
-message DeviceInfo {
-  string id = 1;
-  string name = 2;
-}
-
-message DeviceLinkApproval {
-  bytes challenge_response = 1;
-  repeated DeviceInfo own_devices = 2;
-  bytes friends_export = 3;
-}
-
-message DeviceAnnounce {
-  repeated DeviceInfo devices = 1;
-}
 
 message AppEntry {
   string model = 1;

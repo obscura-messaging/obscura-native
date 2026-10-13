@@ -55,7 +55,7 @@ with `docker compose`, then:
   1/s burst 3) trip partway through the suites with HTTP 429.
 - **Create the bucket.** The server never creates its S3 bucket. In a fresh
   MinIO, create `test-bucket` or every attachment test fails.
-- **Drop client pacing.** Set `AUTH_REQUEST_DELAY_MS=0` (both kits) and
-  `SERVER_REQUEST_DELAY_MS=0` (Swift). The defaults pace for production limits.
+- Kits retry 429/503 according to `Retry-After`; there is no request-pacing
+  configuration. Live dev runs still exercise the normal server rate limits.
 
 See `.github/workflows/kotlin.yml` and `swift.yml` for the exact setup.

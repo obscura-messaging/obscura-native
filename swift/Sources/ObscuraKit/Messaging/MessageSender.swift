@@ -2,44 +2,36 @@ import Foundation
 
 /// The one path every outgoing message takes to a user's devices.
 ///
-/// Devices come from the ``DeviceStore`` directory and existing Signal sessions are reused.
-/// Fetching a user's prekey bundles consumes a one-time prekey on every one of their devices, so it
-/// happens only when the directory cannot be used as it is:
-///
-/// - the user has no listed devices;
-/// - a target device has no session (a newly announced device, or sessions cleared by takeover);
-/// - the server rejects a listed device as nonexistent. Then the send retries the devices the
-///   server lists now, once.
-///
-/// A refresh builds sessions only for devices that have none and replaces the user's directory
-/// entry. A device whose bundle cannot be processed is left out, so it cannot cause a fetch on
-/// every later send. This device is never a target.
+/// Devices come from the `DeviceStore` directory and existing sessions are reused. Fetching a user's
+/// bundles consumes a one-time prekey on every one of their devices, so it happens only when the
+/// user has no listed devices, a target device has no session, or the server rejects a listed device
+/// as nonexistent (then the send retries the devices the server lists now, once). This device is
+/// never a target.
 actor MessageSender {
     private let messenger: Messenger
     private let devices: DeviceStore
     private let api: APIClient
-    private let selfDeviceId: String?
+    private let logger: ObscuraLogger
+    private let selfDeviceId: String
 
-    // Sends to one user are serialized, so concurrent first contacts share one refresh. Actors
-    // are reentrant across `await`, so the serialization is explicit.
+    // Sends to one user are serialized so concurrent first contacts share one bundle fetch.
     private var tails: [String: Task<[SubmissionResult], Never>] = [:]
 
-    init(messenger: Messenger, devices: DeviceStore, api: APIClient, selfDeviceId: String?) {
+    init(messenger: Messenger, devices: DeviceStore, api: APIClient, logger: ObscuraLogger, selfDeviceId: String) {
         self.messenger = messenger
         self.devices = devices
         self.api = api
+        self.logger = logger
         self.selfDeviceId = selfDeviceId
     }
 
-    /// Encrypt serialized `ClientMessage` bytes to `userId`'s devices and report each one. Devices
-    /// in `acceptedDeviceIds` are reported accepted without being sent again. `only` narrows the
-    /// targets.
-    func send(to userId: String, _ clientMessageData: Data,
-              acceptedDeviceIds: Set<String> = [], only: Set<String>? = nil) async -> [SubmissionResult] {
+    /// Encrypts serialized `ClientMessage` bytes to `userId`'s devices and reports each one. Devices
+    /// in `acceptedDeviceIds` are reported accepted without being sent again.
+    func send(to userId: String, _ clientMessage: Data, acceptedDeviceIds: Set<String>) async -> [SubmissionResult] {
         let previous = tails[userId]
         let task = Task {
             _ = await previous?.value
-            return await self.attempt(userId, clientMessageData, acceptedDeviceIds, only)
+            return await self.attempt(userId, clientMessage, acceptedDeviceIds)
         }
         tails[userId] = task
         let results = await task.value
@@ -47,12 +39,11 @@ actor MessageSender {
         return results
     }
 
-    /// ``send(to:_:acceptedDeviceIds:only:)``, failing when no device accepted. For control
-    /// messages that must reach the user.
-    func sendOrThrow(to userId: String, _ clientMessageData: Data, only: Set<String>? = nil) async throws {
-        let results = await send(to: userId, clientMessageData, only: only)
+    /// For control messages that must reach the user: throws unless some device accepted.
+    func sendOrThrow(to userId: String, _ clientMessage: Data) async throws {
+        let results = await send(to: userId, clientMessage, acceptedDeviceIds: [])
         guard results.contains(where: { $0.status == .accepted }) else {
-            throw ObscuraClient.ObscuraError.sendFailed(results.map { $0.error ?? $0.status.rawValue }.joined(separator: "; "))
+            throw ObscuraError.sendFailed(results.map { $0.error ?? $0.status.rawValue }.joined(separator: "; "))
         }
     }
 
@@ -61,13 +52,11 @@ actor MessageSender {
         let failures: [SubmissionResult]
     }
 
-    private func attempt(_ userId: String, _ data: Data, _ accepted: Set<String>, _ only: Set<String>?) async -> [SubmissionResult] {
-        func targets(_ ids: [String]) -> [String] {
-            ids.filter { $0 != selfDeviceId && (only?.contains($0) ?? true) }
-        }
+    private func attempt(_ userId: String, _ data: Data, _ accepted: Set<String>) async -> [SubmissionResult] {
+        func targets(_ ids: [String]) -> [String] { ids.filter { $0 != selfDeviceId } }
         let listed: [String]
         do {
-            listed = try await devices.devices(of: userId).map(\.deviceId)
+            listed = try await devices.deviceIds(of: userId)
         } catch {
             return [rejected(userId, nil, error)]
         }
@@ -86,7 +75,7 @@ actor MessageSender {
             resolved = Resolved(deviceIds: listed, failures: [])
         }
         if resolved.deviceIds.isEmpty && resolved.failures.isEmpty {
-            return [rejected(userId, nil, "No devices found")]
+            return [rejected(userId, nil, "no devices found")]
         }
 
         let firstTargets = targets(resolved.deviceIds)
@@ -104,26 +93,28 @@ actor MessageSender {
             + (await submit(userId, added, data, accepted)).map(\.result)
     }
 
+    /// Builds sessions for devices that have none and replaces the user's directory entry. A device
+    /// whose bundle cannot be processed is left out, so it cannot cause a fetch on every later send.
     private func refresh(_ userId: String) async -> Result<Resolved, Error> {
         do {
             let bundles: [PreKeyBundleResponse]
             do {
                 bundles = try await api.fetchPreKeyBundles(userId)
-            } catch let error as APIClient.APIError where error.status == 404 {
+            } catch ObscuraError.http(status: 404, body: _) {
                 bundles = []
             }
-            await rateLimitDelay()
             var failures: [SubmissionResult] = []
             for bundle in bundles where bundle.deviceId != selfDeviceId {
                 do {
                     try await messenger.establishSession(bundle)
                 } catch {
+                    logger.sessionEstablishFailed(userId: userId, reason: "device \(bundle.deviceId): \(error)")
                     failures.append(rejected(userId, bundle.deviceId, error))
                 }
             }
             let failed = Set(failures.compactMap(\.deviceId))
             let deviceIds = bundles.map(\.deviceId).filter { !failed.contains($0) }
-            try await devices.replaceFromServer(userId, deviceIds: deviceIds)
+            try await devices.replace(userId: userId, deviceIds: deviceIds)
             return .success(Resolved(deviceIds: deviceIds, failures: failures))
         } catch {
             return .failure(error)
@@ -139,7 +130,7 @@ actor MessageSender {
                 continue
             }
             do {
-                submissions.append(try await messenger.prepareSubmission(deviceId: id, clientMessageData: data))
+                submissions.append(try await messenger.prepareSubmission(deviceId: id, clientMessage: data))
             } catch {
                 results.append(Submitted(rejected(userId, id, error)))
             }

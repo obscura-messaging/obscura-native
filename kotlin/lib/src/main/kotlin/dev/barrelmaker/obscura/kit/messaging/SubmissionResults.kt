@@ -2,6 +2,7 @@ package dev.barrelmaker.obscura.kit.messaging
 
 import dev.barrelmaker.obscura.kit.SubmissionResult
 import dev.barrelmaker.obscura.kit.SubmissionStatus
+import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse
@@ -16,10 +17,9 @@ internal fun decodeSubmissionResults(
 ): List<Submitted> {
     val ids = submissions.map { it.submissionId }.toSet()
     val failures = response.failedSubmissionsList
-    require(failures.all { it.submissionId in ids } &&
-        failures.map { it.submissionId }.toSet().size == failures.size) {
-        "Response contains unknown or duplicate submission IDs"
-    }
+    if (!failures.all { it.submissionId in ids } ||
+        failures.map { it.submissionId }.toSet().size != failures.size
+    ) throw ObscuraError.ProtocolViolation("Response contains unknown or duplicate submission IDs")
     val byId = failures.associateBy { it.submissionId }
     return submissions.map {
         val failure = byId[it.submissionId]
@@ -37,5 +37,4 @@ internal fun decodeSubmissionResults(
 internal fun unknownSubmission(userId: String, submission: SendMessageRequest.Submission, error: String) =
     Submitted(SubmissionResult(userId, deviceIdOf(submission), SubmissionStatus.UNKNOWN, error))
 
-private fun deviceIdOf(submission: SendMessageRequest.Submission) =
-    UuidCodec.bytesToUuid(submission.deviceId.toByteArray()).toString()
+private fun deviceIdOf(submission: SendMessageRequest.Submission) = checkNotNull(UuidCodec.uuidString(submission.deviceId))

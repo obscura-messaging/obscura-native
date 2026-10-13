@@ -2,1154 +2,609 @@ package dev.barrelmaker.obscura.kit
 
 import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
-import dev.barrelmaker.obscura.kit.crypto.LinkCode
+import com.google.protobuf.ByteString
+import dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
-import dev.barrelmaker.obscura.kit.crypto.toBase64
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
-import dev.barrelmaker.obscura.kit.managers.*
-import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
+import dev.barrelmaker.obscura.kit.managers.AuthManager
+import dev.barrelmaker.obscura.kit.managers.Credentials
+import dev.barrelmaker.obscura.kit.managers.MessageSender
+import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils
+import dev.barrelmaker.obscura.kit.managers.TokenStatus
 import dev.barrelmaker.obscura.kit.messaging.Messenger
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.network.GatewayConnection
-import dev.barrelmaker.obscura.kit.network.GatewayState
-import dev.barrelmaker.obscura.kit.network.LoginScenario
-import dev.barrelmaker.obscura.kit.network.UploadDeviceKeysRequest
+import dev.barrelmaker.obscura.kit.persistence.SessionStorage
+import dev.barrelmaker.obscura.kit.stores.DeviceStore
+import dev.barrelmaker.obscura.kit.stores.EntryStore
+import dev.barrelmaker.obscura.kit.stores.FriendData
+import dev.barrelmaker.obscura.kit.stores.FriendStatus
+import dev.barrelmaker.obscura.kit.stores.FriendStore
+import dev.barrelmaker.obscura.kit.stores.InboxInsert
+import dev.barrelmaker.obscura.kit.stores.InboxStore
+import dev.barrelmaker.obscura.kit.stores.pragma
+import dev.barrelmaker.obscura.kit.stores.truncateWal
+import dev.barrelmaker.obscura.kit.wire.PayloadDisposition
 import dev.barrelmaker.obscura.kit.wire.TypingTracker
 import dev.barrelmaker.obscura.kit.wire.WireCodec
-import dev.barrelmaker.obscura.kit.wire.PayloadDisposition
 import dev.barrelmaker.obscura.kit.wire.payloadDisposition
-import dev.barrelmaker.obscura.kit.stores.*
-import app.cash.sqldelight.coroutines.asFlow
-import app.cash.sqldelight.coroutines.mapToList
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import dev.barrelmaker.obscura.kit.persistence.NoOpSessionStorage
-import dev.barrelmaker.obscura.kit.persistence.SessionStorage
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import obscura.client.v1.Client.ClientMessage
+import obscura.client.v1.appEntry
+import obscura.client.v1.friendAccept
+import obscura.client.v1.friendRequest
 import obscura.client.v1.typingSignal
+import xyz.obscura.server.contracts.ObscuraProtocol.Envelope
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedDeque
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
-
-class MessageWakeEvent internal constructor(
-    val type: String,
-    internal val username: String = "",
-    internal val sourceUserId: String = "",
-    internal val senderDeviceId: String? = null,
-    /** For APP_ENTRY messages: the opaque model key; null for non-sync types. */
-    val model: String? = null,
-    /** Test-only access to the decoded wire message. Applications drain the durable inbox. */
-    internal val raw: ClientMessage? = null,
-)
 
 /**
- * Public connection state. 1:1 with the network layer's [GatewayState] and with
- * the Swift kit's ConnectionState (disconnected/connecting/reconnecting/connected):
- *   CONNECTING   — first connection attempt in progress
- *   RECONNECTING — a dropped connection is being retried (backoff)
- *   CONNECTED    — websocket open
- */
-enum class ConnectionState { DISCONNECTED, CONNECTING, RECONNECTING, CONNECTED }
-
-enum class AuthState { LOGGED_OUT, PENDING_APPROVAL, AUTHENTICATED }
-
-/**
- * Create with default JVM in-memory driver (for tests).
- * For Android production, pass an encrypted AndroidSqliteDriver:
- *
- *   val driver = AndroidSqliteDriver(
- *       ObscuraDatabase.Schema,
- *       context,
- *       "obscura.db",
- *       factory = SupportSQLiteOpenHelper.Factory(SQLCipherOpenHelperFactory(passphrase))
- *   )
- *   val client = ObscuraClient(config, driver)
+ * The kit. With [driver] null the kit opens [ObscuraConfig.databasePath] (or an in-memory database)
+ * and creates the schema; an app-supplied driver must already have it.
  */
 class ObscuraClient(
-    val config: ObscuraConfig,
-    externalDriver: SqlDriver? = null,
-    val sessionStorage: SessionStorage = NoOpSessionStorage
+    config: ObscuraConfig,
+    driver: SqlDriver?,
+    sessionStorage: SessionStorage,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ConnectionState> = _connectionState
-
-    private val _authState = MutableStateFlow(AuthState.LOGGED_OUT)
-    val authState: StateFlow<AuthState> = _authState
-
-    private val _friendList = MutableStateFlow<List<FriendData>>(emptyList())
-    internal val friendList: StateFlow<List<FriendData>> = _friendList
-
-    private val _friendsChanged = MutableSharedFlow<Unit>(
-        replay = 1,
-        extraBufferCapacity = 1,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-
-    /** Payload-free wake event. Call [getFriends] for the canonical current rows. */
-    val friendsChanged: SharedFlow<Unit> = _friendsChanged.asSharedFlow()
-
-    private val driver = externalDriver ?: if (config.databasePath != null) {
-        JdbcSqliteDriver("jdbc:sqlite:${config.databasePath}")
-    } else {
-        JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
-    }
-    internal val db: ObscuraDatabase
-
-    internal val signalStore: SignalStore
-    internal val api = APIClient(config.apiUrl)
-    internal val gateway: GatewayConnection
-
-    private val friends: FriendStore
-    internal val devices: DeviceStore
-    internal val messenger: Messenger
-
-    /**
-     * The durable inbox. The kit writes rows before it acks; the app drains them.
-     */
-    val inbox: InboxStore
-
-    /**
-     * Opaque storage for the app's entries.
-     */
-    val entries: EntryStore
-
-    private val typingTracker: TypingTracker
-
-    // Session — shared mutable state
-    private val session = ClientSession()
-
-    // Managers
-    private val authManager: AuthManager
-    internal val messageSender: MessageSender
-    private val friendshipManager: FriendshipManager
-    private val contentService: ContentService
-    private val deviceManager: DeviceManager
-
-    // Identity — delegate to session
-    var userId: String?
-        get() = session.userId
-        private set(value) { session.userId = value }
-    var deviceId: String?
-        get() = session.deviceId
-        private set(value) { session.deviceId = value }
-    var username: String?
-        get() = session.username
-        private set(value) { session.username = value }
-    var refreshToken: String?
-        get() = session.refreshToken
-        private set(value) { session.refreshToken = value }
-    val registrationId: Int get() = signalStore.getLocalRegistrationId()
-    val token: String? get() = api.token
-
-    /** Structured logger for security events. Set to a custom implementation for production. */
     var logger: ObscuraLogger = NoOpLogger
 
-    /**
-     * The kit's inbound-message stream and the intended public consumer API:
-     * exactly one consumer should drain this channel (e.g. the app's
-     * process-scoped session), classify each [MessageWakeEvent], and fan out to
-     * UI/notifications. Buffered so messages that arrive before a consumer
-     * attaches (e.g. an FCM cold-start) are not dropped.
-     */
-    val incomingMessages = Channel<MessageWakeEvent>(capacity = 1000)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    /** Debug log — ring buffer of last 200 events. Thread-safe. */
-    internal val debugLog = ConcurrentLinkedDeque<String>()
-    private fun log(msg: String) {
-        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-        debugLog.addFirst("[$ts] $msg")
-        while (debugLog.size > 200) debugLog.removeLast()
-    }
-
-    private var envelopeJob: Job? = null
-
-    // M13: Decrypt rate limiting per sender
-    private val decryptFailures = mutableMapOf<String, Pair<Int, Long>>() // senderId -> (count, windowStart)
-
-    private val pushDrainMutex = Mutex()
-    private val processedEnvelopeCount = AtomicLong()
-    private val lastProcessedEnvelopeAtMs = AtomicLong()
+    private val sqlDriver: SqlDriver
+    internal val db: ObscuraDatabase
 
     init {
-        if (externalDriver == null) {
-            ObscuraDatabase.Schema.create(driver)
-        }
-        // Every driver, including an app-supplied one: `EntryStore.erase` relies on freed pages
-        // being zeroed.
-        try { driver.pragma("PRAGMA secure_delete = ON") } catch (e: Exception) { log("PRAGMA secure_delete failed: ${e.message}") }
-        db = ObscuraDatabase(driver)
+        if (driver != null && config.databasePath != null) throw ObscuraError.InvalidArgument("Pass either a driver or a databasePath, not both")
+        sqlDriver = driver ?: JdbcSqliteDriver(config.databasePath?.let { "jdbc:sqlite:$it" } ?: JdbcSqliteDriver.IN_MEMORY)
+            .also { ObscuraDatabase.Schema.create(it) }
+        // EntryStore.erase relies on freed pages being zeroed.
+        sqlDriver.pragma("PRAGMA secure_delete = ON")
+        db = ObscuraDatabase(sqlDriver)
+    }
 
-        signalStore = SignalStore(db)
-        signalStore.onIdentityChanged = { address, _, _ ->
-            logger.identityChanged(address)
-        }
-        friends = FriendStore(db)
-        devices = DeviceStore(db)
+    internal val signalStore = SignalStore(db).apply { onIdentityChanged = { logger.identityChanged(it) } }
+    private val friends = FriendStore(db)
+    internal val devices = DeviceStore(db)
+
+    val inbox = InboxStore(db) { ids, reason -> log("INBOX discarded ${ids.size} row(s) ($reason): $ids") }
+    val entries = EntryStore(db, sqlDriver)
+
+    internal val auth: AuthManager
+    internal val api: APIClient
+    private val gateway: GatewayConnection
+    private val messenger: Messenger
+    internal val sender: MessageSender
+    private val typing = TypingTracker(scope)
+
+    init {
+        lateinit var authRef: AuthManager
+        api = APIClient(config.apiUrl) { authRef.credentials?.token }
+        auth = AuthManager(
+            api, signalStore, devices, sessionStorage, config.deviceName, scope,
+            logger = { logger },
+            onRejected = { credentials, generation -> endSession(revoke = false, expected = credentials, expectedGeneration = generation) },
+        )
+        authRef = auth
+        gateway = GatewayConnection(api, scope, beforeConnect = {
+            val self = requireFreshToken()
+            refreshOwnDirectory(self)
+        }, log = ::log)
         messenger = Messenger(signalStore, api)
-        inbox = InboxStore(db)
-        entries = EntryStore(db, driver)
-        // A discard is deliberate data loss, so it goes to the security log.
-        inbox.onDiscard = { ids, reason ->
-            logger.log("INBOX DISCARD ${ids.size} row(s) reason=\"$reason\" ids=$ids")
-            log("INBOX DISCARD ${ids.size} row(s): $reason")
-        }
-
-        typingTracker = TypingTracker()
-        gateway = GatewayConnection(api, scope)
-
-
-        // Create ClientContext — shared dependencies for all managers
-        val ctx = ClientContext(
-            session = session,
-            api = api,
-            signalStore = signalStore,
-            friends = friends,
-            devices = devices,
-        )
-
-        // Create managers — order matters: AuthManager before MessageSender
-        authManager = AuthManager(
-            ctx = ctx,
-            config = config,
-            gateway = gateway,
-            scope = scope,
-            setAuthState = { _authState.value = it },
-            onSessionRejected = { logout() },
-            loggerProvider = { logger },
-            onLogout = {
-                envelopeJob?.cancel()
-                gateway.disconnect() // fires onStateChanged → _connectionState = DISCONNECTED
-                // Data stays — logout is not a wipe. Login again restores full state.
-            },
-            onWipeDevice = {
-                envelopeJob?.cancel()
-                gateway.disconnect() // fires onStateChanged → _connectionState = DISCONNECTED
-                friends.clear()
-                devices.clear()
-                db.signalKeyQueries.deleteLocalIdentity()
-                db.signalKeyQueries.deleteAllSignalData()
-                db.signalKeyQueries.deleteAllPreKeys()
-                db.signalKeyQueries.deleteAllSignedPreKeys()
-                db.signalKeyQueries.deleteAllSessions()
-                db.signalKeyQueries.deleteAllSenderKeys()
-                db.modelEntryQueries.deleteAllEntries()
-                // A device wipe must also destroy the inbox's decrypted plaintext.
-                inbox.wipe()
-            },
-            onSessionChanged = { persistSession() }
-        )
-
-        messageSender = MessageSender(session, api, messenger, devices) { authManager.ensureFreshToken() }
-        ctx.messageSender = messageSender
-
-        // Wire gateway reconnect token refresh
-        gateway.ensureFreshToken = { authManager.ensureFreshToken() }
-
-        // connectionState is a pure projection of the real socket state. The
-        // gateway owns the socket lifecycle (connect, background drop, auto-
-        // reconnect); this callback is the SINGLE writer of _connectionState, so
-        // there's exactly one source of truth. It fires synchronously from the
-        // gateway (see GatewayConnection.setState), which is why connect() — after
-        // awaiting the open signal — observes CONNECTED without a race.
-        gateway.onStateChanged = { gs ->
-            _connectionState.value = when (gs) {
-                GatewayState.DISCONNECTED -> ConnectionState.DISCONNECTED
-                GatewayState.CONNECTING   -> ConnectionState.CONNECTING
-                GatewayState.RECONNECTING -> ConnectionState.RECONNECTING
-                GatewayState.CONNECTED    -> ConnectionState.CONNECTED
-            }
-        }
-
-        friendshipManager = FriendshipManager(ctx = ctx)
-
-        contentService = ContentService(ctx = ctx)
-
-        deviceManager = DeviceManager(ctx)
-
-        // Reactive observation — auto-updates StateFlows when DB changes
-        startDatabaseObservation()
+        sender = MessageSender(api, messenger, devices) { auth.credentials?.deviceId }
     }
 
-    private fun startDatabaseObservation() {
-        scope.launch {
-            db.friendQueries.selectAll()
-                .asFlow()
-                .mapToList(Dispatchers.IO)
-                .map { rows -> rows.map { it.toFriendData() } }
-                .collect {
-                    _friendList.value = it
-                    _friendsChanged.tryEmit(Unit)
-                }
-        }
+    val authState: StateFlow<AuthState> get() = auth.state
+    val connectionState: StateFlow<ConnectionState> get() = gateway.state
 
-    }
+    val userId: String? get() = auth.credentials?.userId
+    val deviceId: String? get() = auth.credentials?.deviceId
+    val username: String? get() = auth.credentials?.username
 
-    /** Current friend rows. Aggregate wake events intentionally carry no copies of this payload. */
-    fun getFriends(): List<FriendData> = _friendList.value
+    /** Payload-free; emits on collection and on every friend change. Call [getFriends] for the rows. */
+    val friendsChanged: Flow<Unit> = friends.changes
 
-    /** Snapshot of the bounded debug ring, newest first. Debug lines are never live events. */
+    private val newEntries = Channel<String>(MESSAGE_RECEIVED_CAPACITY, BufferOverflow.DROP_OLDEST)
+
+    /** The model key of each newly inboxed APP_ENTRY row. One consumer. The inbox is the delivery path. */
+    val messageReceived: ReceiveChannel<String> = newEntries
+
+    private val debugLog = ConcurrentLinkedDeque<String>()
+
+    /** The last [DEBUG_LOG_SIZE] log lines, newest first. */
     fun getDebugLog(): List<String> = debugLog.toList()
 
-    suspend fun register(username: String, password: String) {
-        authManager.register(username, password)
-    }
-    suspend fun login(username: String, password: String): LoginScenario =
-        authManager.login(username, password)
-    suspend fun loginAndProvision(username: String, password: String, deviceName: String = "Device 2") =
-        authManager.loginAndProvision(username, password, deviceName)
+    suspend fun register(username: String, password: String) = auth.register(username, password)
 
-    fun restoreSession(
-        token: String,
-        refreshToken: String?,
-        userId: String,
-        deviceId: String?,
-        username: String?,
-    ) {
-        authManager.restoreSession(token, refreshToken, userId, deviceId, username)
-    }
+    suspend fun login(username: String, password: String): LoginScenario = auth.login(username, password)
 
-    fun hasSession(): Boolean = authManager.hasSession()
+    suspend fun loginAndProvision(username: String, password: String) = auth.loginAndProvision(username, password)
 
     /**
-     * Log out: tears down the connection and forgets the session, INCLUDING the
-     * persisted [sessionStorage] blob, so the app won't try to restore it next
-     * launch. Local data (friends, messages, entries, inbox) is kept — see [wipeDevice] /
-     * [fullLogout] to also erase that. Symmetric with [persistSession].
-     */
-    suspend fun logout() {
-        authManager.logout()
-        sessionStorage.clear()
-    }
-    suspend fun wipeDevice() = authManager.wipeDevice()
-    suspend fun ensureFreshToken(): TokenStatus = authManager.ensureFreshToken()
-
-    // ─── Session Persistence (kit-owned) ──────────────────
-
-    /** Persist current session to storage. Auto-called on auth/connect. */
-    fun persistSession() {
-        // Merge onto existing storage rather than replacing it, so any non-session key the host app
-        // keeps in the same blob survives a session-only save regardless of whether the
-        // SessionStorage impl patches keys or overwrites wholesale.
-        val data = (sessionStorage.load()?.toMutableMap() ?: mutableMapOf()).apply {
-            put("token", token)
-            put("refreshToken", refreshToken)
-            put("userId", userId)
-            put("deviceId", deviceId)
-            put("username", username)
-        }
-        sessionStorage.save(data)
-        log("SESSION persisted user=$username")
-    }
-
-    /**
-     * Restore session from storage and connect. Returns true when restored and connected. On false
-     * the session is either signed out (refresh token rejected, storage cleared) or kept offline,
-     * still authenticated, for a later [ensureConnected].
+     * Restore the stored session. True when restored; the client then connects if it can and stays
+     * authenticated but disconnected if it cannot. Never throws.
      */
     suspend fun restorePersistedSession(): Boolean {
-        val saved = sessionStorage.load() ?: return false
-        val savedToken = saved["token"] as? String ?: return false
-        val savedUserId = saved["userId"] as? String ?: return false
-        if (savedToken.isBlank() || savedUserId.isBlank()) return false
-
-        log("SESSION restoring user=${saved["username"]}")
-        restoreSession(
-            token = savedToken,
-            refreshToken = saved["refreshToken"] as? String,
-            userId = savedUserId,
-            deviceId = saved["deviceId"] as? String,
-            username = saved["username"] as? String,
-        )
-
-
-        // Refresh token + connect. A rejected refresh token has already signed out and cleared
-        // storage; an unavailable server keeps the session so the app still opens offline.
         try {
-            when (ensureFreshToken()) {
-                TokenStatus.FRESH -> Unit
-                TokenStatus.REJECTED -> {
-                    log("SESSION refresh token rejected — signed out")
-                    return false
-                }
-                TokenStatus.UNAVAILABLE -> {
-                    log("SESSION restored offline; connect deferred")
-                    return false
-                }
-            }
-            connect()
-            persistSession() // save refreshed tokens
-            log("SESSION restored and connected")
-            return true
-        } catch (e: Exception) {
-            log("SESSION restore connect failed: ${e.message}")
-            return false
-        }
-    }
-
-    // ─── Facade Methods (bridges call these 1:1) ────────────
-
-    /**
-     * Decode a friend code and befriend the user. See [FriendCode] for the format.
-     *
-     * Delegate to [FriendCode] so URL-safe base64 and required-field validation have one
-     * implementation.
-     *
-     * The soft-hyphen and whitespace strip is kept here — it is about text that survived a copy out
-     * of an iOS share sheet, not about the encoding.
-     */
-    suspend fun addFriendByCode(code: String) {
-        val cleaned = code
-            .replace("\u00AD", "") // strip soft hyphens from iOS copy
-            .replace("\\s".toRegex(), "")
-        val decoded = FriendCode.decode(cleaned)
-        log("ADD_FRIEND_BY_CODE ${decoded.username} (${decoded.userId})")
-        befriend(decoded.userId, decoded.username)
-    }
-
-    /** Generate a friend code for sharing. See [FriendCode]. */
-    fun friendCode(): String {
-        val uid = userId ?: throw ObscuraError.NotAuthenticated()
-        val uname = username ?: throw ObscuraError.NotAuthenticated()
-        return FriendCode.encode(uid, uname)
-    }
-
-    /**
-     * Full logout — handles ALL teardown in correct order.
-     * Bridges call this single method instead of orchestrating cleanup.
-     */
-    suspend fun fullLogout() {
-        log("FULL_LOGOUT start")
-        envelopeJob?.cancel()
-        authManager.tokenRefreshJob?.cancel()
-        preKeyStatusJob?.cancel()
-        // SignalManager's own scope outlives this object otherwise: every `receive` launches a
-        // 3.1s expiry coroutine, and after a logout those keep running (and keep mutating typing
-        // state) for a user who is gone.
-        typingTracker.shutdown()
-        gateway.disconnect() // fires onStateChanged → _connectionState = DISCONNECTED
-        try { authManager.logout() } catch (e: Exception) { log("logout during fullLogout failed: ${e.message}") }
-        _authState.value = AuthState.LOGGED_OUT
-        _friendList.value = emptyList()
-        sessionStorage.clear()
-        log("FULL_LOGOUT complete")
-    }
-
-    // ─── Connect / Disconnect ───────────────────────────────
-
-    // Serializes connect() so a foreground ensureConnected() and a bridge connect()
-    // (or overlapping lifecycle events) can't run the connect body concurrently.
-    private val connectMutex = Mutex()
-
-    suspend fun connect() = connectMutex.withLock {
-        if (_connectionState.value == ConnectionState.CONNECTED) return@withLock
-        log("CONNECT start")
-        try {
-            ensureFreshToken()
-            // gateway.connect() drives _connectionState via onStateChanged (the sole
-            // writer): CONNECTING now, then CONNECTED on open — set synchronously
-            // before this suspends-return — or DISCONNECTED if the open fails (throws).
-            gateway.connect()
-        } catch (e: Exception) {
-            log("CONNECT failed — ${e.message}")
+            if (!auth.restore()) return false
+        } catch (e: CancellationException) {
             throw e
-        }
-        log("CONNECT ok — websocket open")
-        startEnvelopeLoop()
-        authManager.startTokenRefresh()
-        startPreKeyStatusListener()
-        persistSession() // auto-save refreshed tokens
-    }
-
-    /**
-     * Idempotent reconnect entrypoint for app lifecycle events (e.g. foreground
-     * resume). Reconnects only when authenticated and fully disconnected, so the
-     * app can call it unconditionally on resume: it no-ops while a connect or the
-     * gateway's own auto-reconnect (CONNECTING) is already in flight, and only
-     * kicks off a fresh connect when the socket is genuinely down.
-     */
-    suspend fun ensureConnected() {
-        if (authState.value != AuthState.AUTHENTICATED) return
-        if (connectionState.value != ConnectionState.DISCONNECTED) return
-        connect()
-    }
-
-    fun disconnect() {
-        log("DISCONNECT")
-        authManager.tokenRefreshJob?.cancel()
-        envelopeJob?.cancel()
-        // Without this it keeps consuming gateway.preKeyStatus and calling replenishPreKeys() —
-        // which POSTs /v1/devices/keys with whatever token is left, i.e. a null one after a logout.
-        preKeyStatusJob?.cancel()
-        gateway.disconnect() // fires onStateChanged → _connectionState = DISCONNECTED
-    }
-
-    // ─── Push Notifications ─────────────────────────────────
-
-    /**
-     * Register FCM/APNS push token with server. Requires device-scoped JWT.
-     * Safe to call multiple times — server upserts by deviceId.
-     */
-    suspend fun registerPushToken(token: String) {
-        api.registerPushToken(token)
-    }
-
-    /**
-     * Drain queued envelopes after a silent push wake. Connects if needed, waits up to
-     * [timeoutMs] ms (returning early when the receive path stays idle for 500ms), and returns
-     * the number of successfully processed envelopes. Does NOT disconnect afterwards — the OS will
-     * freeze the app when done.
-     *
-     * This observes successful receive-path persistence without consuming [incomingMessages].
-     * The app remains that channel's single consumer and owns all notification classification.
-     *
-     * If the socket already looked CONNECTED and the drain still yields nothing, it is torn down and
-     * re-established once before giving up — see [shouldForceReconnectAfterPush].
-     *
-     * Returns zero after both connection attempts fail, which is indistinguishable from a
-     * successful drain that processed no envelopes. Connection failure is logged.
-     */
-    suspend fun processPendingMessages(timeoutMs: Long): Int =
-        pushDrainMutex.withLock { performPendingMessageDrain(timeoutMs) }
-
-    private suspend fun performPendingMessageDrain(timeoutMs: Long): Int {
-        val processedAtStart = processedEnvelopeCount.get()
-        val startedConnected = _connectionState.value == ConnectionState.CONNECTED
-
-        if (!startedConnected && !connectWithOneRetry()) return 0
-
-        val budget = System.currentTimeMillis() + timeoutMs
-        awaitEnvelopes(budget)
-
-        var processed = processedEnvelopeCount.get() - processedAtStart
-
-        // An empty drain on a socket that claimed CONNECTED means the push contradicted the
-        // connection state; [shouldForceReconnectAfterPush] explains why that is the reading.
-        if (shouldForceReconnectAfterPush(
-                processed = processed,
-                startedConnected = startedConnected,
-                lastProcessedAtMs = lastProcessedEnvelopeAtMs.get(),
-                nowMs = System.currentTimeMillis(),
-                recentActivityWindowMs = PUSH_DRAIN_RECENT_ACTIVITY_MS,
-            )
-        ) {
-            log("PUSH DRAIN contradiction — push arrived but nothing drained on a live socket; reconnecting")
-            logger.log("push drain: no envelopes on a connected socket; forcing reconnect")
-
-            // Same budget, not a fresh one: [timeoutMs] is the caller's hard cap, and the first
-            // wait returns after ~500ms of idle, so there is normally plenty of it left.
-            if (forceReconnect()) {
-                awaitEnvelopes(budget)
-                processed = processedEnvelopeCount.get() - processedAtStart
-            }
-        }
-
-        return processed.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
-    }
-
-    /**
-     * Tear down a socket we no longer believe in and establish a fresh one.
-     *
-     * [connect] alone cannot do this: it early-returns while the state says CONNECTED, which is
-     * exactly the state we are disputing.
-     */
-    private suspend fun forceReconnect(): Boolean {
-        disconnect()
-        return connectWithOneRetry()
-    }
-
-    /**
-     * Connect, retrying one transient failure. Returns false when both attempts fail.
-     *
-     * The Int return of a drain cannot distinguish "no envelopes" from "could not connect", so
-     * failure has to stay observable through the logger.
-     */
-    private suspend fun connectWithOneRetry(): Boolean {
-        try {
-            connect()
         } catch (e: Exception) {
-            log("PUSH DRAIN connect attempt 1 failed: ${e.message}")
-            logger.log("push drain: connect failed (attempt 1/2): ${e.message}")
-            delay(PUSH_DRAIN_RECONNECT_RETRY_MS)
-            try {
-                connect()
-            } catch (e2: Exception) {
-                log("PUSH DRAIN connect attempt 2 failed — returning zero: ${e2.message}")
-                logger.log("push drain ABORTED: could not connect after 2 attempts: ${e2.message}")
-                return false
-            }
-        }
-        return true
-    }
-
-    /** Wait for the receive path to go quiet for [PUSH_DRAIN_IDLE_THRESHOLD_MS], or until [deadline]. */
-    private suspend fun awaitEnvelopes(deadline: Long) {
-        var lastActivityAt = System.currentTimeMillis()
-
-        while (System.currentTimeMillis() < deadline) {
-            val observedAt = lastProcessedEnvelopeAtMs.get()
-            if (observedAt > lastActivityAt) {
-                lastActivityAt = observedAt
-            }
-            if (System.currentTimeMillis() - lastActivityAt > PUSH_DRAIN_IDLE_THRESHOLD_MS) {
-                break
-            } else {
-                delay(50)
-            }
-        }
-    }
-
-    private var preKeyStatusJob: Job? = null
-    private fun startPreKeyStatusListener() {
-        preKeyStatusJob?.cancel()
-        preKeyStatusJob = scope.launch {
-            for (status in gateway.preKeyStatus) {
-                if (status.oneTimePreKeyCount < status.minThreshold) {
-                    replenishPreKeys()
-                }
-            }
-        }
-    }
-
-    /**
-     * At most one replenishment in flight at a time.
-     *
-     * [checkAndReplenishPreKeys] fires once per received envelope, so draining a backlog of N
-     * messages launched N coroutines that all observed a count below the threshold, all computed
-     * the same `highestId + 1` range, and all POSTed 50 keys — N uploads of the same key ids.
-     */
-    private val replenishInFlight = AtomicBoolean(false)
-
-    private fun checkAndReplenishPreKeys() {
-        if (!replenishInFlight.compareAndSet(false, true)) return
-        scope.launch {
-            try {
-                if (signalStore.getPreKeyCount() < PREKEY_MIN_COUNT) {
-                    replenishPreKeys()
-                }
-            } catch (e: Exception) { /* non-fatal */ }
-            finally { replenishInFlight.set(false) }
-        }
-    }
-
-    private suspend fun replenishPreKeys() {
-        try {
-            val highestId = signalStore.getHighestPreKeyId().toInt()
-            val newPreKeys = SignalKeyUtils.generateOneTimePreKeys(signalStore, highestId + 1, PREKEY_REPLENISH_COUNT)
-
-            val spkRecord = signalStore.loadSignedPreKey(1)
-
-            api.uploadDeviceKeys(UploadDeviceKeysRequest(
-                identityKey = signalStore.getIdentityKeyPair().publicKey.serialize().toBase64(),
-                registrationId = signalStore.getLocalRegistrationId(),
-                signedPreKey = spkRecord.toApiJson(),
-                oneTimePreKeys = newPreKeys.toApiJson()
-            ))
-        } catch (e: Exception) {
-            logger.preKeyReplenishFailed(e.message ?: "unknown")
-        }
-    }
-
-    private fun startEnvelopeLoop() {
-        envelopeJob?.cancel()
-        envelopeJob = scope.launch {
-            for (envelope in gateway.envelopes) {
-                // The envelope carries a sender user hint and the device UUID that selects the
-                // inbound Signal session. The friend graph supplies only the display name.
-                val senderId = try {
-                    val bytes = envelope.senderId.toByteArray()
-                    if (bytes.size != 16) null
-                    else UuidCodec.bytesToUuid(bytes).toString()
-                } catch (_: Exception) { null }
-
-                if (senderId == null) {
-                    // No sending user on the wire — a malformed/unroutable envelope. We do NOT guess.
-                    // Leave it on the server (persist-then-ack); do not ack.
-                    log("RECV FAIL envelope carries no sender_id (left on server, not acked)")
-                    continue
-                }
-
-                // `Envelope.id` is the inbox dedupe key. A short id would decode to the nil UUID,
-                // so every such envelope would collide, be treated as a duplicate, and be acked
-                // without being stored.
-                val envelopeIdBytes = envelope.id.toByteArray()
-                if (envelopeIdBytes.size != 16) {
-                    log("RECV FAIL envelope id is ${envelopeIdBytes.size} bytes, expected 16 " +
-                        "(left on server, not acked)")
-                    continue
-                }
-                val envelopeId = UuidCodec.bytesToUuid(envelopeIdBytes).toString()
-
-                // PERSIST-THEN-ACK. An ACK is a DELETE on the server (gateway AckBatcher ->
-                // message_service.delete_batch -> DELETE FROM messages). So we ACK ONLY WHAT WE
-                // HAVE DURABLY PERSISTED. Every path below that has not persisted the message must
-                // skip the ack and leave it on the server, where a fresh MessagePump redelivers it
-                // on the next reconnect. There is exactly one ack in this loop, and it is the last
-                // thing that happens after a successful decrypt + persist.
-
-                // A rate-limited sender is deferred, not processed or acknowledged.
-                if (isDecryptRateLimited(senderId)) {
-                    log("RECV BLOCKED rate-limited sender=$senderId (left on server, not acked)")
-                    continue
-                }
-
-                try {
-                    // 1. DECRYPT. Throws on a bad MAC / missing session -> falls to catch -> no ack.
-                    // The session is selected by the sending DEVICE (sender_device_id); a valid MAC
-                    // then authenticates the sender. decrypted.sourceUserId == envelope.sender_id.
-                    val decrypted = messenger.decrypt(envelope)
-                    val msg = decrypted.clientMessage
-                    val sourceUserId = decrypted.sourceUserId
-
-                    log("RECV ${msg.payloadCase.name} from=${sourceUserId.take(8)} device=${decrypted.senderDeviceId.take(8)}")
-
-                    // 2. PERSIST (durable). routeMessage's handlers write to the SQLDelight store
-                    // (e.g. inbox.put; friends.add). This is the source of truth. If it throws, we
-                    // fall to catch and do NOT ack, so the message survives on the server.
-                    // `envelopeId` is the canonical text form of the 16 validated bytes above —
-                    // one encoding, so two spellings of one envelope can never produce two rows.
-                    val isNew = routeMessage(msg, sourceUserId, decrypted.senderDeviceId, envelopeId)
-
-                    decryptFailures.remove(senderId)
-
-                    // DISPLAY NAME: for a friend REQUEST/RESPONSE — first contact, sender
-                    // not yet a friend — the display username is the legitimate payload bootstrap.
-                    // For every other payload the display name is NOT read here; it comes from the
-                    // friend graph keyed on sourceUserId when the app renders the conversation.
-                    val username = when (msg.payloadCase) {
-                        ClientMessage.PayloadCase.FRIEND_REQUEST -> msg.friendRequest.username
-                        ClientMessage.PayloadCase.FRIEND_ACCEPT -> friends.get(sourceUserId)?.username ?: ""
-                        else -> ""
-                    }
-                    val received = MessageWakeEvent(
-                        type = WireCodec.decodeType(msg.payloadCase),
-                        username = username,
-                        sourceUserId = sourceUserId,
-                        senderDeviceId = decrypted.senderDeviceId,
-                        model = msg.takeIf {
-                            it.payloadCase == ClientMessage.PayloadCase.APP_ENTRY
-                        }?.appEntry?.model?.takeIf(String::isNotBlank),
-                        raw = msg
-                    )
-
-                    // 3. NOTIFY (best-effort). These emits are wake-up notifications over data that
-                    // step 2 has ALREADY durably persisted -- the app model is "event -> refetch
-                    // everything from the store", and the store, not this channel/flow, is the
-                    // durable delivery path. So a dropped emit loses a NOTIFICATION, never a
-                    // message, precisely because persistence happened-before the ack below. We keep
-                    // them droppable rather than a suspending send() on purpose: incomingMessages is
-                    // a 1000-capacity channel the app does not always drain, and a blocking send
-                    // would stall the whole receive loop (and thus all acking) behind a full buffer.
-                    // We log a drop so it is observable and never silent.
-                    //
-                    // Skipped entirely for a redelivery (`isNew == false`). The app already has that
-                    // message; announcing it again can make the app post a duplicate notification.
-                    lastProcessedEnvelopeAtMs.set(System.currentTimeMillis())
-                    processedEnvelopeCount.incrementAndGet()
-                    if (isNew && !incomingMessages.trySend(received).isSuccess) {
-                        log("RECV NOTE incomingMessages full; dropped a wake-up (data already persisted)")
-                    }
-
-                    checkAndReplenishPreKeys()
-
-                    // 4. ACK. Reached only when decrypt AND persist both succeeded — including the
-                    // redelivery case, where "persisted" means the row was already there. This is
-                    // the sole ack in the loop; the rate-limit early-return and the catch below both
-                    // skip it.
-                    //
-                    // An ack failure is the event the whole persist-then-ack design pivots on: the
-                    // server keeps its copy and redelivers, which is safe but is also the first
-                    // symptom of a wedged queue. It goes to the structured logger, not only to the
-                    // 200-entry in-memory ring buffer where nobody will ever see it.
-                    try {
-                        gateway.ack(listOf(envelope.id))
-                    } catch (e: Exception) {
-                        log("envelope ack failed: ${e.message}")
-                        logger.ackFailed(envelopeId, e.message ?: "unknown")
-                    }
-                } catch (e: Exception) {
-                    // Decrypt failed or persistence threw. The message is not
-                    // durably stored, so leave it unacked for reconnect redelivery.
-                    log("RECV FAIL sender=$senderId err=${e.message?.take(60)} (left on server, not acked)")
-                    trackDecryptFailure(senderId)
-                    logger.decryptFailed(senderId, e.message ?: "unknown")
-                }
-            }
-        }
-    }
-
-    private fun isDecryptRateLimited(senderId: String): Boolean {
-        val (count, windowStart) = decryptFailures[senderId] ?: return false
-        val now = System.currentTimeMillis()
-        if (now - windowStart > DECRYPT_FAILURE_WINDOW_MS) {
-            decryptFailures.remove(senderId)
+            log("SESSION restore failed: ${e.message}")
             return false
         }
-        return count >= MAX_DECRYPT_FAILURES
-    }
-
-    private fun trackDecryptFailure(senderId: String) {
-        val now = System.currentTimeMillis()
-        val (count, windowStart) = decryptFailures[senderId] ?: Pair(0, now)
-        if (now - windowStart > DECRYPT_FAILURE_WINDOW_MS) {
-            decryptFailures[senderId] = Pair(1, now)
-        } else {
-            decryptFailures[senderId] = Pair(count + 1, windowStart)
-        }
-    }
-
-    /**
-     * Persist a decrypted message, by payload class.
-     *
-     * Called from the envelope loop **before** the ack, and it throws on a failed durable write so
-     * the ack is skipped and the message survives on the server.
-     *
-     * [classify] decides what each arm may do; this method performs the corresponding handler.
-     *
-     * Returns false when this envelope was a REDELIVERY the inbox absorbed, so the caller can skip
-     * the wake-up emits. It still gets acked — see [inboxMessage].
-     */
-    internal suspend fun routeMessage(
-        msg: ClientMessage,
-        sourceUserId: String,
-        senderDeviceId: String?,
-        envelopeId: String,
-    ): Boolean {
-        when (payloadDisposition(msg.payloadCase)) {
-            PayloadDisposition.INBOXED -> return inboxMessage(msg, sourceUserId, senderDeviceId, envelopeId)
-
-            PayloadDisposition.DROPPABLE, PayloadDisposition.KIT_INTERNAL -> when (msg.payloadCase) {
-                ClientMessage.PayloadCase.FRIEND_REQUEST -> handleFriendRequest(msg, sourceUserId)
-                ClientMessage.PayloadCase.FRIEND_ACCEPT -> handleFriendAccept(sourceUserId)
-                ClientMessage.PayloadCase.DEVICE_ANNOUNCE -> handleDeviceAnnounce(msg, sourceUserId)
-                ClientMessage.PayloadCase.DEVICE_LINK_APPROVAL -> handleLinkApproval(msg, sourceUserId)
-                ClientMessage.PayloadCase.TYPING_SIGNAL ->
-                    handleTypingSignal(msg, sourceUserId, senderDeviceId)
-                else -> error("classified ${msg.payloadCase.name} as kit-internal with no handler")
-            }
+        try {
+            connect()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("SESSION restored offline: ${e.message}")
         }
         return true
     }
 
-    /**
-     * Write an inboxed payload to the durable inbox.
-     *
-     * If the write throws, nothing is acked and the message stays on the server — that is the whole
-     * point of persist-then-ack and the reason this is not an event stream.
-     *
-     * Returns **false when the row was already there**. The caller still acknowledges the
-     * redelivery but skips wake-up events so the app cannot post a duplicate notification.
-     */
-    internal suspend fun inboxMessage(
-        msg: ClientMessage,
-        sourceUserId: String,
-        senderDeviceId: String?,
-        envelopeId: String,
-    ): Boolean {
-        val isAppEntry = msg.payloadCase == ClientMessage.PayloadCase.APP_ENTRY
-        val sync = msg.appEntry
+    /** Ends the session and revokes it on the server. Local data is kept. */
+    suspend fun logout() = endSession(revoke = true)
 
+    /** [logout], then delete every piece of local kit data. */
+    suspend fun wipeDevice() {
+        logout()
+        withContext(Dispatchers.IO) {
+            db.transaction {
+                sqlDriver.pragma("PRAGMA secure_delete = ON")
+                db.friendQueries.deleteAll()
+                db.deviceQueries.deleteAll()
+                db.deviceQueries.deleteIdentity()
+                db.modelEntryQueries.deleteAllEntries()
+                db.inboxQueries.deleteAll()
+                signalStore.clear()
+            }
+            sqlDriver.truncateWal()
+        }
+    }
+
+    private suspend fun endSession(revoke: Boolean, expected: Credentials? = null, expectedGeneration: Long? = null) {
+        val previous = try {
+            auth.end(expected, expectedGeneration)
+        } finally {
+            if (auth.credentials == null) {
+                gateway.disconnect()
+                val stopping = synchronized(this) {
+                    val jobs = listOfNotNull(receiveJob, replenishJob)
+                    jobs.forEach { it.cancel() }
+                    receiveJob = null
+                    replenishJob = null
+                    jobs
+                }
+                withContext(NonCancellable) { stopping.forEach { it.join() } }
+                typing.clear()
+            }
+        }
+        if (expected != null && previous == null) return
+        if (revoke && previous != null) auth.revoke(previous)
+        log("SESSION ended")
+    }
+
+    private suspend fun requireFreshToken(): Credentials {
+        if (auth.ensureFreshToken() == TokenStatus.REJECTED) throw ObscuraError.NotAuthenticated()
+        return auth.requireCredentials()
+    }
+
+    /** Returns once the socket is open. Idempotent; joins an in-flight connect. */
+    suspend fun connect() {
+        auth.requireCredentials()
+        startReceiving()
+        gateway.connect()
+        log("CONNECTED")
+    }
+
+    /** Closes the socket and stops reconnection. */
+    fun disconnect() {
+        gateway.disconnect()
+        log("DISCONNECTED")
+    }
+
+    private var receiveJob: Job? = null
+    private var replenishJob: Job? = null
+    private val processedEnvelopes = MutableStateFlow(0L)
+    @Volatile private var lastProcessedAtMs = 0L
+
+    private fun startReceiving() = synchronized(this) {
+        if (receiveJob?.isActive == true) return
+        receiveJob = scope.launch {
+            launch { for (envelope in gateway.envelopes) receive(envelope) }
+            launch {
+                for (status in gateway.preKeyStatus) {
+                    if (status.oneTimePreKeyCount < status.minThreshold) replenishPreKeys { true }
+                }
+            }
+        }
+    }
+
+    /** Persist, then ack. Anything that fails before the ack leaves the envelope on the server. */
+    internal suspend fun receive(envelope: Envelope, ack: suspend (ByteString) -> Unit = { gateway.ack(it) }) {
+        val envelopeId = UuidCodec.uuidString(envelope.id)
+        val senderUserId = UuidCodec.uuidString(envelope.senderId)
+        val senderDeviceId = UuidCodec.uuidString(envelope.senderDeviceId)
+        if (envelopeId == null || senderUserId == null || senderDeviceId == null) {
+            log("RECV malformed envelope (id, sender or sender device is not 16 bytes); not acked")
+            return
+        }
+        try {
+            if (inbox.contains(envelopeId)) {
+                ack(envelope.id)
+                markProcessed()
+                return
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV duplicate lookup or ack failed for $envelopeId: ${e.message}")
+            return
+        }
+        val plaintext = try {
+            messenger.decrypt(senderDeviceId, envelope.message)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV decrypt failed from $senderUserId: ${e.message}")
+            logger.decryptFailed(senderUserId, e.message ?: e.javaClass.simpleName)
+            return
+        }
+        try {
+            devices.add(senderUserId, senderDeviceId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV sender directory not stored: ${e.message}")
+            logger.databaseError("devices", "receive", e.message ?: e.javaClass.simpleName)
+            return
+        }
+        val message = try {
+            ClientMessage.parseFrom(plaintext)
+        } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
+            log("RECV invalid client message from $senderUserId: ${e.message}; not acked")
+            return
+        }
+        try {
+            route(message, senderUserId, senderDeviceId, envelopeId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV ${message.payloadCase.name} not stored: ${e.message}")
+            logger.databaseError("receive", message.payloadCase.name, e.message ?: e.javaClass.simpleName)
+            return
+        }
+        replenishPreKeys { signalStore.getPreKeyCount() < PREKEY_MIN_COUNT }
+        try {
+            ack(envelope.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("RECV ack failed for $envelopeId: ${e.message}")
+            logger.ackFailed(envelopeId, e.message ?: e.javaClass.simpleName)
+        }
+        markProcessed()
+    }
+
+    private fun markProcessed() {
+        lastProcessedAtMs = System.currentTimeMillis()
+        processedEnvelopes.value++
+    }
+
+    /** Store or apply a decrypted message. Throws when it could not be stored. */
+    internal suspend fun route(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String) {
+        when (payloadDisposition(message.payloadCase)) {
+            PayloadDisposition.INBOXED -> inboxMessage(message, senderUserId, senderDeviceId, envelopeId)
+            PayloadDisposition.KIT_INTERNAL ->
+                if (message.payloadCase == ClientMessage.PayloadCase.FRIEND_REQUEST) onFriendRequest(message, senderUserId)
+                else onFriendAccept(senderUserId)
+            PayloadDisposition.DROPPABLE -> onTypingSignal(message, senderUserId, senderDeviceId)
+        }
+    }
+
+    private suspend fun inboxMessage(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String) {
+        val entry = message.takeIf { it.payloadCase == ClientMessage.PayloadCase.APP_ENTRY }?.appEntry
         val inserted = inbox.put(
             InboxInsert(
                 envelopeId = envelopeId,
-                // Must match Swift byte for byte: the app branches on `kind` from both kits.
-                kind = WireCodec.decodeType(msg.payloadCase).ifEmpty { "UNKNOWN" },
-                senderUserId = sourceUserId,
+                kind = WireCodec.kind(message.payloadCase),
+                senderUserId = senderUserId,
                 senderDeviceId = senderDeviceId,
-                // AppEntry-derived, so null for an unknown arm — there is nothing to derive from.
-                modelKey = if (isAppEntry) sync.model else null,
-                entryId = if (isAppEntry) sync.id else null,
-                sentAt = if (isAppEntry) clampFutureTimestamp(sync.timestamp) else null,
-                // Opaque bytes. For an unknown arm this is the whole serialized message, because the
-                // kit cannot know which sub-field would have been the payload.
-                payload = if (isAppEntry) sync.data.toByteArray() else msg.toByteArray(),
+                modelKey = entry?.model,
+                entryId = entry?.id,
+                sentAt = entry?.let { clampFutureTimestamp(it.timestamp) },
+                // An unknown arm is stored whole: the kit cannot know which field is the payload.
+                payload = entry?.data?.toByteArray() ?: message.toByteArray(),
             )
         )
-
-        if (!inserted) {
-            // A redelivered envelope. Not an error: persist-then-ack guarantees this happens, and
-            // absorbing it here is what keeps depth() and the app's counts honest. Still acked by
-            // the caller; just not announced a second time.
-            log("RECV DUPLICATE envelope=${envelopeId.take(12)} kind=${msg.payloadCase.name} (already inboxed)")
-            return false
+        when {
+            !inserted -> log("RECV duplicate envelope $envelopeId")
+            entry != null -> newEntries.trySend(entry.model)
         }
-
-        return true
     }
 
-    /**
-     * Clamps a peer-supplied timestamp before it is stored, so a far-future `sentAt` cannot win
-     * every REPLACE conflict.
-     */
-    internal fun clampFutureTimestamp(sentAt: Long): Long {
-        val cap = System.currentTimeMillis() + 60_000L
-        // `AppEntry.timestamp` is a uint64 that protobuf-java surfaces as a signed Long, so a value
-        // >= 2^63 arrives negative. Swift compares as UInt64 and yields the cap; match it.
-        if (sentAt < 0) return cap
-        return minOf(sentAt, cap)
-    }
-
-    private suspend fun handleFriendRequest(msg: ClientMessage, sourceUserId: String) {
-        // sourceUserId is envelope.sender_id — the requester's USER id, server-stamped and
-        // authenticated by the Signal session that decrypted this message.
-        //
-        // The payload username is a first-contact label only. A known peer
-        // cannot use another request to replace its locally trusted name or friendship status.
-        val existing = friends.get(sourceUserId)
-        if (existing != null) {
-            if (existing.status == FriendStatus.PENDING_SENT) {
-                // Crossed requests are mutual consent. Accepting here prevents both peers from
-                // remaining permanently pending when they scan each other's codes.
-                friendshipManager.acceptFriend(sourceUserId)
-                logger.log("crossed friend request from $sourceUserId promoted to accepted")
-                return
+    private suspend fun onFriendRequest(message: ClientMessage, senderUserId: String) {
+        val existing = friends.get(senderUserId)
+        when (existing?.status) {
+            null -> friends.add(senderUserId, message.friendRequest.username, FriendStatus.PENDING_RECEIVED)
+            // Crossed requests are mutual consent.
+            FriendStatus.PENDING_SENT -> acceptFriend(senderUserId)
+            FriendStatus.ACCEPTED -> {
+                requireFreshToken()
+                sendFriendAccept(senderUserId)
+                log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged, acceptance replied")
             }
-            // Already known. The name comes from our graph, never from their payload; change nothing.
-            logger.log(
-                "friend request from already-known peer $sourceUserId (status=${existing.status.value}); " +
-                    "keeping stored name and status"
-            )
-            return
-        }
-        // Genuine first contact: the payload username is the only name that exists.
-        friends.add(sourceUserId, msg.friendRequest.username, FriendStatus.PENDING_RECEIVED)
-    }
-
-    private suspend fun handleFriendAccept(sourceUserId: String) {
-        // A response is valid only for a request we sent. Delivery alone must not allow an
-        // authenticated stranger to insert itself as an accepted friend.
-        val existing = friends.get(sourceUserId)
-        if (existing == null || existing.status != FriendStatus.PENDING_SENT) {
-            logger.log(
-                "ignoring unsolicited FRIEND_ACCEPT from $sourceUserId " +
-                    "(local status=${existing?.status?.value ?: "none"}; expected pending_sent)"
-            )
-            return
-        }
-
-        // Promote in place. The name stays the one WE recorded when we sent the request; the
-        // payload's username is not consulted.
-        friends.updateStatus(sourceUserId, FriendStatus.ACCEPTED)
-    }
-
-    internal suspend fun handleDeviceAnnounce(msg: ClientMessage, sourceUserId: String) {
-        devices.applyAnnounce(
-            sourceUserId,
-            msg.deviceAnnounce.devicesList.map { DeviceData(sourceUserId, it.id, it.name) },
-            clampFutureTimestamp(msg.timestamp),
-        )
-    }
-
-    internal suspend fun handleTypingSignal(
-        msg: ClientMessage,
-        sourceUserId: String,
-        senderDeviceId: String?,
-    ) {
-        try {
-            val signal = msg.typingSignal
-            if (signal.contextId.isBlank()) return
-            val deviceId = senderDeviceId ?: run {
-                log("TYPING DROPPED: authenticated sender device is missing")
-                return
-            }
-            when (WireCodec.decodeTypingState(signal.state)) {
-                TypingState.STARTED -> typingTracker.receive(
-                    contextId = signal.contextId,
-                    senderUserId = sourceUserId,
-                    senderDeviceId = deviceId,
-                )
-                TypingState.STOPPED -> typingTracker.clear(signal.contextId, deviceId)
-                null -> log("TYPING DROPPED: unspecified or unknown state")
-            }
-        } catch (e: Exception) {
-            log("typing signal handling failed: ${e.message}")
+            else -> log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged")
         }
     }
 
-    private suspend fun handleLinkApproval(msg: ClientMessage, sourceUserId: String) {
-        // Only accept approval from our own account
-        if (sourceUserId != userId) return
-        // Only process if we're actually waiting for approval
-        if (_authState.value != AuthState.PENDING_APPROVAL) return
-
-        val approval = msg.deviceLinkApproval
-
-        // Verify challenge matches the one we generated in our link code
-        val pendingChallenge = session.pendingLinkChallenge
-        if (pendingChallenge != null && approval.challengeResponse.size() > 0) {
-            val received = approval.challengeResponse.toByteArray()
-            if (!LinkCode.verifyChallenge(pendingChallenge, received)) {
-                logger.decryptFailed(sourceUserId, "Link approval challenge mismatch")
-                return
-            }
+    private suspend fun onFriendAccept(senderUserId: String) {
+        if (friends.get(senderUserId)?.status == FriendStatus.PENDING_SENT) {
+            friends.updateStatus(senderUserId, FriendStatus.ACCEPTED)
+        } else {
+            log("FRIEND_ACCEPT from $senderUserId without a pending request; ignored")
         }
+    }
 
-        // Import the account's device list and friend graph from the approval.
-        if (approval.ownDevicesCount > 0) {
-            devices.replace(sourceUserId, approval.ownDevicesList.map { DeviceData(sourceUserId, it.id, it.name) })
+    private fun onTypingSignal(message: ClientMessage, senderUserId: String, senderDeviceId: String) {
+        val signal = message.typingSignal
+        if (signal.contextId.isBlank()) return
+        when (WireCodec.decodeTypingState(signal.state)) {
+            TypingState.STARTED -> typing.started(signal.contextId, senderUserId, senderDeviceId)
+            TypingState.STOPPED -> typing.stopped(signal.contextId, senderDeviceId)
+            null -> log("TYPING with unspecified state from $senderUserId; ignored")
         }
-        if (approval.friendsExport.size() > 0) {
+    }
+
+    /** At most one replenish in flight; a backlog of envelopes would otherwise upload the same ids N times. */
+    private fun replenishPreKeys(needed: () -> Boolean) = synchronized(this) {
+        if (auth.credentials == null || replenishJob?.isActive == true) return
+        replenishJob = scope.launch {
             try {
-                for ((friend, friendDevices) in FriendExport.decode(approval.friendsExport.toStringUtf8())) {
-                    friends.add(friend.userId, friend.username, friend.status)
-                    devices.replace(friend.userId, friendDevices)
-                }
-            } catch (e: Exception) { log("friend import from link approval failed: ${e.message}") }
+                if (needed()) api.uploadDeviceKeys(SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.preKeyReplenishFailed(e.message ?: e.javaClass.simpleName)
+            }
         }
-
-        session.pendingLinkChallenge = null
-        _authState.value = AuthState.AUTHENTICATED
     }
 
-    // Attachment convenience methods resolve friend usernames. App entry sends use explicit
-    // recipient user ids through `send`.
+    private val drainMutex = Mutex()
 
     /**
-     * Send an application entry to the caller-named recipients, their devices, and this user's
-     * other devices. The sender receives no inbox row, so the app writes its own outgoing entry to
-     * [entries].
+     * After a push wake: connect, wait until the receive path has been idle for 500 ms or
+     * [timeoutMs] passes, and return how many envelopes were processed. Stays connected.
+     */
+    suspend fun processPendingMessages(timeoutMs: Long): Int = drainMutex.withLock {
+        val start = processedEnvelopes.value
+        val deadline = System.currentTimeMillis() + timeoutMs
+        val startedConnected = connectionState.value == ConnectionState.CONNECTED
+        if (!startedConnected && !tryConnect()) return 0
+        awaitIdle(deadline)
+        // A push means the server holds something this device has not acked, so an empty drain on a
+        // socket that looked connected and has been quiet means the socket is dead.
+        if (startedConnected && processedEnvelopes.value == start &&
+            System.currentTimeMillis() - lastProcessedAtMs > PUSH_RECENT_ACTIVITY_MS
+        ) {
+            log("PUSH nothing drained on a connected socket; reconnecting")
+            gateway.disconnect()
+            if (tryConnect()) awaitIdle(deadline)
+        }
+        (processedEnvelopes.value - start).toInt()
+    }
+
+    private suspend fun tryConnect(): Boolean = try {
+        connect()
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        log("PUSH connect failed: ${e.message}")
+        false
+    }
+
+    private suspend fun awaitIdle(deadline: Long) {
+        var seen = processedEnvelopes.value
+        while (true) {
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0) return
+            seen = withTimeoutOrNull(minOf(PUSH_IDLE_MS, remaining)) { processedEnvelopes.first { it > seen } } ?: return
+        }
+    }
+
+    suspend fun registerPushToken(token: String) = api.registerPushToken(token)
+
+    /**
+     * Send an entry to every device of [recipientUserIds] and to this user's other devices. Devices
+     * in [acceptedDeviceIds] are reported accepted without a resend. No inbox row is written here;
+     * the app stores its own copy in [entries].
      */
     suspend fun send(
         recipientUserIds: List<String>,
         modelKey: String,
         entryId: String,
-        sentAt: Long = System.currentTimeMillis(),
+        sentAt: Long,
         payload: ByteArray,
-        acceptedDeviceIds: Set<String> = emptySet(),
-    ): SendReport = contentService.sendEntry(recipientUserIds, modelKey, entryId, sentAt, payload, acceptedDeviceIds)
+        acceptedDeviceIds: Set<String>,
+    ): SendReport {
+        val self = requireFreshToken()
+        val message = clientMessage {
+            setAppEntry(appEntry {
+                model = modelKey
+                id = entryId
+                timestamp = sentAt
+                data = ByteString.copyFrom(payload)
+            })
+        }
+        val recipients = recipientUserIds.distinct().filter { it != self.userId }
+            .flatMap { sender.send(it, message, acceptedDeviceIds) }
+        val ownIds = try {
+            fetchOwnDirectory()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return SendReport(recipients, listOf(SubmissionResult(self.userId, null, SubmissionStatus.UNKNOWN, e.message ?: e.javaClass.simpleName)))
+        }
+        val selfSync = try {
+            storeOwnDirectory(self, ownIds)
+            sender.send(self.userId, message, acceptedDeviceIds)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            listOf(SubmissionResult(self.userId, null, SubmissionStatus.REJECTED, e.message ?: e.javaClass.simpleName))
+        }
+        return SendReport(recipients, selfSync)
+    }
 
-    suspend fun sendTyping(
-        recipientUserIds: List<String>,
-        contextId: String,
-        state: TypingState,
-    ) {
-        require(contextId.isNotBlank()) { "contextId must not be blank" }
-        val ownDeviceId = deviceId ?: throw ObscuraError.NotAuthenticated()
-        if (!typingTracker.shouldSend(contextId, state, ownDeviceId)) return
-
-        val message = ClientMessage.newBuilder()
-            .setTimestamp(System.currentTimeMillis())
-            .setTypingSignal(typingSignal {
+    /** Throttled per (context, state). A recipient that cannot be reached is logged and skipped. */
+    suspend fun sendTyping(recipientUserIds: List<String>, contextId: String, state: TypingState) {
+        if (contextId.isBlank()) throw ObscuraError.InvalidArgument("contextId must not be blank")
+        val self = auth.requireCredentials()
+        if (!typing.shouldSend(contextId, state)) return
+        requireFreshToken()
+        val message = clientMessage {
+            setTypingSignal(typingSignal {
                 this.contextId = contextId
                 this.state = WireCodec.encodeTypingState(state)
             })
-            .build()
-        for (recipientUserId in recipientUserIds.distinct().filter { it != userId }) {
-            messageSender.sendOrThrow(recipientUserId, message)
+        }
+        for (recipient in recipientUserIds.distinct().filter { it != self.userId }) {
+            try {
+                sender.sendOrThrow(recipient, message)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("TYPING not delivered to $recipient: ${e.message}")
+            }
         }
     }
 
-    /**
-     * Who is currently typing in a context, as user IDs. The host resolves names through its
-     * friend graph and decides whose typing to show.
-     *
-     * Auto-expires; a signal with no refresh disappears on its own.
-     */
-    fun observeTyping(contextId: String): Flow<List<String>> = typingTracker.observe(contextId)
+    /** The ids of users typing in [contextId], sorted. Each expires 5 s after its last signal. */
+    fun observeTyping(contextId: String): Flow<List<String>> {
+        if (contextId.isBlank()) throw ObscuraError.InvalidArgument("contextId must not be blank")
+        return typing.observe(contextId)
+    }
 
-    suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload = contentService.uploadAttachment(plaintext)
+    suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload {
+        val encrypted = AttachmentCrypto.encrypt(plaintext)
+        return AttachmentUpload(api.uploadAttachment(encrypted.ciphertext), encrypted.contentKey, encrypted.nonce)
+    }
+
     suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray =
-        contentService.downloadDecryptedAttachment(id, contentKey, nonce)
+        AttachmentCrypto.decrypt(api.fetchAttachment(id), contentKey, nonce)
 
-    suspend fun befriend(targetUserId: String, targetUsername: String) = friendshipManager.befriend(targetUserId, targetUsername)
-    suspend fun acceptFriend(targetUserId: String) = friendshipManager.acceptFriend(targetUserId)
-    suspend fun removeFriend(userId: String) = friendshipManager.removeFriend(userId)
-
-    suspend fun announceDevices() = deviceManager.announceDevices()
-    /**
-     * Generate a link code for this device. Display as QR code or copyable text.
-     * The existing device scans this and calls validateAndApproveLink().
-     */
-    fun generateLinkCode(): String {
-        val did = deviceId ?: throw ObscuraError.NotProvisioned("Not provisioned — call loginAndProvision first")
-        val generated = LinkCode.generate(did)
-        session.pendingLinkChallenge = generated.challenge
-        return generated.code
+    fun friendCode(): String {
+        val self = auth.requireCredentials()
+        return FriendCode.encode(self.userId, self.username)
     }
 
-    /**
-     * Validate a link code and approve the new device. Called by the EXISTING device
-     * after scanning QR or receiving pasted code from the new device.
-     */
-    suspend fun validateAndApproveLink(linkCode: String) {
-        val result = LinkCode.validate(linkCode)
-        require(result.valid) { result.error ?: "Invalid link code" }
-        val data = result.data!!
-        deviceManager.approveLink(data.deviceId, data.challenge)
+    /** Whitespace and soft hyphens (added by share sheets) are stripped before decoding. */
+    suspend fun addFriendByCode(code: String) {
+        val decoded = FriendCode.decode(code.filterNot { it.isWhitespace() || it == '­' })
+        befriend(decoded.userId, decoded.username)
     }
 
-    /**
-     * Low-level approve — use validateAndApproveLink() instead for the full flow.
-     */
-    suspend fun approveLink(newDeviceId: String, challengeResponse: ByteArray) =
-        deviceManager.approveLink(newDeviceId, challengeResponse)
-    suspend fun takeoverDevice() = deviceManager.takeoverDevice()
+    internal suspend fun befriend(targetUserId: String, targetUsername: String) {
+        val self = requireFreshToken()
+        if (targetUserId == self.userId) throw ObscuraError.InvalidArgument("Cannot befriend yourself")
+        val existing = friends.prepareRequest(targetUserId, targetUsername)
+        when (existing?.status) {
+            FriendStatus.ACCEPTED -> return
+            FriendStatus.PENDING_RECEIVED -> return acceptFriend(targetUserId)
+            FriendStatus.PENDING_SENT, null -> Unit
+        }
+        try {
+            sender.sendOrThrow(targetUserId, clientMessage { setFriendRequest(friendRequest { username = self.username }) })
+        } catch (e: Exception) {
+            if (existing == null) withContext(NonCancellable) { friends.removePendingRequest(targetUserId) }
+            throw e
+        }
+    }
 
-    companion object {
-        // See [decryptFailures].
-        private const val MAX_DECRYPT_FAILURES = 10
-        private const val DECRYPT_FAILURE_WINDOW_MS = 60_000L
+    suspend fun acceptFriend(userId: String) {
+        requireFreshToken()
+        if (friends.get(userId) == null) throw ObscuraError.InvalidArgument("No friend request from $userId")
+        sendFriendAccept(userId)
+        friends.updateStatus(userId, FriendStatus.ACCEPTED)
+    }
 
-        // Keep the single reconnect retry inside the push path's tight OS time budget.
-        private const val PUSH_DRAIN_RECONNECT_RETRY_MS = 250L
+    private suspend fun sendFriendAccept(userId: String) =
+        sender.sendOrThrow(userId, clientMessage { setFriendAccept(friendAccept {}) })
 
-        /** See [shouldForceReconnectAfterPush]. */
-        private const val PUSH_DRAIN_RECENT_ACTIVITY_MS = 10_000L
+    /** Forget [userId] and their devices locally. Nothing is sent to them. */
+    suspend fun removeFriend(userId: String) {
+        friends.remove(userId)
+        devices.replace(userId, emptyList())
+    }
 
-        /** See [awaitEnvelopes]. */
-        private const val PUSH_DRAIN_IDLE_THRESHOLD_MS = 500L
+    suspend fun getFriends(): List<FriendData> = friends.getAll()
 
-        // Prekey replenishment
-        private const val PREKEY_MIN_COUNT = 20L
-        private const val PREKEY_REPLENISH_COUNT = 50
+    private suspend fun refreshOwnDirectory(self: Credentials) {
+        storeOwnDirectory(self, fetchOwnDirectory())
+    }
+
+    private suspend fun fetchOwnDirectory(): List<String> =
+        try {
+            api.fetchOwnDeviceIds()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("DIRECTORY own refresh failed: ${e.message}")
+            throw e
+        }
+
+    private suspend fun storeOwnDirectory(self: Credentials, ids: List<String>) {
+        if (auth.credentials?.deviceId == self.deviceId && auth.credentials?.userId == self.userId) {
+            devices.replace(self.userId, ids)
+        }
+    }
+
+    private fun clientMessage(build: ClientMessage.Builder.() -> Unit): ClientMessage =
+        ClientMessage.newBuilder().setTimestamp(System.currentTimeMillis()).apply(build).build()
+
+    private fun log(message: String) {
+        debugLog.addFirst("[${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())}] $message")
+        while (debugLog.size > DEBUG_LOG_SIZE) debugLog.pollLast()
+        logger.log(message)
+    }
+
+    private companion object {
+        const val MESSAGE_RECEIVED_CAPACITY = 100
+        const val DEBUG_LOG_SIZE = 200
+        const val PREKEY_MIN_COUNT = 20L
+        const val PREKEY_REPLENISH_COUNT = 50
+        const val PUSH_IDLE_MS = 500L
+        const val PUSH_RECENT_ACTIVITY_MS = 10_000L
     }
 }
 
 /**
- * Should a push-wake drain that came up empty tear down the socket and try again?
- *
- * A silent push is not a generic "wake up and look around". The server schedules it when it accepts
- * a message and cancels it once this device acks, so a push landing here means the server had
- * something for us and did not see our ack — evidence about the connection, arriving over a
- * different channel than the connection.
- *
- * So when [startedConnected] is true and [processed] is still zero, the local belief "I am connected
- * and receiving" has been CONTRADICTED. Acting on that is error handling rather than distrust of
- * state, and it is self-limiting: reconnects are capped by pushes, which are capped by messages that
- * failed to deliver — zero in a healthy system.
- *
- * [recentActivityWindowMs] covers the one benign way to reach zero: the socket delivered the message
- * just before the scheduled push fired, with our ack still in flight. Reconnecting there is churn.
+ * A peer's `sentAt` capped at now + 60 s so it cannot win every later conflict. `AppEntry.timestamp`
+ * is a uint64 that arrives negative above 2^63; that is far future too.
  */
-internal fun shouldForceReconnectAfterPush(
-    processed: Long,
-    startedConnected: Boolean,
-    lastProcessedAtMs: Long,
-    nowMs: Long,
-    recentActivityWindowMs: Long,
-): Boolean {
-    if (processed > 0L) return false
-
-    // A socket established for this drain has no staleness to blame, and reconnecting it again
-    // would change nothing.
-    if (!startedConnected) return false
-
-    // Never delivered anything, so it gets no benefit of the doubt.
-    if (lastProcessedAtMs == 0L) return true
-
-    return nowMs - lastProcessedAtMs > recentActivityWindowMs
+internal fun clampFutureTimestamp(sentAt: Long, nowMs: Long = System.currentTimeMillis()): Long {
+    val cap = nowMs + 60_000L
+    return if (sentAt < 0) cap else minOf(sentAt, cap)
 }

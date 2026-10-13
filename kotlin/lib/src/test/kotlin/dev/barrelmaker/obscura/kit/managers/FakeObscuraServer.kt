@@ -61,7 +61,7 @@ class FakeObscuraServer : AutoCloseable {
         val request = SendMessageRequest.parseFrom(exchange.requestBody.readBytes())
         val response = SendMessageResponse.newBuilder()
         for (submission in request.messagesList) {
-            val target = devices[UuidCodec.bytesToUuid(submission.deviceId.toByteArray()).toString()]
+            val target = devices[UuidCodec.uuidString(submission.deviceId)]
             if (target == null) {
                 response.addFailedSubmissions(SendMessageResponse.FailedSubmission.newBuilder()
                     .setSubmissionId(submission.submissionId)
@@ -100,14 +100,13 @@ class FakeDevice internal constructor(
     private val unusedPreKeys = ArrayDeque<PreKeyRecord>()
 
     init {
-        val api = APIClient(server.url).apply { token = deviceId }
-        val session = ClientSession().also { it.userId = userId; it.deviceId = deviceId }
+        val api = APIClient(server.url) { deviceId }
         messenger = Messenger(signalStore, api)
-        sender = MessageSender(session, api, messenger, directory) { true }
+        sender = MessageSender(api, messenger, directory) { deviceId }
         rekey()
     }
 
-    /** Replace this device's identity and prekeys, as a takeover does. */
+    /** Replace this device's identity and prekeys, as a reinstall does. */
     fun rekey() {
         val (identity, _) = signalStore.generateIdentity()
         SignalKeyUtils.generateSignedPreKey(signalStore, identity, 1)
@@ -135,7 +134,7 @@ class FakeDevice internal constructor(
     suspend fun receive(): List<Received> = mailbox.toList().also { mailbox.clear() }.map { envelope ->
         val encrypted = EncryptedMessage.parseFrom(envelope.message)
         Received(
-            messenger.decrypt(envelope).clientMessage,
+            ClientMessage.parseFrom(messenger.decrypt(UuidCodec.uuidString(envelope.senderDeviceId)!!, envelope.message)),
             encrypted.type,
             if (encrypted.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE) {
                 ByteString.copyFrom(PreKeySignalMessage(encrypted.content.toByteArray()).baseKey.serialize())

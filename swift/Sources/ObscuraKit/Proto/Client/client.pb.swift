@@ -147,22 +147,6 @@ nonisolated struct Obscura_Client_V1_ClientMessage: Sendable {
     set {payload = .friendAccept(newValue)}
   }
 
-  var deviceLinkApproval: Obscura_Client_V1_DeviceLinkApproval {
-    get {
-      if case .deviceLinkApproval(let v)? = payload {return v}
-      return Obscura_Client_V1_DeviceLinkApproval()
-    }
-    set {payload = .deviceLinkApproval(newValue)}
-  }
-
-  var deviceAnnounce: Obscura_Client_V1_DeviceAnnounce {
-    get {
-      if case .deviceAnnounce(let v)? = payload {return v}
-      return Obscura_Client_V1_DeviceAnnounce()
-    }
-    set {payload = .deviceAnnounce(newValue)}
-  }
-
   var appEntry: Obscura_Client_V1_AppEntry {
     get {
       if case .appEntry(let v)? = payload {return v}
@@ -184,8 +168,6 @@ nonisolated struct Obscura_Client_V1_ClientMessage: Sendable {
   nonisolated enum OneOf_Payload: Equatable, Sendable {
     case friendRequest(Obscura_Client_V1_FriendRequest)
     case friendAccept(Obscura_Client_V1_FriendAccept)
-    case deviceLinkApproval(Obscura_Client_V1_DeviceLinkApproval)
-    case deviceAnnounce(Obscura_Client_V1_DeviceAnnounce)
     case appEntry(Obscura_Client_V1_AppEntry)
     case typingSignal(Obscura_Client_V1_TypingSignal)
 
@@ -210,48 +192,6 @@ nonisolated struct Obscura_Client_V1_FriendAccept: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  init() {}
-}
-
-nonisolated struct Obscura_Client_V1_DeviceInfo: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var id: String = String()
-
-  var name: String = String()
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  init() {}
-}
-
-nonisolated struct Obscura_Client_V1_DeviceLinkApproval: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var challengeResponse: Data = Data()
-
-  var ownDevices: [Obscura_Client_V1_DeviceInfo] = []
-
-  var friendsExport: Data = Data()
-
-  var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  init() {}
-}
-
-nonisolated struct Obscura_Client_V1_DeviceAnnounce: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  var devices: [Obscura_Client_V1_DeviceInfo] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -339,7 +279,7 @@ nonisolated extension Obscura_Client_V1_EncryptedMessage.TypeEnum: SwiftProtobuf
 
 nonisolated extension Obscura_Client_V1_ClientMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ClientMessage"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}friend_request\0\u{3}friend_accept\0\u{3}device_link_approval\0\u{3}device_announce\0\u{3}app_entry\0\u{3}typing_signal\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}friend_request\0\u{3}friend_accept\0\u{4}\u{3}app_entry\0\u{3}typing_signal\0\u{b}device_link_approval\0\u{b}device_announce\0\u{c}\u{4}\u{1}\u{c}\u{5}\u{1}")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -372,32 +312,6 @@ nonisolated extension Obscura_Client_V1_ClientMessage: SwiftProtobuf.Message, Sw
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.payload = .friendAccept(v)
-        }
-      }()
-      case 4: try {
-        var v: Obscura_Client_V1_DeviceLinkApproval?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceLinkApproval(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceLinkApproval(v)
-        }
-      }()
-      case 5: try {
-        var v: Obscura_Client_V1_DeviceAnnounce?
-        var hadOneofValue = false
-        if let current = self.payload {
-          hadOneofValue = true
-          if case .deviceAnnounce(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.payload = .deviceAnnounce(v)
         }
       }()
       case 6: try {
@@ -447,14 +361,6 @@ nonisolated extension Obscura_Client_V1_ClientMessage: SwiftProtobuf.Message, Sw
     case .friendAccept?: try {
       guard case .friendAccept(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-    }()
-    case .deviceLinkApproval?: try {
-      guard case .deviceLinkApproval(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
-    }()
-    case .deviceAnnounce?: try {
-      guard case .deviceAnnounce(let v)? = self.payload else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
     }()
     case .appEntry?: try {
       guard case .appEntry(let v)? = self.payload else { preconditionFailure() }
@@ -521,111 +427,6 @@ nonisolated extension Obscura_Client_V1_FriendAccept: SwiftProtobuf.Message, Swi
   }
 
   static func ==(lhs: Obscura_Client_V1_FriendAccept, rhs: Obscura_Client_V1_FriendAccept) -> Bool {
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension Obscura_Client_V1_DeviceInfo: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".DeviceInfo"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}name\0")
-
-  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.id) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.name) }()
-      default: break
-      }
-    }
-  }
-
-  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.id.isEmpty {
-      try visitor.visitSingularStringField(value: self.id, fieldNumber: 1)
-    }
-    if !self.name.isEmpty {
-      try visitor.visitSingularStringField(value: self.name, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  static func ==(lhs: Obscura_Client_V1_DeviceInfo, rhs: Obscura_Client_V1_DeviceInfo) -> Bool {
-    if lhs.id != rhs.id {return false}
-    if lhs.name != rhs.name {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension Obscura_Client_V1_DeviceLinkApproval: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".DeviceLinkApproval"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}challenge_response\0\u{3}own_devices\0\u{3}friends_export\0")
-
-  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularBytesField(value: &self.challengeResponse) }()
-      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.ownDevices) }()
-      case 3: try { try decoder.decodeSingularBytesField(value: &self.friendsExport) }()
-      default: break
-      }
-    }
-  }
-
-  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.challengeResponse.isEmpty {
-      try visitor.visitSingularBytesField(value: self.challengeResponse, fieldNumber: 1)
-    }
-    if !self.ownDevices.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.ownDevices, fieldNumber: 2)
-    }
-    if !self.friendsExport.isEmpty {
-      try visitor.visitSingularBytesField(value: self.friendsExport, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  static func ==(lhs: Obscura_Client_V1_DeviceLinkApproval, rhs: Obscura_Client_V1_DeviceLinkApproval) -> Bool {
-    if lhs.challengeResponse != rhs.challengeResponse {return false}
-    if lhs.ownDevices != rhs.ownDevices {return false}
-    if lhs.friendsExport != rhs.friendsExport {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension Obscura_Client_V1_DeviceAnnounce: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".DeviceAnnounce"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}devices\0")
-
-  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.devices) }()
-      default: break
-      }
-    }
-  }
-
-  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.devices.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.devices, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  static func ==(lhs: Obscura_Client_V1_DeviceAnnounce, rhs: Obscura_Client_V1_DeviceAnnounce) -> Bool {
-    if lhs.devices != rhs.devices {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

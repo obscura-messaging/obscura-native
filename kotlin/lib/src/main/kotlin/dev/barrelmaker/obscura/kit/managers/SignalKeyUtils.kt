@@ -2,6 +2,7 @@ package dev.barrelmaker.obscura.kit.managers
 
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.crypto.toBase64
+import dev.barrelmaker.obscura.kit.network.DeviceKeys
 import dev.barrelmaker.obscura.kit.network.OneTimePreKeyJson
 import dev.barrelmaker.obscura.kit.network.SignedPreKeyJson
 import org.signal.libsignal.protocol.IdentityKeyPair
@@ -9,35 +10,41 @@ import org.signal.libsignal.protocol.ecc.Curve
 import org.signal.libsignal.protocol.state.PreKeyRecord
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord
 
-/**
- * Shared Signal key generation helpers used by auth and device takeover.
- */
 internal object SignalKeyUtils {
+    const val SIGNED_PREKEY_ID = 1
+    private const val INITIAL_PREKEY_COUNT = 100
 
-    fun generateSignedPreKey(signalStore: SignalStore, identityKeyPair: IdentityKeyPair, id: Int): SignedPreKeyRecord {
-        val keyPair = Curve.generateKeyPair()
-        val signature = Curve.calculateSignature(identityKeyPair.privateKey, keyPair.publicKey.serialize())
-        val record = SignedPreKeyRecord(id, System.currentTimeMillis(), keyPair, signature)
-        signalStore.storeSignedPreKey(id, record)
-        return record
+    /** A new identity, signed prekey and one-time prekeys, stored locally, as a device publishes them. */
+    fun generateDeviceKeys(store: SignalStore): DeviceKeys {
+        val (identity, registrationId) = store.generateIdentity()
+        val signedPreKey = generateSignedPreKey(store, identity, SIGNED_PREKEY_ID)
+        return DeviceKeys(
+            identityKey = identity.publicKey.serialize().toBase64(),
+            registrationId = registrationId,
+            signedPreKey = signedPreKey.toApiJson(),
+            oneTimePreKeys = generateOneTimePreKeys(store, 1, INITIAL_PREKEY_COUNT).toApiJson(),
+        )
     }
 
-    fun generateOneTimePreKeys(signalStore: SignalStore, startId: Int, count: Int): List<PreKeyRecord> {
-        return (startId until startId + count).map { id ->
-            val keyPair = Curve.generateKeyPair()
-            val record = PreKeyRecord(id, keyPair)
-            signalStore.storePreKey(id, record)
-            record
-        }
-    }
-
-    fun SignedPreKeyRecord.toApiJson() = SignedPreKeyJson(
-        keyId = id,
-        publicKey = keyPair.publicKey.serialize().toBase64(),
-        signature = signature.toBase64()
+    /** [count] more one-time prekeys after the highest stored id, with the current identity. */
+    fun generateMorePreKeys(store: SignalStore, count: Int): DeviceKeys = DeviceKeys(
+        identityKey = store.identityKeyPair.publicKey.serialize().toBase64(),
+        registrationId = store.localRegistrationId,
+        signedPreKey = store.loadSignedPreKey(SIGNED_PREKEY_ID).toApiJson(),
+        oneTimePreKeys = generateOneTimePreKeys(store, store.getHighestPreKeyId().toInt() + 1, count).toApiJson(),
     )
 
-    fun List<PreKeyRecord>.toApiJson() = map { pk ->
-        OneTimePreKeyJson(keyId = pk.id, publicKey = pk.keyPair.publicKey.serialize().toBase64())
+    fun generateSignedPreKey(store: SignalStore, identity: IdentityKeyPair, id: Int): SignedPreKeyRecord {
+        val keyPair = Curve.generateKeyPair()
+        val signature = Curve.calculateSignature(identity.privateKey, keyPair.publicKey.serialize())
+        return SignedPreKeyRecord(id, System.currentTimeMillis(), keyPair, signature).also { store.storeSignedPreKey(id, it) }
     }
+
+    fun generateOneTimePreKeys(store: SignalStore, startId: Int, count: Int): List<PreKeyRecord> =
+        (startId until startId + count).map { id -> PreKeyRecord(id, Curve.generateKeyPair()).also { store.storePreKey(id, it) } }
+
+    fun SignedPreKeyRecord.toApiJson() =
+        SignedPreKeyJson(id, keyPair.publicKey.serialize().toBase64(), signature.toBase64())
+
+    fun List<PreKeyRecord>.toApiJson() = map { OneTimePreKeyJson(it.id, it.keyPair.publicKey.serialize().toBase64()) }
 }

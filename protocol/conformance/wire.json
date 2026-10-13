@@ -5,8 +5,6 @@
   "messageTypes": [
     { "wire": "friend_request", "app": "FRIEND_REQUEST" },
     { "wire": "friend_accept", "app": "FRIEND_ACCEPT" },
-    { "wire": "device_link_approval", "app": "DEVICE_LINK_APPROVAL" },
-    { "wire": "device_announce", "app": "DEVICE_ANNOUNCE" },
     { "wire": "app_entry", "app": "APP_ENTRY" },
     { "wire": "typing_signal", "app": "TYPING_SIGNAL" }
   ],
