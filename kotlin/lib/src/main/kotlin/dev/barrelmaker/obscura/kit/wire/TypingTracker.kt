@@ -19,7 +19,6 @@ internal class TypingTracker {
     data class TypingEvent(
         val senderUserId: String,
         val senderDeviceId: String,
-        val senderDisplayName: String,
         val expiresAt: Long,
     )
 
@@ -44,10 +43,9 @@ internal class TypingTracker {
         contextId: String,
         senderUserId: String,
         senderDeviceId: String,
-        senderDisplayName: String,
     ) {
         val expiresAt = System.currentTimeMillis() + EXPIRE_MS
-        val event = TypingEvent(senderUserId, senderDeviceId, senderDisplayName, expiresAt)
+        val event = TypingEvent(senderUserId, senderDeviceId, expiresAt)
 
         // `update {}`, not read-then-assign: two envelopes for the same conversation are routed
         // concurrently, and `value = value.toMutableMap().also { ... }` loses one of them outright.
@@ -79,12 +77,14 @@ internal class TypingTracker {
         }
     }
 
+    /** The users typing in [contextId], once each however many of their devices are. */
     fun observe(contextId: String): Flow<List<String>> {
         return activeByContext.map { contexts ->
             val now = System.currentTimeMillis()
             (contexts[contextId] ?: emptySet())
                 .filter { it.expiresAt > now }
-                .map { it.senderDisplayName }
+                .map { it.senderUserId }
+                .distinct()
         }
     }
 

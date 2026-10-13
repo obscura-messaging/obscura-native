@@ -26,7 +26,20 @@ final class SignalReceiveAudienceTests: XCTestCase {
         )
 
         let active = await TypingStateRegistry.shared.tracker
-            .activeDisplayNames(contextId: "opaque-context")
+            .activeUserIds(contextId: "opaque-context")
+        XCTAssertEqual(active, ["alice"])
+    }
+
+    func testAUserTypingOnTwoDevicesIsOneTyper() async throws {
+        let client = try ObscuraClient(apiURL: "https://obscura.invalid")
+        await TypingStateRegistry.shared.tracker.clearAll()
+
+        for device in ["alice-phone", "alice-laptop"] {
+            await client.handleTypingSignal(message(contextId: "context", state: .started),
+                                            sourceUserId: "alice", senderDeviceId: device)
+        }
+
+        let active = await TypingStateRegistry.shared.tracker.activeUserIds(contextId: "context")
         XCTAssertEqual(active, ["alice"])
     }
 
@@ -38,7 +51,6 @@ final class SignalReceiveAudienceTests: XCTestCase {
             contextId: "context",
             senderUserId: "bob",
             senderDeviceId: "bob-device",
-            senderDisplayName: "Bob",
             timestamp: UInt64(Date().timeIntervalSince1970 * 1_000)
         ))
 
@@ -53,8 +65,8 @@ final class SignalReceiveAudienceTests: XCTestCase {
             senderDeviceId: "alice-device"
         )
 
-        let active = await tracker.activeDisplayNames(contextId: "context")
-        XCTAssertEqual(active, ["Bob"])
+        let active = await tracker.activeUserIds(contextId: "context")
+        XCTAssertEqual(active, ["bob"])
     }
 
     func testUnspecifiedStateIsIgnored() async throws {
@@ -68,7 +80,7 @@ final class SignalReceiveAudienceTests: XCTestCase {
             senderDeviceId: "alice-device"
         )
 
-        let active = await tracker.activeDisplayNames(contextId: "context")
+        let active = await tracker.activeUserIds(contextId: "context")
         XCTAssertTrue(active.isEmpty)
     }
 }
