@@ -98,6 +98,8 @@ announcements, link approvals) takes one send path with these rules:
 A friend's `DEVICE_ANNOUNCE` replaces that friend's directory entry only when
 its (clamped) timestamp is newer than the entry's last write. A fetch stamps the
 entry with the current time. An announcement from a non-friend changes nothing.
+`removeFriend(userId)` forgets the friendship and the friend's directory entry
+and sends nothing; entries already stored are the app's to keep or erase.
 
 **Identity keys.** As Signal does for an unverified contact, a changed identity
 key is accepted rather than refused: the kit stores the new key, replaces the
@@ -107,7 +109,7 @@ the app can show that the safety number changed.
 **Takeover** generates a new identity and prekeys, clears every session, and
 announces this device's list to accepted friends, whose devices then replace
 their sessions. The server ends the device's connection and deletes its queued
-messages; the caller connects again.
+messages; the kit reconnects.
 
 **Sender names** come from the local friend graph keyed by `sender_id`, never
 from a payload. The one exception is a `FriendRequest` from someone not yet in
@@ -163,7 +165,9 @@ either.
 **Typing:** the caller names recipients. `TypingSignal.context_id` is opaque and
 MUST NOT be parsed or used to derive recipients. `STARTED` refreshes the sender
 device's short-lived state, `STOPPED` clears it, other states are ignored. Typing
-state is in-memory, throttled and expiring.
+state is in-memory, throttled and expiring. `observeTyping` reports typers as
+user IDs, once per user; the app resolves names and decides whose typing to show,
+because a context id names nothing the kit can authorize.
 
 ## Inbox
 
@@ -296,6 +300,14 @@ Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
 `pendingApproval` if another device can approve the link, else `authenticated`.
 `register` and `loginAndProvision` store the device `login` checks.
 
+**Token refresh.** `ensureFreshToken()` returns `fresh`, `rejected` or
+`unavailable`. Only a refresh the server refuses (401/403), or a session with no
+refresh token, is `rejected`: the kit signs out (auth state logged out) and
+clears its stored session. A network or server failure is `unavailable` and changes
+nothing; the background refresh retries with backoff (5 s doubling to 5 min).
+`restorePersistedSession` therefore keeps an offline session authenticated and
+unconnected rather than discarding it.
+
 ## Known gaps
 
 - Swift cannot receive `DEVICE_LINK_APPROVAL`, so a Swift device added to an
@@ -312,6 +324,4 @@ Other HTTP statuses throw. After `newDevice` call `loginAndProvision`; after
 - A `DEVICE_ANNOUNCE` is ordered only by its sender-declared (clamped)
   timestamp: last writer wins, with no other freshness check.
 - Partial-recipient send failures are invisible to the app.
-- Kotlin does not complete a close the server initiates, so after one (for
-  example a takeover) the client still reports `CONNECTED` on a dead socket.
 - Consumed inbox envelope ids have no durable tombstone.

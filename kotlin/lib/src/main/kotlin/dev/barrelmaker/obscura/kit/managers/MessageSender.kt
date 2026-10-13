@@ -36,7 +36,7 @@ internal class MessageSender(
     private val api: APIClient,
     private val messenger: Messenger,
     private val devices: DeviceStore,
-    private val ensureFreshToken: suspend () -> Boolean,
+    private val ensureFreshToken: suspend () -> Unit,
 ) {
     // Sends to one user are serialized, so concurrent first contacts share one refresh.
     private val recipientLocks = ConcurrentHashMap<String, Mutex>()

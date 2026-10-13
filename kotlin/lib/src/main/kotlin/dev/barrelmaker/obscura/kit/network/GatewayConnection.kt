@@ -22,9 +22,9 @@ enum class GatewayState {
  *
  * Keeps the connection alive with:
  * - OkHttp ping every 30s (keeps NAT/proxy alive)
- * - Auto-reconnect with exponential backoff (1s → 30s)
+ * - Auto-reconnect with exponential backoff (1s → 30s) after any drop or server-initiated close
  * - Token refresh before reconnect attempts
- * - Intentional disconnect (code 1000) suppresses reconnect
+ * - [disconnect] suppresses reconnect
  */
 class GatewayConnection(
     private val api: APIClient,
@@ -69,7 +69,7 @@ class GatewayConnection(
     val preKeyStatus = Channel<PreKeyStatus>(capacity = 10)
 
     /** Called before reconnect to ensure token is fresh. Set by ObscuraClient. */
-    var ensureFreshToken: (suspend () -> Boolean) = { true }
+    var ensureFreshToken: (suspend () -> Unit) = {}
 
     suspend fun connect() {
         if (_state.value == GatewayState.CONNECTED || _state.value == GatewayState.CONNECTING) return
@@ -158,6 +158,14 @@ class GatewayConnection(
                 if (shouldReconnect) scheduleReconnect()
             }
 
+            // The server is closing (takeover, shutdown). OkHttp leaves the socket half-closed until
+            // the close is answered, and only then calls onClosed.
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(1000, null)
+            }
+
+            // Only a close this client did not ask for reaches here: [disconnect] bumps the
+            // generation first, so its own close is ignored above.
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration.get()) return
                 this@GatewayConnection.webSocket = null
@@ -165,9 +173,7 @@ class GatewayConnection(
                 openSignal?.completeExceptionally(
                     IllegalStateException("gateway closed before open: $code $reason")
                 )
-                // Reconnect on unexpected close (server restart, timeout, etc.)
-                // Don't reconnect on intentional close (code 1000)
-                if (code != 1000 && shouldReconnect) scheduleReconnect()
+                if (shouldReconnect) scheduleReconnect()
             }
         })
     }

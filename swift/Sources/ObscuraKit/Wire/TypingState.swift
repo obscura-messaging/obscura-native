@@ -9,7 +9,6 @@ struct TypingEvent: Sendable {
     let contextId: String
     let senderUserId: String
     let senderDeviceId: String
-    let senderDisplayName: String
     let timestamp: UInt64
 }
 
@@ -17,7 +16,6 @@ public actor TypingTracker {
     private struct ActiveTyper: Sendable {
         let senderUserId: String
         let senderDeviceId: String
-        let senderDisplayName: String
         let expiresAt: UInt64
     }
 
@@ -33,7 +31,6 @@ public actor TypingTracker {
         typers.append(ActiveTyper(
             senderUserId: event.senderUserId,
             senderDeviceId: event.senderDeviceId,
-            senderDisplayName: event.senderDisplayName,
             expiresAt: now + expiryMs
         ))
         activeByContext[event.contextId] = typers
@@ -46,15 +43,18 @@ public actor TypingTracker {
         }
     }
 
-    public func activeDisplayNames(contextId: String) -> [String] {
+    /// The users typing in `contextId`, once each however many of their devices are. The host
+    /// resolves names and decides whose typing to show.
+    public func activeUserIds(contextId: String) -> [String] {
         let now = UInt64(Date().timeIntervalSince1970 * 1_000)
         let live = (activeByContext[contextId] ?? []).filter { $0.expiresAt > now }
         activeByContext[contextId] = live.isEmpty ? nil : live
-        return live.map(\.senderDisplayName)
+        var seen = Set<String>()
+        return live.map(\.senderUserId).filter { seen.insert($0).inserted }
     }
 
     public func isActive(contextId: String) -> Bool {
-        !activeDisplayNames(contextId: contextId).isEmpty
+        !activeUserIds(contextId: contextId).isEmpty
     }
 
     public func clearAll() {
@@ -71,7 +71,7 @@ public struct TypingObservation {
             let task = Task {
                 var last: [String] = []
                 while !Task.isCancelled {
-                    let current = await tracker.activeDisplayNames(contextId: contextId)
+                    let current = await tracker.activeUserIds(contextId: contextId)
                     if current != last {
                         continuation.yield(current)
                         last = current

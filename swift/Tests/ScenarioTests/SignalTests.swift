@@ -24,7 +24,7 @@ final class SignalTests: XCTestCase {
 
         let received = try await bob.waitForMessage(timeout: 10)
         XCTAssertEqual(received.type, "TYPING_SIGNAL")
-        let active = await TypingStateRegistry.shared.tracker.activeDisplayNames(contextId: contextId)
+        let active = await TypingStateRegistry.shared.tracker.activeUserIds(contextId: contextId)
         XCTAssertFalse(active.isEmpty)
 
         alice.disconnectWebSocket()
@@ -38,11 +38,10 @@ final class SignalTests: XCTestCase {
             contextId: "context",
             senderUserId: "alice",
             senderDeviceId: "device",
-            senderDisplayName: "Alice",
             timestamp: now - 10_000
         ))
 
-        let active = await tracker.activeDisplayNames(contextId: "context")
+        let active = await tracker.activeUserIds(contextId: "context")
         XCTAssertTrue(active.isEmpty)
     }
 
@@ -52,7 +51,6 @@ final class SignalTests: XCTestCase {
             contextId: "context",
             senderUserId: "alice",
             senderDeviceId: "device",
-            senderDisplayName: "Alice",
             timestamp: UInt64(Date().timeIntervalSince1970 * 1_000)
         ))
         let activeBefore = await tracker.isActive(contextId: "context")
@@ -69,7 +67,6 @@ final class SignalTests: XCTestCase {
             contextId: "context",
             senderUserId: "alice",
             senderDeviceId: "device",
-            senderDisplayName: "Alice",
             timestamp: UInt64(Date().timeIntervalSince1970 * 1_000)
         ))
         await tracker.remove(contextId: "context", senderDeviceId: "device")
