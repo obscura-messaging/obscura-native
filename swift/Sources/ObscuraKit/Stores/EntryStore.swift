@@ -32,7 +32,7 @@ public struct StoredEntry: Sendable, Equatable {
 }
 
 /// Raw storage for application entries. The API is
-/// `put` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before writing. This
+/// `put` / `get` / `all` / `erase`. `put` is a blind upsert; the app resolves merge before writing. This
 /// store has no schema parser, query layer, merge engine, or expiry policy: the app decides *when*
 /// an entry goes away, and `erase` guarantees *how*.
 public actor EntryStore {
@@ -70,44 +70,58 @@ public actor EntryStore {
         }
     }
 
+    /// The live entries among `ids` for a model, in no guaranteed order. Missing ids are absent.
+    public func get(model: String, ids: [String]) async throws -> [StoredEntry] {
+        if ids.isEmpty { return [] }
+        return try await db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT id, data, timestamp, author_device_id, local_metadata
+                FROM model_entries WHERE model_name = ? AND id IN (\(databaseQuestionMarks(count: ids.count)))
+            """, arguments: StatementArguments([model] + ids)).map(Self.entry)
+        }
+    }
+
     /// Every live entry for a model, in no guaranteed order.
     public func all(model: String) async throws -> [StoredEntry] {
         try await db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT id, data, timestamp, author_device_id, local_metadata
                 FROM model_entries WHERE model_name = ?
-            """, arguments: [model]).map { row in
-                StoredEntry(
-                    id: row["id"],
-                    data: row["data"],
-                    // `max(0, …)` before the conversion, for the same reason `InboxStore.peek`
-                    // saturates: `UInt64(_:)` TRAPS on a negative, and a row written by a peer kit
-                    // (Kotlin surfaces proto3 `uint64` as a signed Long) must never crash a read.
-                    sentAt: UInt64(max(0, row["timestamp"] as Int64)),
-                    authorDeviceId: row["author_device_id"],
-                    localMetadata: row["local_metadata"]
-                )
-            }
+            """, arguments: [model]).map(Self.entry)
         }
     }
 
-    /// Remove one entry so its contents are unrecoverable from the database files.
+    /// Remove entries so their contents are unrecoverable from the database files.
     ///
-    /// The row is deleted under `secure_delete`, so SQLite zeroes the freed pages; the pragma is set
-    /// in the deleting write rather than trusted from open time. The WAL is then checkpointed and
-    /// truncated, because in WAL mode the pre-delete page would otherwise survive in the `-wal` file
-    /// until the next checkpoint. Erasing an entry that does not exist is a no-op. Not synchronized
-    /// to peers: each device erases its own copy.
-    public func erase(model: String, id: String) async throws {
+    /// The rows are deleted under `secure_delete`, so SQLite zeroes the freed pages; the pragma is
+    /// set in the deleting write rather than trusted from open time. The WAL is then checkpointed and
+    /// truncated once, because in WAL mode the pre-delete pages would otherwise survive in the `-wal`
+    /// file until the next checkpoint. Erasing entries that do not exist is a no-op. Not
+    /// synchronized to peers: each device erases its own copy.
+    public func erase(model: String, ids: [String]) async throws {
+        if ids.isEmpty { return }
         try await db.write { db in
             try db.execute(sql: "PRAGMA secure_delete = ON")
             try db.execute(
-                sql: "DELETE FROM model_entries WHERE model_name = ? AND id = ?",
-                arguments: [model, id])
+                sql: "DELETE FROM model_entries WHERE model_name = ? AND id IN (\(databaseQuestionMarks(count: ids.count)))",
+                arguments: StatementArguments([model] + ids))
         }
         try await db.writeWithoutTransaction { db in
             try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
         }
+    }
+
+    private static func entry(_ row: Row) -> StoredEntry {
+        StoredEntry(
+            id: row["id"],
+            data: row["data"],
+            // `max(0, …)` before the conversion, for the same reason `InboxStore.peek`
+            // saturates: `UInt64(_:)` TRAPS on a negative, and a row written by a peer kit
+            // (Kotlin surfaces proto3 `uint64` as a signed Long) must never crash a read.
+            sentAt: UInt64(max(0, row["timestamp"] as Int64)),
+            authorDeviceId: row["author_device_id"],
+            localMetadata: row["local_metadata"]
+        )
     }
 
     func wipe() async throws {

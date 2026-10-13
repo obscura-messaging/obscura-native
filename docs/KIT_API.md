@@ -215,16 +215,18 @@ row. Notification policy runs after the app commits.
 
 ```text
 put(model, entry)
+get(model, ids)
 all(model)
-erase(model, id)
+erase(model, ids)
 ```
 
 `StoredEntry` holds the app-chosen id, timestamp, session-attributed author
 device, opaque payload, and nullable `localMetadata`, an app-owned sidecar
 stored verbatim and never read, put in an `AppEntry`, or sent.
 
-`erase` deletes under `secure_delete`, then checkpoints and truncates the WAL so
-the content is unrecoverable. Erasing a missing entry is a no-op. Both kits
+`get` returns the named entries that exist. `erase` deletes under
+`secure_delete`, then checkpoints and truncates the WAL once per call so the
+content is unrecoverable. Erasing a missing entry is a no-op. Both kits
 enable `secure_delete` on every database, including an app-supplied driver.
 
 Merge belongs to the app: `APPEND` keeps the first write per entry id, `REPLACE`

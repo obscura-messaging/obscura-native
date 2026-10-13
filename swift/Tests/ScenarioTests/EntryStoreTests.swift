@@ -139,13 +139,27 @@ final class EntryStoreTests: XCTestCase {
         XCTAssertNil(stored.first?.localMetadata)
     }
 
-    func testEraseRemovesOnlyTheNamedEntry() async throws {
+    func testGetReturnsOnlyTheNamedEntriesOfThatModel() async throws {
+        let store = try makeStore()
+        for id in ["dm_1", "dm_2", "dm_3"] { try await store.put(model: "directMessage", entry: entry(id)) }
+        try await store.put(model: "pix", entry: entry("dm_1"))
+
+        let named = try await store.get(model: "directMessage", ids: ["dm_1", "dm_3", "missing"])
+        let one = try await store.get(model: "directMessage", ids: ["dm_2"])
+        let none = try await store.get(model: "directMessage", ids: [])
+        XCTAssertEqual(Set(named.map(\.id)), ["dm_1", "dm_3"])
+        XCTAssertEqual(one, [entry("dm_2")])
+        XCTAssertEqual(none, [])
+    }
+
+    func testEraseRemovesOnlyTheNamedEntries() async throws {
         let store = try makeStore()
         try await store.put(model: "directMessage", entry: entry("dm_1"))
         try await store.put(model: "directMessage", entry: entry("dm_2"))
+        try await store.put(model: "directMessage", entry: entry("dm_3"))
         try await store.put(model: "pix", entry: entry("dm_1"))
 
-        try await store.erase(model: "directMessage", id: "dm_1")
+        try await store.erase(model: "directMessage", ids: ["dm_1", "dm_3"])
 
         let dms = try await store.all(model: "directMessage")
         let pix = try await store.all(model: "pix")
@@ -153,11 +167,12 @@ final class EntryStoreTests: XCTestCase {
         XCTAssertEqual(pix.map(\.id), ["dm_1"])
     }
 
-    func testErasingAMissingEntryIsANoOp() async throws {
+    func testErasingMissingEntriesOrNoneIsANoOp() async throws {
         let store = try makeStore()
         try await store.put(model: "directMessage", entry: entry("dm_1"))
 
-        try await store.erase(model: "directMessage", id: "never_written")
+        try await store.erase(model: "directMessage", ids: ["never_written"])
+        try await store.erase(model: "directMessage", ids: [])
 
         let all = try await store.all(model: "directMessage")
         XCTAssertEqual(all.count, 1)
@@ -175,20 +190,21 @@ final class EntryStoreTests: XCTestCase {
         var config = Configuration()
         config.prepareDatabase { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
         let store = try EntryStore(db: try DatabaseQueue(path: path, configuration: config))
-        let secret = "ERASE-ME-7f3a9c"
-        func onDisk() -> Bool {
+        let secrets = ["ERASE-ME-7f3a9c", "ERASE-ME-2b8d41"]
+        func onDisk(_ secret: String) -> Bool {
             [path, path + "-wal"].contains { file in
                 guard let data = FileManager.default.contents(atPath: file) else { return false }
                 return data.range(of: Data(secret.utf8)) != nil
             }
         }
 
-        try await store.put(
-            model: "directMessage", entry: entry("dm_1", data: #"{"content":"\#(secret)"}"#))
-        XCTAssertTrue(onDisk(), "control: the secret must be on disk before erase")
+        for (i, secret) in secrets.enumerated() {
+            try await store.put(model: "directMessage", entry: entry("dm_\(i)", data: #"{"content":"\#(secret)"}"#))
+        }
+        XCTAssertTrue(secrets.allSatisfy(onDisk), "control: the secrets must be on disk before erase")
 
-        try await store.erase(model: "directMessage", id: "dm_1")
+        try await store.erase(model: "directMessage", ids: secrets.indices.map { "dm_\($0)" })
 
-        XCTAssertFalse(onDisk(), "erased content must not survive in the database or its WAL")
+        XCTAssertFalse(secrets.contains(where: onDisk), "erased content must not survive in the database or its WAL")
     }
 }

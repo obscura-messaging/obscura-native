@@ -35,7 +35,7 @@ val client = ObscuraClient(
 val report = client.send(recipientUserIds, modelKey, entryId, sentAt, payload)   // payload: ByteArray
 client.inbox.peek(50); client.inbox.consume(ids); client.inbox.discard(ids, reason); client.inbox.depth()
 client.entries.put(model, StoredEntry(id, data, sentAt, authorDeviceId, localMetadata))
-client.entries.all(model); client.entries.erase(model, id)
+client.entries.get(model, ids); client.entries.all(model); client.entries.erase(model, ids)
 client.uploadAttachment(bytes); client.downloadDecryptedAttachment(id, contentKey, nonce)
 client.sendTyping(recipientUserIds, contextId, TypingState.STARTED); client.observeTyping(contextId)
 client.processPendingMessages(timeoutMs)
