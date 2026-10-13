@@ -39,7 +39,7 @@ let client = try ObscuraClient(apiURL: url)                       // in-memory
 let client = try ObscuraClient(apiURL: url, dataDirectory: dir,   // file-backed
                                userId: userId, keychainAccessGroup: nil)
 
-try await client.send(to: userIds, modelKey: m, entryId: id, sentAt: t, payload: data)
+let report = try await client.send(to: userIds, modelKey: m, entryId: id, sentAt: t, payload: data)
 try await client.inbox.peek(limit: 50); try await client.inbox.consume(ids)
 try await client.inbox.discard(ids, reason: r); try await client.inbox.depth()
 try await client.entries.put(model: m, entry: StoredEntry(id:data:sentAt:authorDeviceId:localMetadata:))

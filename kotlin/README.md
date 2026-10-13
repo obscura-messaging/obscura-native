@@ -32,7 +32,7 @@ val client = ObscuraClient(
     sessionStorage = NoOpSessionStorage,
 )
 
-client.send(recipientUserIds, modelKey, entryId, sentAt, payload)   // payload: ByteArray
+val report = client.send(recipientUserIds, modelKey, entryId, sentAt, payload)   // payload: ByteArray
 client.inbox.peek(50); client.inbox.consume(ids); client.inbox.discard(ids, reason); client.inbox.depth()
 client.entries.put(model, StoredEntry(id, data, sentAt, authorDeviceId, localMetadata))
 client.entries.all(model); client.entries.erase(model, id)
@@ -113,8 +113,9 @@ session on first contact.
   `Dispatchers.Default.limitedParallelism(1)`. Keep HTTP off the `Messenger`
   dispatcher: the receive path shares it, so a slow request stalls
   decrypt, persist and ack for everyone.
-- **One send path.** Every send goes through `Messenger.queueMessage`, which
-  builds a session from the peer's prekey bundle on first contact.
+- **One encryption path.** Scoped sends call `Messenger.prepareSubmission`,
+  which builds a session from the peer's prekey bundle on first contact.
+  `queueMessage` wraps it for the remaining queued control paths.
   `Messenger.addressFor` is the only `SignalProtocolAddress` constructor; send
   and receive must build identical addresses or the session splits.
 - **JUnit 5 ignores a non-void `@Test`.** A body ending in `assertThrows(...)`
