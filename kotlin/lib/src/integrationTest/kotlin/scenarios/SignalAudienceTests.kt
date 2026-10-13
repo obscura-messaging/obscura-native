@@ -27,9 +27,9 @@ class SignalAudienceTests {
         alice.sendTyping(listOf(bob.userId!!), contextId, TypingState.STARTED)
 
         val bobSees = withTimeout(15_000) {
-            bob.observeTyping(contextId).first { it.contains(alice.username!!) }
+            bob.observeTyping(contextId).first { it.contains(alice.userId!!) }
         }
-        assertTrue(bobSees.contains(alice.username!!))
+        assertTrue(bobSees.contains(alice.userId!!))
 
         val carolSees = withTimeoutOrNull(3_000) {
             carol.observeTyping(contextId).first { it.isNotEmpty() }
@@ -51,7 +51,7 @@ class SignalAudienceTests {
         alice.sendTyping(listOf(bob.userId!!), contextId, TypingState.STARTED)
 
         val observed = withTimeout(15_000) {
-            bob.observeTyping(contextId).first { it.contains(alice.username!!) }
+            bob.observeTyping(contextId).first { it.contains(alice.userId!!) }
         }
         assertTrue(observed.isNotEmpty())
 
@@ -77,7 +77,7 @@ class SignalAudienceTests {
 
         for (client in listOf(bob, carol)) {
             val observed = withTimeout(15_000) {
-                client.observeTyping(contextId).first { it.contains(alice.username!!) }
+                client.observeTyping(contextId).first { it.contains(alice.userId!!) }
             }
             assertTrue(observed.isNotEmpty())
         }

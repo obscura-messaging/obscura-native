@@ -47,7 +47,7 @@ try await client.entries.all(model: m); try await client.entries.erase(model: m,
 try await client.uploadAttachment(data)   // (id, contentKey, nonce)
 try await client.downloadDecryptedAttachment(id: id, contentKey: k, nonce: n)
 await client.sendTyping(to: userIds, contextId: c, state: .started)
-for await names in client.observeTyping(contextId: c).values { }
+for await userIds in client.observeTyping(contextId: c).values { }
 await client.processPendingMessages(timeout: 25)
 for await event in client.observeEvents() { }   // ObscuraEvent
 ```

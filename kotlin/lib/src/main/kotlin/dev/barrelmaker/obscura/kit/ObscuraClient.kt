@@ -964,7 +964,6 @@ class ObscuraClient(
                     contextId = signal.contextId,
                     senderUserId = sourceUserId,
                     senderDeviceId = deviceId,
-                    senderDisplayName = friends.get(sourceUserId)?.username ?: sourceUserId,
                 )
                 TypingState.STOPPED -> typingTracker.clear(signal.contextId, deviceId)
                 null -> log("TYPING DROPPED: unspecified or unknown state")
@@ -1048,7 +1047,8 @@ class ObscuraClient(
     }
 
     /**
-     * Who is currently typing in a context, by display name.
+     * Who is currently typing in a context, as user IDs. The host resolves names through its
+     * friend graph and decides whose typing to show.
      *
      * Auto-expires; a signal with no refresh disappears on its own.
      */

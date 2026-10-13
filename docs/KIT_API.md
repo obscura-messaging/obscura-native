@@ -163,7 +163,9 @@ either.
 **Typing:** the caller names recipients. `TypingSignal.context_id` is opaque and
 MUST NOT be parsed or used to derive recipients. `STARTED` refreshes the sender
 device's short-lived state, `STOPPED` clears it, other states are ignored. Typing
-state is in-memory, throttled and expiring.
+state is in-memory, throttled and expiring. `observeTyping` reports typers as
+user IDs, once per user; the app resolves names and decides whose typing to show,
+because a context id names nothing the kit can authorize.
 
 ## Inbox
 
