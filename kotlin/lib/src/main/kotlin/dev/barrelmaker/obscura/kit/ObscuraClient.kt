@@ -52,6 +52,7 @@ import obscura.client.v1.appEntry
 import obscura.client.v1.friendAccept
 import obscura.client.v1.friendRequest
 import obscura.client.v1.typingSignal
+import org.signal.libsignal.protocol.DuplicateMessageException
 import xyz.obscura.server.contracts.ObscuraProtocol.Envelope
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -252,14 +253,14 @@ class ObscuraClient(
         }
         try {
             if (inbox.contains(envelopeId)) {
-                ack(envelope.id)
-                markProcessed()
+                acknowledge(envelope.id, envelopeId, ack)
                 return
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("RECV duplicate lookup or ack failed for $envelopeId: ${e.message}")
+            log("RECV duplicate lookup failed for $envelopeId: ${e.message}")
+            logger.databaseError("inbox", "contains", e.message ?: e.javaClass.simpleName)
             return
         }
         var stage = "decrypt"
@@ -270,7 +271,9 @@ class ObscuraClient(
                 val parsed = try {
                     ClientMessage.parseFrom(plaintext)
                 } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                    log("RECV invalid client message from $senderUserId: ${e.message}; not acked")
+                    // Its ratchet step is committed and it can never parse, so it is acked and dropped.
+                    log("RECV invalid client message from $senderUserId: ${e.message}; dropped")
+                    logger.log("dropped an unparseable client message from $senderUserId: ${e.message}")
                     return@decryptAndCommit Triple(null, false, false)
                 }
                 stage = "persist"
@@ -283,6 +286,12 @@ class ObscuraClient(
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DuplicateMessageException) {
+            // Decrypt commits only with its durable writes, so a spent message key means this
+            // redelivered envelope is already stored.
+            log("RECV redelivered envelope $envelopeId was already processed; acked")
+            acknowledge(envelope.id, envelopeId, ack)
+            return
         } catch (e: Exception) {
             if (stage == "decrypt") {
                 log("RECV decrypt failed from $senderUserId: ${e.message}")
@@ -293,23 +302,26 @@ class ObscuraClient(
             }
             return
         }
-        if (message == null) return
         try {
-            if (payloadDisposition(message.payloadCase) == PayloadDisposition.INBOXED) {
-                wakeInbox(message, envelopeId, inserted)
-            } else if (!handledLocally) {
-                route(message, senderUserId, senderDeviceId, envelopeId)
+            when {
+                message == null -> Unit
+                payloadDisposition(message.payloadCase) == PayloadDisposition.INBOXED -> wakeInbox(message, envelopeId, inserted)
+                !handledLocally -> route(message, senderUserId, senderDeviceId, envelopeId)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("RECV ${message.payloadCase.name} not stored: ${e.message}")
-            logger.databaseError("receive", message.payloadCase.name, e.message ?: e.javaClass.simpleName)
+            log("RECV ${message?.payloadCase?.name} not stored: ${e.message}")
+            logger.databaseError("receive", message?.payloadCase?.name ?: "UNKNOWN", e.message ?: e.javaClass.simpleName)
             return
         }
         replenishPreKeys { signalStore.getPreKeyCount() < PREKEY_MIN_COUNT }
+        acknowledge(envelope.id, envelopeId, ack)
+    }
+
+    private suspend fun acknowledge(id: ByteString, envelopeId: String, ack: suspend (ByteString) -> Unit) {
         try {
-            ack(envelope.id)
+            ack(id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

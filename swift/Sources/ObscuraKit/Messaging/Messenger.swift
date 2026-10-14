@@ -85,7 +85,7 @@ actor Messenger {
         } catch {
             let status: SubmissionStatus
             if let failure = error as? ObscuraError, case .http(let code, _) = failure,
-               [400, 401, 403, 413].contains(code) {
+               [400, 413].contains(code) {
                 status = .rejected
             } else {
                 status = .unknown

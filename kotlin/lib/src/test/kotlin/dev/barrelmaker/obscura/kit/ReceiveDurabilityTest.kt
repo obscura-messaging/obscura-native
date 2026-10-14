@@ -140,14 +140,29 @@ class ReceiveDurabilityTest {
         }
     }
 
-    @Test fun `authenticated malformed plaintext teaches stamped sender but is never acked`() = runBlocking {
+    @Test fun `authenticated plaintext that is not a client message is acked and dropped`() = runBlocking {
         val (c, driver, envelope) = fixture(malformedPlaintext = true)
         var acks = 0
         c.receive(envelope) { acks++ }
         assertEquals(listOf(peerDevice), c.devices.devicesOf(peerUser))
-        assertEquals(0, acks)
+        assertEquals(1, acks)
         assertEquals(0L, c.inbox.depth())
         assertTrue(c.getDebugLog().any { it.contains("invalid client message") })
+        c.auth.end()
+        driver.close()
+    }
+
+    @Test fun `a redelivery of a message the app already consumed is acked without a decrypt failure`() = runBlocking {
+        val (c, driver, envelope) = fixture()
+        var acks = 0
+        c.receive(envelope) { acks++ }
+        c.inbox.consume(c.inbox.peek().map { it.id })
+
+        c.receive(envelope) { acks++ }
+
+        assertEquals(2, acks)
+        assertEquals(0L, c.inbox.depth())
+        assertFalse(c.getDebugLog().any { it.contains("decrypt failed") })
         c.auth.end()
         driver.close()
     }

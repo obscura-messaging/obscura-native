@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import LibSignalClient
 
 private enum PersistedContent: Sendable {
     case handled
@@ -146,8 +147,7 @@ extension ObscuraClient {
         }
         do {
             if try await inbox.contains(envelopeId: envelopeId) {
-                do { try await acknowledge(envelope.id) }
-                catch { logger.ackFailed(envelopeId: envelopeId, reason: "\(error)") }
+                await ack(envelope.id, envelopeId, acknowledge)
                 return
             }
         } catch {
@@ -201,6 +201,12 @@ extension ObscuraClient {
             }
         } catch is CancellationError {
             return
+        } catch SignalError.duplicatedMessage {
+            // Decrypt commits only with its durable writes, so a spent message key means this
+            // redelivered envelope is already stored.
+            logger.log("redelivered envelope \(envelopeId) was already processed; acked")
+            await ack(envelope.id, envelopeId, acknowledge)
+            return
         } catch let error as DatabaseError {
             logger.databaseError(store: "receive", operation: "persist", reason: "\(error)")
             return
@@ -222,16 +228,16 @@ extension ObscuraClient {
                 return
             }
         case .malformed(let reason):
-            logger.log("client message parse failed from \(senderUserId): \(reason); not acked")
-            return
+            // Its ratchet step is committed and it can never parse, so it is acked and dropped.
+            logger.log("dropped an unparseable client message from \(senderUserId): \(reason)")
         }
         guard generation == sessionGeneration, !Task.isCancelled else { return }
         replenishPreKeysIfLow()
-        do {
-            try await acknowledge(envelope.id)
-        } catch {
-            logger.ackFailed(envelopeId: envelopeId, reason: "\(error)")
-        }
+        await ack(envelope.id, envelopeId, acknowledge)
+    }
+
+    private func ack(_ id: Data, _ envelopeId: String, _ acknowledge: @Sendable (Data) async throws -> Void) async {
+        do { try await acknowledge(id) } catch { logger.ackFailed(envelopeId: envelopeId, reason: "\(error)") }
     }
 
     /// Returns the model key of a newly inboxed `APP_ENTRY`.

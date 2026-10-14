@@ -66,7 +66,7 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val definitive = e is ObscuraError.Http && e.status in setOf(400, 401, 403, 413)
+            val definitive = e is ObscuraError.Http && e.status in setOf(400, 413)
             submissions.map {
                 val failure = unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName)
                 if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure

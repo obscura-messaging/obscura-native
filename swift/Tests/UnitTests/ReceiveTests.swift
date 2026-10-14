@@ -162,6 +162,26 @@ final class ReceiveTests: XCTestCase {
         XCTAssertEqual(received, ["opaque-model"])
     }
 
+    func testARedeliveryOfAMessageTheAppAlreadyConsumedIsAckedWithoutADecryptFailure() async throws {
+        let server = FakeObscuraServer()
+        defer { server.close() }
+        let sender = try await server.register(UUID().uuidString.lowercased())
+        let receiver = try await server.register(UUID().uuidString.lowercased())
+        let client = try makeClient(apiURL: FakeObscuraServer.baseURL, database: receiver.db)
+        let delivery = envelope(try await encrypted(sender, to: receiver), sender: sender)
+        let acks = Locked(0)
+        await client.receive(delivery) { _ in acks.withLock { $0 += 1 } }
+        try await client.inbox.consume(try await client.inbox.peek(limit: 10).map(\.id))
+
+        await client.receive(delivery) { _ in acks.withLock { $0 += 1 } }
+
+        XCTAssertEqual(acks.withLock { $0 }, 2)
+        let depth = try await client.inbox.depth()
+        XCTAssertEqual(depth, 0)
+        let log = await client.getDebugLog()
+        XCTAssertFalse(log.contains { $0.contains("decrypt failed") })
+    }
+
     func testMalformedEnvelopeAndFailedDecryptNeitherAckNorLearn() async throws {
         let server = FakeObscuraServer()
         defer { server.close() }
@@ -180,7 +200,7 @@ final class ReceiveTests: XCTestCase {
         XCTAssertEqual(depth, 0)
     }
 
-    func testSuccessfulSignalDecryptLearnsTheSenderEvenWhenContentIsMalformedButDoesNotAck() async throws {
+    func testAuthenticatedPlaintextThatIsNotAClientMessageIsAckedAndDropped() async throws {
         let server = FakeObscuraServer()
         defer { server.close() }
         let sender = try await server.register(UUID().uuidString.lowercased())
@@ -189,7 +209,7 @@ final class ReceiveTests: XCTestCase {
         let data = try await encrypted(sender, to: receiver, plaintext: Data([0xff]))
         let acks = Locked(0)
         await client.receive(envelope(data, sender: sender)) { _ in acks.withLock { $0 += 1 } }
-        XCTAssertEqual(acks.withLock { $0 }, 0)
+        XCTAssertEqual(acks.withLock { $0 }, 1)
         let known = try await client.devices.deviceIds(of: sender.userId)
         XCTAssertEqual(known, [sender.deviceId])
         let depth = try await client.inbox.depth()
