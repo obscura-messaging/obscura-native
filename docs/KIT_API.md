@@ -185,8 +185,11 @@ An acknowledgement deletes the server's copy. For each envelope:
 5. Wake the host for a newly inserted application row, then acknowledge.
 
 Malformed identity, failed decrypt, or failed durable handling is logged
-and not acknowledged. Decrypted plaintext that is not a `ClientMessage` is
-logged and acknowledged: its ratchet step is spent and it can never parse.
+and not acknowledged, except a duplicate-message decrypt error: decrypt commits
+only together with its durable writes, so a spent message key proves the
+envelope is already stored, and it is acknowledged. Decrypted plaintext that
+is not a `ClientMessage` is logged and acknowledged: its ratchet step is spent
+and it can never parse.
 An inbox duplicate counts as persisted and is
 acknowledged without another wake-up. Prekeys below 20 trigger replenishment
 of 50, with at most one upload in flight; failures are logged. Each refill

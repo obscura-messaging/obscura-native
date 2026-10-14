@@ -151,4 +151,19 @@ class ReceiveDurabilityTest {
         c.auth.end()
         driver.close()
     }
+
+    @Test fun `a redelivery of a message the app already consumed is acked without a decrypt failure`() = runBlocking {
+        val (c, driver, envelope) = fixture()
+        var acks = 0
+        c.receive(envelope) { acks++ }
+        c.inbox.consume(c.inbox.peek().map { it.id })
+
+        c.receive(envelope) { acks++ }
+
+        assertEquals(2, acks)
+        assertEquals(0L, c.inbox.depth())
+        assertFalse(c.getDebugLog().any { it.contains("decrypt failed") })
+        c.auth.end()
+        driver.close()
+    }
 }

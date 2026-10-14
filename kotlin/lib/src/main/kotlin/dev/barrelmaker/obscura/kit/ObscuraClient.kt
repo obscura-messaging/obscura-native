@@ -52,6 +52,7 @@ import obscura.client.v1.appEntry
 import obscura.client.v1.friendAccept
 import obscura.client.v1.friendRequest
 import obscura.client.v1.typingSignal
+import org.signal.libsignal.protocol.DuplicateMessageException
 import xyz.obscura.server.contracts.ObscuraProtocol.Envelope
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -252,14 +253,14 @@ class ObscuraClient(
         }
         try {
             if (inbox.contains(envelopeId)) {
-                ack(envelope.id)
-                markProcessed()
+                acknowledge(envelope.id, envelopeId, ack)
                 return
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("RECV duplicate lookup or ack failed for $envelopeId: ${e.message}")
+            log("RECV duplicate lookup failed for $envelopeId: ${e.message}")
+            logger.databaseError("inbox", "contains", e.message ?: e.javaClass.simpleName)
             return
         }
         var stage = "decrypt"
@@ -285,6 +286,12 @@ class ObscuraClient(
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: DuplicateMessageException) {
+            // Decrypt commits only with its durable writes, so a spent message key means this
+            // redelivered envelope is already stored.
+            log("RECV redelivered envelope $envelopeId was already processed; acked")
+            acknowledge(envelope.id, envelopeId, ack)
+            return
         } catch (e: Exception) {
             if (stage == "decrypt") {
                 log("RECV decrypt failed from $senderUserId: ${e.message}")
@@ -309,8 +316,12 @@ class ObscuraClient(
             return
         }
         replenishPreKeys { signalStore.getPreKeyCount() < PREKEY_MIN_COUNT }
+        acknowledge(envelope.id, envelopeId, ack)
+    }
+
+    private suspend fun acknowledge(id: ByteString, envelopeId: String, ack: suspend (ByteString) -> Unit) {
         try {
-            ack(envelope.id)
+            ack(id)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
