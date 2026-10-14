@@ -27,8 +27,12 @@ actor DeviceStore {
 
     func add(userId: String, deviceId: String) async throws {
         try await db.write { db in
-            try db.execute(sql: "INSERT OR IGNORE INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
+            try Self.add(userId: userId, deviceId: deviceId, in: db)
         }
+    }
+
+    static func add(userId: String, deviceId: String, in db: Database) throws {
+        try db.execute(sql: "INSERT OR IGNORE INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
     }
 
     func replace(userId: String, deviceIds: [String]) async throws {

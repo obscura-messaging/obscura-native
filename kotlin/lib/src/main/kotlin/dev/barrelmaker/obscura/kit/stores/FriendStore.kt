@@ -23,12 +23,21 @@ internal class FriendStore(private val db: ObscuraDatabase) {
     val changes: Flow<Unit> = queries.selectAll(::friend).asFlow().map { }
 
     suspend fun add(userId: String, username: String, status: FriendStatus) = withContext(dispatcher) {
-        queries.insert(userId, username, status.value)
+        addInTransaction(userId, username, status)
     }
 
     suspend fun get(userId: String): FriendData? = withContext(dispatcher) {
-        queries.selectById(userId, ::friend).executeAsOneOrNull()
+        getInTransaction(userId)
     }
+
+    internal fun addInTransaction(userId: String, username: String, status: FriendStatus) =
+        queries.insert(userId, username, status.value)
+
+    internal fun getInTransaction(userId: String): FriendData? =
+        queries.selectById(userId, ::friend).executeAsOneOrNull()
+
+    internal fun updateStatusInTransaction(userId: String, status: FriendStatus) =
+        queries.updateStatus(status.value, userId)
 
     suspend fun getAll(): List<FriendData> = withContext(dispatcher) { queries.selectAll(::friend).executeAsList() }
 
@@ -46,7 +55,7 @@ internal class FriendStore(private val db: ObscuraDatabase) {
 
     /** Changes the status only. A status change driven by a peer must never carry a name with it. */
     suspend fun updateStatus(userId: String, status: FriendStatus) = withContext(dispatcher) {
-        queries.updateStatus(status.value, userId)
+        updateStatusInTransaction(userId, status)
     }
 
     suspend fun remove(userId: String) = withContext(dispatcher) { queries.deleteById(userId) }

@@ -93,6 +93,20 @@ class MessageSenderTest {
     }
 
     @Test
+    fun `removing the final established device returns user rejection rather than empty success`() = runBlocking {
+        alice.send(bob, "first")
+        server.remove(bob)
+
+        val result = alice.send(bob, "second").single()
+
+        assertEquals(bob.userId, result.userId)
+        assertEquals(null, result.deviceId)
+        assertEquals(REJECTED, result.status)
+        assertTrue(!result.error.isNullOrBlank())
+        assertEquals(emptyList<String>(), alice.directory.devicesOf(bob.userId))
+    }
+
+    @Test
     fun `self sync never targets this device and a single device fetches nothing`() = runBlocking {
         alice.directory.replace(alice.userId, listOf(alice.deviceId))
 

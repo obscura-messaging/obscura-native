@@ -241,7 +241,7 @@ class ObscuraClient(
         }
     }
 
-    /** Persist, then ack. Anything that fails before the ack leaves the envelope on the server. */
+    /** Commit receive ratchets with local durable writes; network-dependent control handlers run afterward. */
     internal suspend fun receive(envelope: Envelope, ack: suspend (ByteString) -> Unit = { gateway.ack(it) }) {
         val envelopeId = UuidCodec.uuidString(envelope.id)
         val senderUserId = UuidCodec.uuidString(envelope.senderId)
@@ -262,32 +262,44 @@ class ObscuraClient(
             log("RECV duplicate lookup or ack failed for $envelopeId: ${e.message}")
             return
         }
-        val plaintext = try {
-            messenger.decrypt(senderDeviceId, envelope.message)
+        var stage = "decrypt"
+        val (message, inserted, handledLocally) = try {
+            messenger.decryptAndCommit(senderDeviceId, envelope.message) { plaintext ->
+                stage = "directory"
+                devices.addInTransaction(senderUserId, senderDeviceId)
+                val parsed = try {
+                    ClientMessage.parseFrom(plaintext)
+                } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
+                    log("RECV invalid client message from $senderUserId: ${e.message}; not acked")
+                    return@decryptAndCommit Triple(null, false, false)
+                }
+                stage = "persist"
+                val inserted = if (payloadDisposition(parsed.payloadCase) == PayloadDisposition.INBOXED) {
+                    inbox.putInTransaction(inboxRecord(parsed, senderUserId, senderDeviceId, envelopeId))
+                } else false
+                val handledLocally = payloadDisposition(parsed.payloadCase) == PayloadDisposition.KIT_INTERNAL &&
+                    handleLocalFriendMessage(parsed, senderUserId)
+                Triple(parsed, inserted, handledLocally)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("RECV decrypt failed from $senderUserId: ${e.message}")
-            logger.decryptFailed(senderUserId, e.message ?: e.javaClass.simpleName)
+            if (stage == "decrypt") {
+                log("RECV decrypt failed from $senderUserId: ${e.message}")
+                logger.decryptFailed(senderUserId, e.message ?: e.javaClass.simpleName)
+            } else {
+                log("RECV $stage not stored: ${e.message}")
+                logger.databaseError(stage, "receive", e.message ?: e.javaClass.simpleName)
+            }
             return
         }
+        if (message == null) return
         try {
-            devices.add(senderUserId, senderDeviceId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            log("RECV sender directory not stored: ${e.message}")
-            logger.databaseError("devices", "receive", e.message ?: e.javaClass.simpleName)
-            return
-        }
-        val message = try {
-            ClientMessage.parseFrom(plaintext)
-        } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-            log("RECV invalid client message from $senderUserId: ${e.message}; not acked")
-            return
-        }
-        try {
-            route(message, senderUserId, senderDeviceId, envelopeId)
+            if (payloadDisposition(message.payloadCase) == PayloadDisposition.INBOXED) {
+                wakeInbox(message, envelopeId, inserted)
+            } else if (!handledLocally) {
+                route(message, senderUserId, senderDeviceId, envelopeId)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -324,23 +336,29 @@ class ObscuraClient(
     }
 
     private suspend fun inboxMessage(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String) {
+        val inserted = inbox.put(inboxRecord(message, senderUserId, senderDeviceId, envelopeId))
+        wakeInbox(message, envelopeId, inserted)
+    }
+
+    private fun inboxRecord(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String): InboxInsert {
         val entry = message.takeIf { it.payloadCase == ClientMessage.PayloadCase.APP_ENTRY }?.appEntry
-        val inserted = inbox.put(
-            InboxInsert(
-                envelopeId = envelopeId,
-                kind = WireCodec.kind(message.payloadCase),
-                senderUserId = senderUserId,
-                senderDeviceId = senderDeviceId,
-                modelKey = entry?.model,
-                entryId = entry?.id,
-                sentAt = entry?.let { clampFutureTimestamp(it.timestamp) },
-                // An unknown arm is stored whole: the kit cannot know which field is the payload.
-                payload = entry?.data?.toByteArray() ?: message.toByteArray(),
-            )
+        return InboxInsert(
+            envelopeId = envelopeId,
+            kind = WireCodec.kind(message.payloadCase),
+            senderUserId = senderUserId,
+            senderDeviceId = senderDeviceId,
+            modelKey = entry?.model,
+            entryId = entry?.id,
+            sentAt = entry?.let { clampFutureTimestamp(it.timestamp) },
+            // An unknown arm is stored whole: the kit cannot know which field is the payload.
+            payload = entry?.data?.toByteArray() ?: message.toByteArray(),
         )
+    }
+
+    private fun wakeInbox(message: ClientMessage, envelopeId: String, inserted: Boolean) {
         when {
             !inserted -> log("RECV duplicate envelope $envelopeId")
-            entry != null -> newEntries.trySend(entry.model)
+            message.payloadCase == ClientMessage.PayloadCase.APP_ENTRY -> newEntries.trySend(message.appEntry.model)
         }
     }
 
@@ -367,6 +385,25 @@ class ObscuraClient(
         }
     }
 
+    /** Only local transitions belong in the receive transaction; acceptance replies require HTTP. */
+    private fun handleLocalFriendMessage(message: ClientMessage, senderUserId: String): Boolean =
+        when (message.payloadCase) {
+            ClientMessage.PayloadCase.FRIEND_REQUEST ->
+                if (friends.getInTransaction(senderUserId) == null) {
+                    friends.addInTransaction(senderUserId, message.friendRequest.username, FriendStatus.PENDING_RECEIVED)
+                    true
+                } else false
+            ClientMessage.PayloadCase.FRIEND_ACCEPT -> {
+                if (friends.getInTransaction(senderUserId)?.status == FriendStatus.PENDING_SENT) {
+                    friends.updateStatusInTransaction(senderUserId, FriendStatus.ACCEPTED)
+                } else {
+                    log("FRIEND_ACCEPT from $senderUserId without a pending request; ignored")
+                }
+                true
+            }
+            else -> false
+        }
+
     private fun onTypingSignal(message: ClientMessage, senderUserId: String, senderDeviceId: String) {
         val signal = message.typingSignal
         if (signal.contextId.isBlank()) return
@@ -382,7 +419,10 @@ class ObscuraClient(
         if (auth.credentials == null || replenishJob?.isActive == true) return
         replenishJob = scope.launch {
             try {
-                if (needed()) api.uploadDeviceKeys(SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT))
+                if (needed()) {
+                    requireFreshToken()
+                    api.uploadDeviceKeys(SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT))
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -434,7 +474,10 @@ class ObscuraClient(
         }
     }
 
-    suspend fun registerPushToken(token: String) = api.registerPushToken(token)
+    suspend fun registerPushToken(token: String) {
+        requireFreshToken()
+        api.registerPushToken(token)
+    }
 
     /**
      * Send an entry to every device of [recipientUserIds] and to this user's other devices. Devices
@@ -508,12 +551,15 @@ class ObscuraClient(
     }
 
     suspend fun uploadAttachment(plaintext: ByteArray): AttachmentUpload {
+        requireFreshToken()
         val encrypted = AttachmentCrypto.encrypt(plaintext)
         return AttachmentUpload(api.uploadAttachment(encrypted.ciphertext), encrypted.contentKey, encrypted.nonce)
     }
 
-    suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray =
-        AttachmentCrypto.decrypt(api.fetchAttachment(id), contentKey, nonce)
+    suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray): ByteArray {
+        requireFreshToken()
+        return AttachmentCrypto.decrypt(api.fetchAttachment(id), contentKey, nonce)
+    }
 
     fun friendCode(): String {
         val self = auth.requireCredentials()

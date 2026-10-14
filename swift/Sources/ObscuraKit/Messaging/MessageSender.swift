@@ -88,9 +88,10 @@ actor MessageSender {
         let gone = missing.subtracting(fresh.deviceIds)
         let attempted = Set(firstTargets)
         let added = targets(fresh.deviceIds).filter { !attempted.contains($0) }
-        return firstPass.filter { $0.deviceId.map { !gone.contains($0) } ?? true }
+        let reconciled = firstPass.filter { $0.deviceId.map { !gone.contains($0) } ?? true }
             + fresh.failures
             + (await submit(userId, added, data, accepted)).map(\.result)
+        return reconciled.isEmpty ? [rejected(userId, nil, "no devices found")] : reconciled
     }
 
     /// Builds sessions for devices that have none and replaces the user's directory entry. A device

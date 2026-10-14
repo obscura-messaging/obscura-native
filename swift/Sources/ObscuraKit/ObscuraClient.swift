@@ -176,7 +176,7 @@ public actor ObscuraClient {
                 try begin(session(response, username: username))
                 return .existingDevice
             } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
-                // Classified by the user-scoped login below.
+                return .invalidCredentials
             }
         }
         do {
@@ -308,6 +308,16 @@ public actor ObscuraClient {
             return .fresh
         }
         return try await refresh()
+    }
+
+    func requireFreshSession() async throws -> Session {
+        try Task.checkCancellation()
+        _ = try requireSession()
+        let generation = sessionGeneration
+        let status = try await freshToken()
+        guard generation == sessionGeneration, !Task.isCancelled else { throw CancellationError() }
+        guard status != .rejected else { throw ObscuraError.notAuthenticated }
+        return try requireSession()
     }
 
     /// Concurrent callers share one refresh: the refresh token is single-use.

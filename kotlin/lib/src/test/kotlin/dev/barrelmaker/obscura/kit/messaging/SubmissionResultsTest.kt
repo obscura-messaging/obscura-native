@@ -58,6 +58,30 @@ class SubmissionResultsTest {
     }
 
     @Test
+    fun `preprocessing HTTP rejections are definitive but network failure stays unknown`() = runBlocking {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        var status = 400
+        server.createContext("/v1/messages") { exchange ->
+            exchange.requestBody.readBytes()
+            val bytes = "definitive rejection".toByteArray()
+            exchange.sendResponseHeaders(status, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        val messenger = Messenger(SignalStore(newInMemoryDatabase()),
+            APIClient("http://127.0.0.1:${server.address.port}") { "unit-test" })
+        try {
+            for (rejection in listOf(400, 401, 403, 413)) {
+                status = rejection
+                val result = messenger.submit("user", listOf(submission())).single().result
+                assertEquals(SubmissionStatus.REJECTED, result.status, "HTTP $rejection")
+                assertTrue(result.error!!.contains(rejection.toString()))
+            }
+        } finally { server.stop(0) }
+        assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("user", listOf(submission())).single().result.status)
+    }
+
+    @Test
     fun `scoped submit decodes HTTP 200 rejections and reports uncertain HTTP failures`() = runBlocking {
         val a = submission()
         val received = mutableListOf<SendMessageRequest>()

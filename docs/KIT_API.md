@@ -87,6 +87,8 @@ server failures keep it. Background refresh runs at 80% of remaining token
 lifetime, at least 5 s, with failure backoff from 5 s doubling to 5 min.
 A completed refresh from a superseded session must not restore credentials,
 overwrite storage, or sign out a newer session.
+Attachment upload/download, push registration, and prekey refill join this
+refresh path before making authenticated HTTP requests.
 
 ## Devices and sessions
 
@@ -190,6 +192,12 @@ also generates a signed prekey with an id above every locally stored signed
 prekey id, as required by the server. The identity stays unchanged, and
 earlier signed prekeys remain stored to decrypt delayed messages.
 
+For inboxed content and local-only friend transitions, Signal ratchet/prekey
+changes and their directory, inbox, or friend writes commit together. A local
+storage failure rolls them back so the server's encrypted copy can still
+decrypt on redelivery. Network-dependent control replies run outside the
+transaction.
+
 | Payload | Handling |
 |---|---|
 | `APP_ENTRY` | Inbox opaque `data`, model, id and timestamp |
@@ -267,6 +275,8 @@ Each result has user id, nullable device id, status
 Accepted means queued by the server, not delivered or viewed. Bundles or
 encryption failures are rejected; uncertain submission outcomes are unknown.
 HTTP 200 alone is not enough: the server's per-submission failures are decoded.
+Pre-processing HTTP 400/401/403/413 responses reject the affected submissions;
+transport failures, server failures, and unusable responses remain unknown.
 
 `acceptedDeviceIds` is caller-retained evidence: those devices are reported
 accepted without resubmission. A missing device list is a rejected

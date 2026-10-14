@@ -1,4 +1,12 @@
 import Foundation
+import GRDB
+
+private enum PersistedContent: Sendable {
+    case handled
+    case inboxed(modelKey: String?)
+    case control(Obscura_Client_V1_ClientMessage)
+    case malformed(String)
+}
 
 extension ObscuraClient {
     /// Returns once the gateway socket is open. Joins a connect in flight; cuts short a pending
@@ -146,36 +154,75 @@ extension ObscuraClient {
             logger.databaseError(store: "inbox", operation: "contains", reason: "\(error)")
             return
         }
-        let plaintext: Data
+        let content: PersistedContent
         do {
             let encrypted = try Obscura_Client_V1_EncryptedMessage(serializedBytes: envelope.message)
-            plaintext = try await messenger.decrypt(senderDeviceUuid: senderDeviceId, encrypted)
+            content = try await messenger.decryptAndPersist(senderDeviceUuid: senderDeviceId, encrypted) { plaintext, db in
+                try Task.checkCancellation()
+                try DeviceStore.add(userId: senderUserId, deviceId: senderDeviceId, in: db)
+                let message: Obscura_Client_V1_ClientMessage
+                do {
+                    message = try Obscura_Client_V1_ClientMessage(serializedBytes: plaintext)
+                } catch {
+                    return .malformed("\(error)")
+                }
+                switch message.payload {
+                case .appEntry(let entry)?:
+                    let inserted = try InboxStore.put(InboxInsert(
+                        envelopeId: envelopeId, kind: "APP_ENTRY", senderUserId: senderUserId,
+                        senderDeviceId: senderDeviceId, modelKey: entry.model, entryId: entry.id,
+                        sentAt: Self.clampFuture(entry.timestamp), payload: entry.data), in: db)
+                    return .inboxed(modelKey: inserted ? entry.model : nil)
+                case nil:
+                    _ = try InboxStore.put(InboxInsert(
+                        envelopeId: envelopeId, kind: "UNKNOWN", senderUserId: senderUserId,
+                        senderDeviceId: senderDeviceId, modelKey: nil, entryId: nil, sentAt: nil,
+                        payload: message.serializedData()), in: db)
+                    return .inboxed(modelKey: nil)
+                case .friendRequest(let request)?:
+                    switch try FriendStore.friend(senderUserId, in: db)?.status {
+                    case nil:
+                        try FriendStore.add(senderUserId, username: request.username, status: .pendingReceived, in: db)
+                        return .handled
+                    case .pendingReceived?:
+                        return .handled
+                    case .accepted?, .pendingSent?:
+                        return .control(message)
+                    }
+                case .friendAccept?:
+                    if try FriendStore.friend(senderUserId, in: db)?.status == .pendingSent {
+                        try FriendStore.updateStatus(senderUserId, .accepted, in: db)
+                        return .handled
+                    }
+                    return .control(message)
+                default:
+                    return .control(message)
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch let error as DatabaseError {
+            logger.databaseError(store: "receive", operation: "persist", reason: "\(error)")
+            return
         } catch {
             logger.decryptFailed(sourceUserId: senderUserId, reason: "\(error)")
             return
         }
-        do {
-            guard generation == sessionGeneration, !Task.isCancelled else { return }
-            try await devices.add(userId: senderUserId, deviceId: senderDeviceId)
-        } catch {
-            logger.databaseError(store: "devices", operation: "learnSender", reason: "\(error)")
-            return
-        }
-        let message: Obscura_Client_V1_ClientMessage
-        do {
-            message = try Obscura_Client_V1_ClientMessage(serializedBytes: plaintext)
-        } catch {
-            logger.log("client message parse failed from \(senderUserId): \(error); not acked")
-            return
-        }
-        do {
-            guard generation == sessionGeneration, !Task.isCancelled else { return }
-            if let modelKey = try await route(message, envelopeId: envelopeId, senderUserId: senderUserId,
-                                              senderDeviceId: senderDeviceId) {
-                messageContinuation.yield(modelKey)
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
+        switch content {
+        case .handled:
+            break
+        case .inboxed(let modelKey):
+            if let modelKey { messageContinuation.yield(modelKey) }
+        case .control(let message):
+            do {
+                _ = try await route(message, envelopeId: envelopeId, senderUserId: senderUserId, senderDeviceId: senderDeviceId)
+            } catch {
+                logger.databaseError(store: "receive", operation: WireCodec.messageKind(message.payload), reason: "\(error)")
+                return
             }
-        } catch {
-            logger.databaseError(store: "receive", operation: WireCodec.messageKind(message.payload), reason: "\(error)")
+        case .malformed(let reason):
+            logger.log("client message parse failed from \(senderUserId): \(reason); not acked")
             return
         }
         guard generation == sessionGeneration, !Task.isCancelled else { return }
@@ -267,6 +314,8 @@ extension ObscuraClient {
         defer { if generation == sessionGeneration { replenishTask = nil } }
         guard generation == sessionGeneration, session != nil, !Task.isCancelled else { return }
         do {
+            _ = try await requireFreshSession()
+            guard generation == sessionGeneration, !Task.isCancelled else { return }
             try await api.uploadDeviceKeys(signalStore.addPreKeys(Self.preKeyReplenishCount))
         } catch {
             logger.preKeyReplenishFailed(reason: "\(error)")

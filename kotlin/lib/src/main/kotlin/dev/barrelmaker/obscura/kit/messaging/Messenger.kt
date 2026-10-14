@@ -1,6 +1,8 @@
 package dev.barrelmaker.obscura.kit.messaging
 
 import com.google.protobuf.ByteString
+import dev.barrelmaker.obscura.kit.ObscuraError
+import dev.barrelmaker.obscura.kit.SubmissionStatus
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
 import dev.barrelmaker.obscura.kit.network.APIClient
@@ -55,7 +57,7 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
                 .build()
         }
 
-    /** Upload [submissions] as one request. A transport failure leaves every result unknown. */
+    /** Preprocessing rejections are definitive; transport failures leave every result unknown. */
     suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): List<Submitted> {
         if (submissions.isEmpty()) return emptyList()
         return try {
@@ -64,16 +66,30 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            submissions.map { unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName) }
+            val definitive = e is ObscuraError.Http && e.status in setOf(400, 401, 403, 413)
+            submissions.map {
+                val failure = unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName)
+                if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure
+            }
         }
     }
 
     /** Decrypt with the session of [senderDeviceId]. A valid MAC authenticates that device. */
     suspend fun decrypt(senderDeviceId: String, message: ByteString): ByteArray = withContext(dispatcher) {
+        decryptOnDispatcher(senderDeviceId, message)
+    }
+
+    /** Never commit a receive ratchet before its synchronous durable writes succeed. */
+    suspend fun <T> decryptAndCommit(senderDeviceId: String, message: ByteString, persist: (ByteArray) -> T): T =
+        withContext(dispatcher) {
+            signalStore.transaction { persist(decryptOnDispatcher(senderDeviceId, message)) }
+        }
+
+    private fun decryptOnDispatcher(senderDeviceId: String, message: ByteString): ByteArray {
         val encrypted = EncryptedMessage.parseFrom(message)
         val content = encrypted.content.toByteArray()
         val cipher = SessionCipher(signalStore, addressFor(senderDeviceId))
-        if (encrypted.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE) cipher.decrypt(PreKeySignalMessage(content))
+        return if (encrypted.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE) cipher.decrypt(PreKeySignalMessage(content))
         else cipher.decrypt(SignalMessage(content))
     }
 

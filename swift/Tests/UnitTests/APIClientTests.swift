@@ -5,6 +5,7 @@ import XCTest
 final class APIClientTests: XCTestCase {
     override func setUp() {
         RetryProtocol.responses.withLock { $0 = [] }
+        RetryProtocol.requests.withLock { $0 = [] }
         URLProtocol.registerClass(RetryProtocol.self)
     }
 
@@ -56,6 +57,47 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(RetryProtocol.responses.withLock { $0.count }, 1)
     }
 
+    func testAnExistingDevicesWrongPasswordNeedsOnlyOneLoginRequest() async throws {
+        RetryProtocol.responses.withLock { $0 = [(401, nil), (401, nil)] }
+        let client = try makeClient(apiURL: "https://\(RetryProtocol.host)")
+        try client.signalStore.install(SignalKeys.generate())
+        let deviceId = UUID().uuidString.lowercased()
+        try await client.devices.setLocalDeviceId(deviceId)
+
+        let scenario = try await client.login("known-account", "incorrect-password")
+
+        XCTAssertEqual(scenario, .invalidCredentials)
+        XCTAssertEqual(client.authState, .loggedOut)
+        let requests = RetryProtocol.requests.withLock { $0 }
+        XCTAssertEqual(requests.count, 1, "401 already definitively rejects the password")
+        let body = try XCTUnwrap(requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(json["deviceId"], deviceId)
+    }
+
+    func testMessageRetriesKeepTheSameBodySubmissionIDsAndIdempotencyKey() async throws {
+        RetryProtocol.responses.withLock { $0 = [(429, "0"), (503, "0"), (200, nil)] }
+        let api = try APIClient(baseURL: "https://\(RetryProtocol.host)")
+        var submission = Obscura_V1_SendMessageRequest.Submission()
+        submission.submissionID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
+        submission.deviceID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
+        submission.message = Data([1, 2, 3])
+        var message = Obscura_V1_SendMessageRequest()
+        message.messages = [submission]
+        let body = try message.serializedData()
+
+        _ = try await api.sendMessage(body)
+
+        let requests = RetryProtocol.requests.withLock { $0 }
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests.allSatisfy { $0.httpBody == body })
+        let keys = requests.compactMap { $0.value(forHTTPHeaderField: "Idempotency-Key") }
+        XCTAssertEqual(keys.count, 3)
+        XCTAssertEqual(Set(keys).count, 1)
+        XCTAssertEqual(keys.first?.count, 32, "Rust UUID parsing accepts the compact 32-hex representation")
+        XCTAssertTrue(keys.allSatisfy { $0.allSatisfy(\.isHexDigit) })
+    }
+
     func testCleartextIsRefusedExceptOnLoopback() {
         XCTAssertThrowsError(try APIClient(baseURL: "http://example.com"))
         XCTAssertNoThrow(try APIClient(baseURL: "http://localhost:3000"))
@@ -72,10 +114,25 @@ final class APIClientTests: XCTestCase {
 private final class RetryProtocol: URLProtocol {
     static let host = "retry-unit.invalid"
     static let responses = Locked<[(status: Int, retryAfter: String?)]>([])
+    static let requests = Locked<[URLRequest]>([])
 
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == host }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        var captured = request
+        if captured.httpBody == nil, let stream = captured.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var body = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                body.append(buffer, count: count)
+            }
+            captured.httpBody = body
+        }
+        Self.requests.withLock { $0.append(captured) }
         let (status, retryAfter) = Self.responses.withLock { $0.removeFirst() }
         let headers = retryAfter.map { ["Retry-After": $0] } ?? [:]
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,

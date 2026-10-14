@@ -45,17 +45,21 @@ public actor InboxStore {
     /// Returns false when the envelope is already inboxed (a redelivery).
     func put(_ record: InboxInsert) async throws -> Bool {
         try await db.write { db in
-            let exists = "SELECT EXISTS(SELECT 1 FROM inbox_rows WHERE envelope_id = ?)"
-            if try Bool.fetchOne(db, sql: exists, arguments: [record.envelopeId]) == true { return false }
-            try db.execute(sql: """
-                INSERT INTO inbox_rows (envelope_id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, arguments: [
-                record.envelopeId, record.kind, record.senderUserId, record.senderDeviceId,
-                record.modelKey, record.entryId, record.sentAt.map { Int64(clamping: $0) }, record.payload,
-            ])
-            return true
+            try Self.put(record, in: db)
         }
+    }
+
+    static func put(_ record: InboxInsert, in db: Database) throws -> Bool {
+        let exists = "SELECT EXISTS(SELECT 1 FROM inbox_rows WHERE envelope_id = ?)"
+        if try Bool.fetchOne(db, sql: exists, arguments: [record.envelopeId]) == true { return false }
+        try db.execute(sql: """
+            INSERT INTO inbox_rows (envelope_id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, arguments: [
+            record.envelopeId, record.kind, record.senderUserId, record.senderDeviceId,
+            record.modelKey, record.entryId, record.sentAt.map { Int64(clamping: $0) }, record.payload,
+        ])
+        return true
     }
 
     /// Oldest first. Side-effect free: rows stay until consumed or discarded.

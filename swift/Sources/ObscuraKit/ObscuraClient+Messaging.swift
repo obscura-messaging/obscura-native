@@ -50,12 +50,8 @@ extension ObscuraClient {
 
     /// Every send refreshes a near-expiry token once, up front.
     func sendContext() async throws -> (userId: String, sender: MessageSender) {
-        try Task.checkCancellation()
-        _ = try requireSession()
-        let generation = sessionGeneration
-        _ = try await freshToken()
-        guard generation == sessionGeneration else { throw CancellationError() }
-        guard let session, let sender else { throw ObscuraError.notAuthenticated }
+        let session = try await requireFreshSession()
+        guard let sender else { throw ObscuraError.notAuthenticated }
         return (session.userId, sender)
     }
 
@@ -169,19 +165,26 @@ extension ObscuraClient {
 
     /// Encrypts and uploads; the server only sees ciphertext. The app sends the result in an entry.
     public func uploadAttachment(_ plaintext: Data) async throws -> UploadedAttachment {
-        _ = try requireSession()
+        _ = try await requireFreshSession()
+        let generation = sessionGeneration
         let encrypted = try AttachmentCrypto.encrypt(plaintext)
         let response = try await api.uploadAttachment(encrypted.ciphertext)
+        guard generation == sessionGeneration, !Task.isCancelled else { throw CancellationError() }
         return UploadedAttachment(id: response.id, contentKey: encrypted.contentKey, nonce: encrypted.nonce)
     }
 
     public func downloadDecryptedAttachment(id: String, contentKey: Data, nonce: Data) async throws -> Data {
-        _ = try requireSession()
-        return try AttachmentCrypto.decrypt(await api.fetchAttachment(id), contentKey: contentKey, nonce: nonce)
+        _ = try await requireFreshSession()
+        let generation = sessionGeneration
+        let ciphertext = try await api.fetchAttachment(id)
+        guard generation == sessionGeneration, !Task.isCancelled else { throw CancellationError() }
+        return try AttachmentCrypto.decrypt(ciphertext, contentKey: contentKey, nonce: nonce)
     }
 
     public func registerPushToken(_ token: String) async throws {
-        _ = try requireSession()
+        _ = try await requireFreshSession()
+        let generation = sessionGeneration
         try await api.registerPushToken(token)
+        guard generation == sessionGeneration, !Task.isCancelled else { throw CancellationError() }
     }
 }

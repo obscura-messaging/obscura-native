@@ -35,6 +35,16 @@ Unit tests are offline. Scenario tests require a server and default to
 `https://obscura.barrelmaker.dev`; use `OBSCURA_TEST_API` to select a test
 server. See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for server setup.
 
+`ScenarioTests.ServerContractTests` uses the same server configuration as the
+existing integration job. It exercises gateway-driven repeated refill, delayed
+signed-key bootstrap, token rotation during attachment/push/refill operations,
+device removal, batch rejection, metadata/session prekey cost, and local SQLite
+inbox/friend-write faults followed by real gateway redelivery. No admin/database server access
+or additional environment switches are required.
+
+The receive path passes its GRDB transaction through libsignal's `StoreContext`;
+store callbacks use that connection instead of re-entering the database queue.
+
 ## Host integration
 
 The host supplies `SessionStorage`, `ObscuraLogger`, and a device name.
