@@ -71,11 +71,14 @@ class SubmissionResultsTest {
         val messenger = Messenger(SignalStore(newInMemoryDatabase()),
             APIClient("http://127.0.0.1:${server.address.port}") { "unit-test" })
         try {
-            for (rejection in listOf(400, 401, 403, 413)) {
-                status = rejection
+            for ((code, expected) in listOf(
+                400 to SubmissionStatus.REJECTED, 413 to SubmissionStatus.REJECTED,
+                401 to SubmissionStatus.UNKNOWN, 403 to SubmissionStatus.UNKNOWN,
+            )) {
+                status = code
                 val result = messenger.submit("user", listOf(submission())).single().result
-                assertEquals(SubmissionStatus.REJECTED, result.status, "HTTP $rejection")
-                assertTrue(result.error!!.contains(rejection.toString()))
+                assertEquals(expected, result.status, "HTTP $code")
+                assertTrue(result.error!!.contains(code.toString()))
             }
         } finally { server.stop(0) }
         assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("user", listOf(submission())).single().result.status)

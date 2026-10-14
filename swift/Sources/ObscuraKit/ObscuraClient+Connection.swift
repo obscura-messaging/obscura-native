@@ -222,8 +222,8 @@ extension ObscuraClient {
                 return
             }
         case .malformed(let reason):
-            logger.log("client message parse failed from \(senderUserId): \(reason); not acked")
-            return
+            // Its ratchet step is committed and it can never parse, so it is acked and dropped.
+            logger.log("dropped an unparseable client message from \(senderUserId): \(reason)")
         }
         guard generation == sessionGeneration, !Task.isCancelled else { return }
         replenishPreKeysIfLow()

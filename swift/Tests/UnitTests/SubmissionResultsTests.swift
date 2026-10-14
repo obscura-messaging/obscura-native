@@ -62,8 +62,8 @@ final class SubmissionResultsTests: XCTestCase {
         for status in [400, 401, 403, 413, 500] {
             SubmissionFailureProtocol.status.withLock { $0 = status }
             let results = await messenger.submit(userId: "user", submissions: [submission(1), submission(2)]).map(\.result)
-            XCTAssertEqual(results.map(\.status), Array(repeating: status == 500 ? .unknown : .rejected, count: 2),
-                           "HTTP \(status)")
+            XCTAssertEqual(results.map(\.status), Array(repeating: [400, 413].contains(status) ? .rejected : .unknown,
+                                                         count: 2), "HTTP \(status)")
             XCTAssertTrue(results.allSatisfy { $0.error?.contains("\(status)") == true })
         }
         SubmissionFailureProtocol.status.withLock { $0 = nil }

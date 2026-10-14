@@ -140,12 +140,12 @@ class ReceiveDurabilityTest {
         }
     }
 
-    @Test fun `authenticated malformed plaintext teaches stamped sender but is never acked`() = runBlocking {
+    @Test fun `authenticated plaintext that is not a client message is acked and dropped`() = runBlocking {
         val (c, driver, envelope) = fixture(malformedPlaintext = true)
         var acks = 0
         c.receive(envelope) { acks++ }
         assertEquals(listOf(peerDevice), c.devices.devicesOf(peerUser))
-        assertEquals(0, acks)
+        assertEquals(1, acks)
         assertEquals(0L, c.inbox.depth())
         assertTrue(c.getDebugLog().any { it.contains("invalid client message") })
         c.auth.end()

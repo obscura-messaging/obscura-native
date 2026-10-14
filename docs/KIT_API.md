@@ -185,7 +185,9 @@ An acknowledgement deletes the server's copy. For each envelope:
 5. Wake the host for a newly inserted application row, then acknowledge.
 
 Malformed identity, failed decrypt, or failed durable handling is logged
-and not acknowledged. An inbox duplicate counts as persisted and is
+and not acknowledged. Decrypted plaintext that is not a `ClientMessage` is
+logged and acknowledged: its ratchet step is spent and it can never parse.
+An inbox duplicate counts as persisted and is
 acknowledged without another wake-up. Prekeys below 20 trigger replenishment
 of 50, with at most one upload in flight; failures are logged. Each refill
 also generates a signed prekey with an id above every locally stored signed
@@ -277,8 +279,10 @@ Each result has user id, nullable device id, status
 Accepted means queued by the server, not delivered or viewed. Bundles or
 encryption failures are rejected; uncertain submission outcomes are unknown.
 HTTP 200 alone is not enough: the server's per-submission failures are decoded.
-Pre-processing HTTP 400/401/403/413 responses reject the affected submissions;
-transport failures, server failures, and unusable responses remain unknown.
+Pre-processing HTTP 400 and 413 responses reject the affected submissions;
+401, 403, transport failures, server failures, and unusable responses leave
+them unknown, because they describe the session or the attempt, not the
+message.
 
 `acceptedDeviceIds` is caller-retained evidence: those devices are reported
 accepted without resubmission. A missing device list is a rejected

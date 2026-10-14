@@ -180,7 +180,7 @@ final class ReceiveTests: XCTestCase {
         XCTAssertEqual(depth, 0)
     }
 
-    func testSuccessfulSignalDecryptLearnsTheSenderEvenWhenContentIsMalformedButDoesNotAck() async throws {
+    func testAuthenticatedPlaintextThatIsNotAClientMessageIsAckedAndDropped() async throws {
         let server = FakeObscuraServer()
         defer { server.close() }
         let sender = try await server.register(UUID().uuidString.lowercased())
@@ -189,7 +189,7 @@ final class ReceiveTests: XCTestCase {
         let data = try await encrypted(sender, to: receiver, plaintext: Data([0xff]))
         let acks = Locked(0)
         await client.receive(envelope(data, sender: sender)) { _ in acks.withLock { $0 += 1 } }
-        XCTAssertEqual(acks.withLock { $0 }, 0)
+        XCTAssertEqual(acks.withLock { $0 }, 1)
         let known = try await client.devices.deviceIds(of: sender.userId)
         XCTAssertEqual(known, [sender.deviceId])
         let depth = try await client.inbox.depth()

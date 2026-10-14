@@ -270,7 +270,9 @@ class ObscuraClient(
                 val parsed = try {
                     ClientMessage.parseFrom(plaintext)
                 } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                    log("RECV invalid client message from $senderUserId: ${e.message}; not acked")
+                    // Its ratchet step is committed and it can never parse, so it is acked and dropped.
+                    log("RECV invalid client message from $senderUserId: ${e.message}; dropped")
+                    logger.log("dropped an unparseable client message from $senderUserId: ${e.message}")
                     return@decryptAndCommit Triple(null, false, false)
                 }
                 stage = "persist"
@@ -293,18 +295,17 @@ class ObscuraClient(
             }
             return
         }
-        if (message == null) return
         try {
-            if (payloadDisposition(message.payloadCase) == PayloadDisposition.INBOXED) {
-                wakeInbox(message, envelopeId, inserted)
-            } else if (!handledLocally) {
-                route(message, senderUserId, senderDeviceId, envelopeId)
+            when {
+                message == null -> Unit
+                payloadDisposition(message.payloadCase) == PayloadDisposition.INBOXED -> wakeInbox(message, envelopeId, inserted)
+                !handledLocally -> route(message, senderUserId, senderDeviceId, envelopeId)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("RECV ${message.payloadCase.name} not stored: ${e.message}")
-            logger.databaseError("receive", message.payloadCase.name, e.message ?: e.javaClass.simpleName)
+            log("RECV ${message?.payloadCase?.name} not stored: ${e.message}")
+            logger.databaseError("receive", message?.payloadCase?.name ?: "UNKNOWN", e.message ?: e.javaClass.simpleName)
             return
         }
         replenishPreKeys { signalStore.getPreKeyCount() < PREKEY_MIN_COUNT }
