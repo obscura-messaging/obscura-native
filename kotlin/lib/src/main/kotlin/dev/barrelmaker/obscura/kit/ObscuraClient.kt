@@ -421,7 +421,9 @@ class ObscuraClient(
             try {
                 if (needed()) {
                     requireFreshToken()
-                    api.uploadDeviceKeys(SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT))
+                    val keys = SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT)
+                    api.uploadDeviceKeys(keys)
+                    signalStore.retireSignedPreKeys(keys.signedPreKey.keyId)
                 }
             } catch (e: CancellationException) {
                 throw e

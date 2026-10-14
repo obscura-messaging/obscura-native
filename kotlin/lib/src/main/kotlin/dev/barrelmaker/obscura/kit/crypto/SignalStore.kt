@@ -105,6 +105,16 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
 
     override fun removeSignedPreKey(signedPreKeyId: Int) = queries.deleteSignedPreKey(signedPreKeyId.toLong())
 
+    /**
+     * Call once the server has accepted signed prekey [publishedId]. Every older key stops being
+     * advertised now; one superseded longer than the server keeps queued messages can no longer be
+     * named by a deliverable message, so it is deleted.
+     */
+    fun retireSignedPreKeys(publishedId: Int, nowMs: Long = System.currentTimeMillis()) = db.transaction {
+        queries.supersedeSignedPreKeysBelow(nowMs, publishedId.toLong())
+        queries.deleteSignedPreKeysSupersededBefore(nowMs - SIGNED_PREKEY_GRACE_MS)
+    }
+
     override fun loadSession(address: SignalProtocolAddress): SessionRecord =
         queries.selectSession(address.key()).executeAsOneOrNull()?.let(::SessionRecord) ?: SessionRecord()
 
@@ -141,4 +151,9 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     override fun markKyberPreKeyUsed(kyberPreKeyId: Int) = throw UnsupportedOperationException("No Kyber prekeys")
 
     private fun SignalProtocolAddress.key() = "$name.$deviceId"
+
+    companion object {
+        /** The server's queued-message TTL. */
+        const val SIGNED_PREKEY_GRACE_MS = 30L * 24 * 60 * 60 * 1000
+    }
 }

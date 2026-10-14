@@ -189,8 +189,10 @@ and not acknowledged. An inbox duplicate counts as persisted and is
 acknowledged without another wake-up. Prekeys below 20 trigger replenishment
 of 50, with at most one upload in flight; failures are logged. Each refill
 also generates a signed prekey with an id above every locally stored signed
-prekey id, as required by the server. The identity stays unchanged, and
-earlier signed prekeys remain stored to decrypt delayed messages.
+prekey id, as required by the server. The identity stays unchanged. When an
+upload succeeds, every older signed prekey is marked superseded at that time
+(if not already), and those superseded 30 days ago or more, the server's
+queued-message TTL, are deleted.
 
 For inboxed content and local-only friend transitions, Signal ratchet/prekey
 changes and their directory, inbox, or friend writes commit together. A local

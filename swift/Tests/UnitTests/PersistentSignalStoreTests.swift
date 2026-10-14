@@ -138,6 +138,38 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertNoThrow(try reopened.loadSignedPreKey(id: UInt32(unpublished.signedPreKey.keyId), context: NullContext()))
     }
 
+    func testOlderSignedPreKeysStayForTheGracePeriodAfterANewerOneIsPublished() throws {
+        let grace = PersistentSignalStore.signedPreKeyGraceMs
+        let store = try store()
+        try store.install(SignalKeys.generate())
+        let second = try store.addPreKeys(50).signedPreKey.keyId
+        try store.retireSignedPreKeys(publishedId: second, nowMs: 0)
+
+        try store.retireSignedPreKeys(publishedId: second, nowMs: grace - 1)
+        XCTAssertNoThrow(try store.loadSignedPreKey(id: 1, context: NullContext()))
+
+        try store.retireSignedPreKeys(publishedId: second, nowMs: grace)
+        XCTAssertThrowsError(try store.loadSignedPreKey(id: 1, context: NullContext()))
+        XCTAssertNoThrow(try store.loadSignedPreKey(id: UInt32(second), context: NullContext()))
+    }
+
+    func testTheGracePeriodRunsFromTheFirstPublishThatSupersededAKey() throws {
+        let grace = PersistentSignalStore.signedPreKeyGraceMs
+        let store = try store()
+        try store.install(SignalKeys.generate())
+        let second = try store.addPreKeys(50).signedPreKey.keyId
+        try store.retireSignedPreKeys(publishedId: second, nowMs: 0)
+        let unpublished = try store.addPreKeys(50).signedPreKey.keyId
+        let third = try store.addPreKeys(50).signedPreKey.keyId
+
+        try store.retireSignedPreKeys(publishedId: third, nowMs: grace)
+
+        XCTAssertThrowsError(try store.loadSignedPreKey(id: 1, context: NullContext()))
+        for id in [second, unpublished, third] {
+            XCTAssertNoThrow(try store.loadSignedPreKey(id: UInt32(id), context: NullContext()))
+        }
+    }
+
     func testAMessageUsingAnEarlierBundleDecryptsAfterSignedPreKeyRotation() throws {
         let alice = try store()
         try alice.install(SignalKeys.generate())

@@ -150,4 +150,36 @@ class SignalKeyUtilsTest {
                 .decrypt(PreKeySignalMessage(ciphertext.serialize())))
         }
     }
+
+    @Test
+    fun `older signed prekeys stay for the grace period after a newer one is published`() {
+        val grace = SignalStore.SIGNED_PREKEY_GRACE_MS
+        SignalKeyUtils.generateDeviceKeys(store)
+        val second = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId
+        store.retireSignedPreKeys(second, nowMs = 0)
+
+        store.retireSignedPreKeys(second, nowMs = grace - 1)
+        assertTrue(store.containsSignedPreKey(1))
+
+        store.retireSignedPreKeys(second, nowMs = grace)
+        assertFalse(store.containsSignedPreKey(1))
+        assertTrue(store.containsSignedPreKey(second))
+    }
+
+    @Test
+    fun `the grace period runs from the first publish that superseded a key`() {
+        val grace = SignalStore.SIGNED_PREKEY_GRACE_MS
+        SignalKeyUtils.generateDeviceKeys(store)
+        val second = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId
+        store.retireSignedPreKeys(second, nowMs = 0)
+        val unpublished = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId
+        val third = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId
+
+        store.retireSignedPreKeys(third, nowMs = grace)
+
+        assertFalse(store.containsSignedPreKey(1))
+        assertTrue(store.containsSignedPreKey(second))
+        assertTrue(store.containsSignedPreKey(unpublished))
+        assertTrue(store.containsSignedPreKey(third))
+    }
 }
