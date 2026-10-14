@@ -10,6 +10,8 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
     }
 
     static let signedPreKeyId: UInt32 = 1
+    /// The server's queued-message TTL.
+    static let signedPreKeyGraceMs: Int64 = 30 * 24 * 60 * 60 * 1000
 
     private let db: DatabaseQueue
     private let logger: ObscuraLogger
@@ -37,6 +39,18 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
                 try db.execute(sql: "INSERT INTO signal_prekeys (key_id, record) VALUES (?, ?)",
                                arguments: [preKey.id, Data(preKey.serialize())])
             }
+        }
+    }
+
+    /// Call once the server has accepted signed prekey `publishedId`. Every older key stops being
+    /// advertised now; one superseded longer than the server keeps queued messages can no longer be
+    /// named by a deliverable message, so it is deleted.
+    func retireSignedPreKeys(publishedId: Int, nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws {
+        try db.write { db in
+            try db.execute(sql: "UPDATE signal_signed_prekeys SET superseded_at = ? WHERE key_id < ? AND superseded_at IS NULL",
+                           arguments: [nowMs, publishedId])
+            try db.execute(sql: "DELETE FROM signal_signed_prekeys WHERE superseded_at <= ?",
+                           arguments: [nowMs - Self.signedPreKeyGraceMs])
         }
     }
 

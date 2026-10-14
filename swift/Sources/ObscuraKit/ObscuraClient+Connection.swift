@@ -316,7 +316,9 @@ extension ObscuraClient {
         do {
             _ = try await requireFreshSession()
             guard generation == sessionGeneration, !Task.isCancelled else { return }
-            try await api.uploadDeviceKeys(signalStore.addPreKeys(Self.preKeyReplenishCount))
+            let keys = try signalStore.addPreKeys(Self.preKeyReplenishCount)
+            try await api.uploadDeviceKeys(keys)
+            try signalStore.retireSignedPreKeys(publishedId: keys.signedPreKey.keyId)
         } catch {
             logger.preKeyReplenishFailed(reason: "\(error)")
         }

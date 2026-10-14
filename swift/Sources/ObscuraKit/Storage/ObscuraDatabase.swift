@@ -83,7 +83,8 @@ enum ObscuraDatabase {
                 );
                 CREATE TABLE signal_signed_prekeys (
                     key_id INTEGER PRIMARY KEY,
-                    record BLOB NOT NULL
+                    record BLOB NOT NULL,
+                    superseded_at INTEGER
                 );
                 CREATE TABLE signal_sessions (
                     address TEXT PRIMARY KEY,

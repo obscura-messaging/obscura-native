@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS SignalPreKey (
 
 CREATE TABLE IF NOT EXISTS SignalSignedPreKey (
     id INTEGER NOT NULL PRIMARY KEY,
-    record BLOB NOT NULL
+    record BLOB NOT NULL,
+    superseded_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS SignalSession (
@@ -79,6 +80,12 @@ INSERT OR REPLACE INTO SignalSignedPreKey(id, record) VALUES (?, ?);
 
 deleteSignedPreKey:
 DELETE FROM SignalSignedPreKey WHERE id = ?;
+
+supersedeSignedPreKeysBelow:
+UPDATE SignalSignedPreKey SET superseded_at = :now WHERE id < :publishedId AND superseded_at IS NULL;
+
+deleteSignedPreKeysSupersededBefore:
+DELETE FROM SignalSignedPreKey WHERE superseded_at <= :cutoff;
 
 deleteAllSignedPreKeys:
 DELETE FROM SignalSignedPreKey;
