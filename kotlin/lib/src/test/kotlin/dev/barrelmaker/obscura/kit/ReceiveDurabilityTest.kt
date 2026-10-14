@@ -9,6 +9,8 @@ import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils
 import dev.barrelmaker.obscura.kit.messaging.Messenger
 import dev.barrelmaker.obscura.kit.messaging.parsePeerBundles
 import dev.barrelmaker.obscura.kit.network.APIClient
+import dev.barrelmaker.obscura.kit.stores.FriendStatus
+import dev.barrelmaker.obscura.kit.stores.FriendStore
 import kotlinx.coroutines.runBlocking
 import obscura.client.v1.Client.ClientMessage
 import org.json.JSONArray
@@ -21,7 +23,7 @@ class ReceiveDurabilityTest {
     private val peerUser = UUID.randomUUID().toString()
     private val peerDevice = UUID.randomUUID().toString()
 
-    private suspend fun fixture(malformedPlaintext: Boolean = false): Triple<ObscuraClient, JdbcSqliteDriver, Envelope> {
+    private suspend fun fixture(malformedPlaintext: Boolean = false, incoming: ClientMessage? = null): Triple<ObscuraClient, JdbcSqliteDriver, Envelope> {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ObscuraDatabase.Schema.create(driver)
         val c = ObscuraClient(ObscuraConfig("http://127.0.0.1:1", "test"), driver, storedSession())
@@ -33,7 +35,7 @@ class ReceiveDurabilityTest {
         val bundle = keys.toJson().put("deviceId", SELF_DEVICE_ID)
             .put("oneTimePreKey", keys.oneTimePreKeys.first().toJson())
         messenger.establishSession(parsePeerBundles(JSONArray().put(bundle)).single())
-        val message = ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry {
+        val message = incoming ?: ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry {
             model = "opaque"
             id = "entry"
             timestamp = 1
@@ -52,6 +54,29 @@ class ReceiveDurabilityTest {
             .setSenderDeviceId(UuidCodec.uuidToBytes(UUID.fromString(peerDevice)))
             .setMessage(encrypted).build()
         return Triple(c, driver, envelope)
+    }
+
+    @Test fun `local friend request and accept writes commit with decrypt or remain recoverable`() = runBlocking {
+        for (accept in listOf(false, true)) {
+            val message = if (accept) ClientMessage.newBuilder().setFriendAccept(obscura.client.v1.friendAccept {}).build()
+                else ClientMessage.newBuilder().setFriendRequest(obscura.client.v1.friendRequest { username = "peer" }).build()
+            val (c, driver, envelope) = fixture(incoming = message)
+            val friends = FriendStore(c.db)
+            if (accept) friends.add(peerUser, "peer", FriendStatus.PENDING_SENT)
+            val operation = if (accept) "UPDATE" else "INSERT"
+            driver.execute(null, "CREATE TRIGGER fail_friend BEFORE $operation ON Friend BEGIN SELECT RAISE(FAIL, 'friend disk unavailable'); END", 0)
+            var acks = 0
+            c.receive(envelope) { acks++ }
+            assertEquals(0, acks)
+            assertEquals(if (accept) FriendStatus.PENDING_SENT else null, friends.get(peerUser)?.status)
+            assertTrue(c.devices.devicesOf(peerUser).isEmpty())
+            driver.execute(null, "DROP TRIGGER fail_friend", 0)
+            c.receive(envelope) { acks++ }
+            assertEquals(1, acks)
+            assertEquals(if (accept) FriendStatus.ACCEPTED else FriendStatus.PENDING_RECEIVED, friends.get(peerUser)?.status)
+            c.auth.end()
+            driver.close()
+        }
     }
 
     @Test fun `successful decrypt adds stamped sender additively before persist then ack`() = runBlocking {
@@ -104,6 +129,12 @@ class ReceiveDurabilityTest {
             assertEquals(0, acks, table)
             assertEquals(0L, c.inbox.depth())
             assertTrue(c.getDebugLog().any { it.contains("not stored") })
+            assertTrue(c.devices.devicesOf(peerUser).isEmpty(), "failed receive must roll back directory evidence")
+            driver.execute(null, "DROP TRIGGER fail_write", 0)
+            c.receive(envelope) { acks++ }
+            assertEquals(1, acks, "redelivery after a durable failure must remain decryptable")
+            assertEquals(1L, c.inbox.depth())
+            assertEquals(listOf(peerDevice), c.devices.devicesOf(peerUser))
             c.auth.end()
             driver.close()
         }

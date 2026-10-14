@@ -196,20 +196,75 @@ final class ReceiveTests: XCTestCase {
         XCTAssertEqual(depth, 0)
     }
 
-    func testDirectoryOrInboxPersistenceFailurePreventsAck() async throws {
+    func testDirectoryOrInboxPersistenceFailureRollsBackSignalAndRedeliveryThenAcks() async throws {
         for table in ["devices", "inbox_rows"] {
             let server = FakeObscuraServer()
             let sender = try await server.register(UUID().uuidString.lowercased())
             let receiver = try await server.register(UUID().uuidString.lowercased())
             let client = try makeClient(apiURL: FakeObscuraServer.baseURL, database: receiver.db)
             let data = try await encrypted(sender, to: receiver)
+            let delivery = envelope(data, sender: sender)
+            let originalPreKeys = try receiver.store.preKeyCount()
             try await receiver.db.write {
                 try $0.execute(sql: "CREATE TRIGGER fail_write BEFORE INSERT ON \(table) BEGIN SELECT RAISE(ABORT, 'disk failed'); END")
             }
             let acks = Locked(0)
-            await client.receive(envelope(data, sender: sender)) { _ in acks.withLock { $0 += 1 } }
+            await client.receive(delivery) { _ in acks.withLock { $0 += 1 } }
             XCTAssertEqual(acks.withLock { $0 }, 0, table)
+            XCTAssertEqual(try receiver.store.preKeyCount(), originalPreKeys, "failed persistence must not consume the private OPK")
+            let sessionAfterFailure = try await client.messenger.hasSession(sender.deviceId)
+            XCTAssertFalse(sessionAfterFailure, "failed persistence must not commit the new Signal session")
+            let failedDepth = try await client.inbox.depth()
+            XCTAssertEqual(failedDepth, 0)
+            try await receiver.db.write { try $0.execute(sql: "DROP TRIGGER fail_write") }
+            await client.receive(delivery) { _ in acks.withLock { $0 += 1 } }
+            XCTAssertEqual(acks.withLock { $0 }, 1, table)
+            XCTAssertEqual(try receiver.store.preKeyCount(), originalPreKeys - 1)
+            let recovered = try await client.inbox.peek(limit: 10)
+            XCTAssertEqual(recovered.map(\.entryId), ["entry"])
+            await client.receive(delivery) { _ in acks.withLock { $0 += 1 } }
+            XCTAssertEqual(acks.withLock { $0 }, 2, "persisted duplicates may ACK without decrypting twice")
             server.close()
         }
+    }
+
+    func testAnEstablishedRatchetAlsoRollsBackOnInboxFailureAndSurvivesClientRecreation() async throws {
+        let server = FakeObscuraServer()
+        defer { server.close() }
+        let sender = try await server.register(UUID().uuidString.lowercased())
+        let receiver = try await server.register(UUID().uuidString.lowercased())
+        let client = try makeClient(apiURL: FakeObscuraServer.baseURL, database: receiver.db)
+        let first = try await encrypted(sender, to: receiver)
+        await client.receive(envelope(first, sender: sender)) { _ in }
+        var reply = Obscura_Client_V1_ClientMessage()
+        reply.appEntry.model = "ack"
+        reply.appEntry.id = "reply"
+        _ = await receiver.sender.send(to: sender.userId, try reply.serializedData(), acceptedDeviceIds: [])
+        _ = try await sender.receive()
+        let next = try await encrypted(sender, to: receiver)
+        let encryptedMessage = try Obscura_Client_V1_EncryptedMessage(serializedBytes: next)
+        XCTAssertEqual(encryptedMessage.type, .encryptedMessage)
+        let delivery = envelope(next, sender: sender)
+        let originalSession = try await receiver.db.read {
+            try Data.fetchOne($0, sql: "SELECT record FROM signal_sessions WHERE address = ?",
+                              arguments: ["\(sender.deviceId).1"])
+        }
+        try await receiver.db.write {
+            try $0.execute(sql: "CREATE TRIGGER fail_inbox BEFORE INSERT ON inbox_rows BEGIN SELECT RAISE(ABORT, 'disk failed'); END")
+        }
+        let acks = Locked(0)
+        await client.receive(delivery) { _ in acks.withLock { $0 += 1 } }
+        XCTAssertEqual(acks.withLock { $0 }, 0)
+        let failedSession = try await receiver.db.read {
+            try Data.fetchOne($0, sql: "SELECT record FROM signal_sessions WHERE address = ?",
+                              arguments: ["\(sender.deviceId).1"])
+        }
+        XCTAssertEqual(failedSession, originalSession)
+        try await receiver.db.write { try $0.execute(sql: "DROP TRIGGER fail_inbox") }
+        let restarted = try makeClient(apiURL: FakeObscuraServer.baseURL, database: receiver.db)
+        await restarted.receive(delivery) { _ in acks.withLock { $0 += 1 } }
+        XCTAssertEqual(acks.withLock { $0 }, 1)
+        let rows = try await restarted.inbox.peek(limit: 10)
+        XCTAssertEqual(rows.count, 2)
     }
 }

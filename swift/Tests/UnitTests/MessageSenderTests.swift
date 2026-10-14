@@ -146,6 +146,19 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(results.first?.status, .rejected)
     }
 
+    func testDeletingTheFinalWarmDeviceReturnsAUserLevelRejection() async throws {
+        let warm = await send(alice, to: bob, "warm")
+        XCTAssertEqual(warm, [accepted(bob)])
+        server.remove(bob)
+        let results = await send(alice, to: bob, "gone")
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.userId, bob.userId)
+        XCTAssertNil(results.first?.deviceId)
+        XCTAssertEqual(results.first?.status, .rejected)
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(listed, [])
+    }
+
     func testDevicesWithAcceptedEvidenceAreNotResentAndNeedNoSession() async throws {
         try await alice.directory.add(userId: bob.userId, deviceId: bob.deviceId)
 

@@ -250,6 +250,31 @@ final class SessionRestoreTests: XCTestCase {
         XCTAssertNil(storage.session)
     }
 
+    func testLogoutDuringAttachmentRefreshCannotUploadWithASupersededSession() async throws {
+        let storage = MemorySessionStorage(Self.stored)
+        let client = try client(storage)
+        try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
+        StubProtocol.outcome = .refreshed(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600),
+                                         refreshToken: "obsolete")
+        StubProtocol.requests.withLock { $0 = 0 }
+        let started = expectation(description: "attachment waiting for token refresh")
+        StubProtocol.onRefresh.withLock { $0 = { started.fulfill() } }
+        let upload = Task { try await client.uploadAttachment(Data([1, 2, 3])) }
+        await fulfillment(of: [started], timeout: 3)
+        StubProtocol.onRefresh.withLock { $0 = nil }
+        try await client.logout()
+        let release = StubProtocol.pending.withLock { pending in
+            defer { pending = nil }
+            return pending
+        }
+        release?()
+        do { _ = try await upload.value; XCTFail("superseded upload must not proceed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(StubProtocol.requests.withLock { $0 }, 2, "only refresh and logout, never attachment upload")
+        XCTAssertEqual(client.authState, .loggedOut)
+        XCTAssertNil(storage.session)
+    }
+
     private func lateRefresh(_ outcome: StubProtocol.Outcome, replace: Bool) async throws {
         let storage = MemorySessionStorage(Self.stored)
         let client = try client(storage)

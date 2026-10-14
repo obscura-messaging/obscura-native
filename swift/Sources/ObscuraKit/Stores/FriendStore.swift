@@ -36,18 +36,26 @@ actor FriendStore {
     }
 
     func add(_ userId: String, username: String, status: FriendStatus) async throws {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         try await db.write { db in
-            try db.execute(sql: """
-                INSERT OR REPLACE INTO friends (user_id, username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-            """, arguments: [userId, username, status.rawValue, now, now])
+            try Self.add(userId, username: username, status: status, in: db)
         }
+    }
+
+    static func add(_ userId: String, username: String, status: FriendStatus, in db: Database) throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try db.execute(sql: """
+            INSERT OR REPLACE INTO friends (user_id, username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+        """, arguments: [userId, username, status.rawValue, now, now])
     }
 
     func friend(_ userId: String) async throws -> Friend? {
         try await db.read { db in
-            try Row.fetchOne(db, sql: "SELECT * FROM friends WHERE user_id = ?", arguments: [userId]).map(Self.friend)
+            try Self.friend(userId, in: db)
         }
+    }
+
+    static func friend(_ userId: String, in db: Database) throws -> Friend? {
+        try Row.fetchOne(db, sql: "SELECT * FROM friends WHERE user_id = ?", arguments: [userId]).map(Self.friend)
     }
 
     func all() async throws -> [Friend] {
@@ -55,14 +63,17 @@ actor FriendStore {
     }
 
     func updateStatus(_ userId: String, _ status: FriendStatus) async throws {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         try await db.write { db in
-            try db.execute(sql: "UPDATE friends SET status = ?, updated_at = ? WHERE user_id = ?",
-                           arguments: [status.rawValue, now, userId])
-            guard db.changesCount == 1 else {
-                throw DatabaseError(message: "friend \(userId) is missing; status was not updated")
-            }
+            try Self.updateStatus(userId, status, in: db)
+        }
+    }
 
+    static func updateStatus(_ userId: String, _ status: FriendStatus, in db: Database) throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try db.execute(sql: "UPDATE friends SET status = ?, updated_at = ? WHERE user_id = ?",
+                       arguments: [status.rawValue, now, userId])
+        guard db.changesCount == 1 else {
+            throw DatabaseError(message: "friend \(userId) is missing; status was not updated")
         }
     }
 

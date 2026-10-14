@@ -21,6 +21,10 @@ final class AuthTests: XCTestCase {
         let alice = try await TestUser.register()
         try await alice.client.logout()
 
+        let existingWrongPassword = try await alice.client.login(alice.username, TestServer.password + "x")
+        XCTAssertEqual(existingWrongPassword, .invalidCredentials)
+        XCTAssertEqual(alice.client.authState, .loggedOut)
+
         let existing = try await alice.client.login(alice.username, TestServer.password)
         XCTAssertEqual(existing, .existingDevice)
         XCTAssertEqual(alice.client.authState, .authenticated)
@@ -84,6 +88,13 @@ final class AuthTests: XCTestCase {
         let rotated = try XCTUnwrap(storage.session?["refreshToken"])
         XCTAssertNotEqual(rotated, first, "the single-use refresh token is rotated and re-persisted")
         XCTAssertEqual(storage.session?["token"].flatMap(APIClient.deviceId), alice.deviceId)
+        XCTAssertEqual(storage.session?["token"].flatMap(APIClient.userId), alice.userId)
+        do {
+            _ = try await alice.client.api.refreshSession(first)
+            XCTFail("the previous refresh token is single-use")
+        } catch ObscuraError.http(let status, _) {
+            XCTAssertEqual(status, 401)
+        }
         try await alice.client.connect()
         XCTAssertEqual(alice.client.connectionState, .connected, "a device-scoped token can still fetch a gateway ticket")
         await alice.client.disconnect()

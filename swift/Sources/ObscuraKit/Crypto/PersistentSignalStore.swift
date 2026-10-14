@@ -5,6 +5,10 @@ import LibSignalClient
 /// This device's Signal keys and sessions. Holds no state outside the database.
 final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeyStore, SessionStore, KyberPreKeyStore,
     @unchecked Sendable {
+    private struct TransactionContext: StoreContext {
+        let database: Database
+    }
+
     static let signedPreKeyId: UInt32 = 1
 
     private let db: DatabaseQueue
@@ -67,25 +71,41 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
         "\(address.name).\(address.deviceId)"
     }
 
-    private func blob(_ sql: String, _ key: DatabaseValueConvertible) throws -> Data? {
-        try db.read { db in try Data.fetchOne(db, sql: sql, arguments: [key]) }
+    /// Signal callbacks and the receive-path persistence run on the same SQLite transaction.
+    func transaction<T>(_ operation: (Database, StoreContext) throws -> T) throws -> T {
+        try db.write { database in
+            try operation(database, TransactionContext(database: database))
+        }
     }
 
-    private func write(_ sql: String, _ arguments: StatementArguments) throws {
-        try db.write { db in try db.execute(sql: sql, arguments: arguments) }
+    private func read<T>(_ context: StoreContext, _ operation: (Database) throws -> T) throws -> T {
+        if let transaction = context as? TransactionContext { return try operation(transaction.database) }
+        return try db.read(operation)
+    }
+
+    private func blob(_ sql: String, _ key: DatabaseValueConvertible, _ context: StoreContext) throws -> Data? {
+        try read(context) { db in try Data.fetchOne(db, sql: sql, arguments: [key]) }
+    }
+
+    private func write(_ sql: String, _ arguments: StatementArguments, _ context: StoreContext) throws {
+        if let transaction = context as? TransactionContext {
+            try transaction.database.execute(sql: sql, arguments: arguments)
+        } else {
+            try db.write { db in try db.execute(sql: sql, arguments: arguments) }
+        }
     }
 
     // MARK: - IdentityKeyStore
 
     func identityKeyPair(context: StoreContext) throws -> IdentityKeyPair {
-        guard let data = try blob("SELECT key_pair FROM signal_local_identity WHERE id = ?", 1) else {
+        guard let data = try blob("SELECT key_pair FROM signal_local_identity WHERE id = ?", 1, context) else {
             throw SignalError.invalidState("no local identity")
         }
         return try IdentityKeyPair(bytes: data)
     }
 
     func localRegistrationId(context: StoreContext) throws -> UInt32 {
-        guard let id = try db.read({ db in try Int64.fetchOne(db, sql: "SELECT registration_id FROM signal_local_identity") }) else {
+        guard let id = try read(context, { db in try Int64.fetchOne(db, sql: "SELECT registration_id FROM signal_local_identity") }) else {
             throw SignalError.invalidState("no local identity")
         }
         return UInt32(id)
@@ -96,9 +116,9 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
     func saveIdentity(_ identity: IdentityKey, for address: ProtocolAddress, context: StoreContext) throws -> Bool {
         let key = Self.address(address)
         let new = Data(identity.serialize())
-        let existing = try blob("SELECT key_data FROM signal_identities WHERE address = ?", key)
+        let existing = try blob("SELECT key_data FROM signal_identities WHERE address = ?", key, context)
         if let existing, !constantTimeEqual(existing, new) { logger.identityChanged(address: key) }
-        try write("INSERT OR REPLACE INTO signal_identities (address, key_data) VALUES (?, ?)", [key, new])
+        try write("INSERT OR REPLACE INTO signal_identities (address, key_data) VALUES (?, ?)", [key, new], context)
         return existing != nil
     }
 
@@ -108,43 +128,43 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
     }
 
     func identity(for address: ProtocolAddress, context: StoreContext) throws -> IdentityKey? {
-        try blob("SELECT key_data FROM signal_identities WHERE address = ?", Self.address(address)).map { try IdentityKey(bytes: $0) }
+        try blob("SELECT key_data FROM signal_identities WHERE address = ?", Self.address(address), context).map { try IdentityKey(bytes: $0) }
     }
 
     // MARK: - PreKeyStore
 
     func loadPreKey(id: UInt32, context: StoreContext) throws -> PreKeyRecord {
-        guard let data = try blob("SELECT record FROM signal_prekeys WHERE key_id = ?", id) else {
+        guard let data = try blob("SELECT record FROM signal_prekeys WHERE key_id = ?", id, context) else {
             throw SignalError.invalidKeyIdentifier("no prekey \(id)")
         }
         return try PreKeyRecord(bytes: data)
     }
 
     func storePreKey(_ record: PreKeyRecord, id: UInt32, context: StoreContext) throws {
-        try write("INSERT OR REPLACE INTO signal_prekeys (key_id, record) VALUES (?, ?)", [id, Data(record.serialize())])
+        try write("INSERT OR REPLACE INTO signal_prekeys (key_id, record) VALUES (?, ?)", [id, Data(record.serialize())], context)
     }
 
     func removePreKey(id: UInt32, context: StoreContext) throws {
-        try write("DELETE FROM signal_prekeys WHERE key_id = ?", [id])
+        try write("DELETE FROM signal_prekeys WHERE key_id = ?", [id], context)
     }
 
     // MARK: - SignedPreKeyStore
 
     func loadSignedPreKey(id: UInt32, context: StoreContext) throws -> SignedPreKeyRecord {
-        guard let data = try blob("SELECT record FROM signal_signed_prekeys WHERE key_id = ?", id) else {
+        guard let data = try blob("SELECT record FROM signal_signed_prekeys WHERE key_id = ?", id, context) else {
             throw SignalError.invalidKeyIdentifier("no signed prekey \(id)")
         }
         return try SignedPreKeyRecord(bytes: data)
     }
 
     func storeSignedPreKey(_ record: SignedPreKeyRecord, id: UInt32, context: StoreContext) throws {
-        try write("INSERT OR REPLACE INTO signal_signed_prekeys (key_id, record) VALUES (?, ?)", [id, Data(record.serialize())])
+        try write("INSERT OR REPLACE INTO signal_signed_prekeys (key_id, record) VALUES (?, ?)", [id, Data(record.serialize())], context)
     }
 
     // MARK: - SessionStore
 
     func loadSession(for address: ProtocolAddress, context: StoreContext) throws -> SessionRecord? {
-        try blob("SELECT record FROM signal_sessions WHERE address = ?", Self.address(address)).map { try SessionRecord(bytes: $0) }
+        try blob("SELECT record FROM signal_sessions WHERE address = ?", Self.address(address), context).map { try SessionRecord(bytes: $0) }
     }
 
     func loadExistingSessions(for addresses: [ProtocolAddress], context: StoreContext) throws -> [SessionRecord] {
@@ -153,7 +173,7 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
 
     func storeSession(_ record: SessionRecord, for address: ProtocolAddress, context: StoreContext) throws {
         try write("INSERT OR REPLACE INTO signal_sessions (address, record) VALUES (?, ?)",
-                  [Self.address(address), Data(record.serialize())])
+                  [Self.address(address), Data(record.serialize())], context)
     }
 
     // MARK: - KyberPreKeyStore (the server does not distribute Kyber prekeys)

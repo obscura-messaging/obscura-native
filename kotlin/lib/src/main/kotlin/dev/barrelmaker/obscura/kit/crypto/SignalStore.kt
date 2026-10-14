@@ -29,6 +29,9 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
 
     fun hasIdentity(): Boolean = localIdentity != null && queries.selectLocalIdentity().executeAsOneOrNull() != null
 
+    /** Keep ratchet changes and the corresponding durable receive writes in the same transaction. */
+    internal fun <T> transaction(block: () -> T): T = db.transactionWithResult { block() }
+
     fun generateIdentity(): Pair<IdentityKeyPair, Int> {
         val identity = IdentityKeyPair.generate() to KeyHelper.generateRegistrationId(false)
         queries.insertLocalIdentity(identity.first.serialize(), identity.second.toLong())

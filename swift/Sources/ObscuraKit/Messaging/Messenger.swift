@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import LibSignalClient
 import SwiftProtobuf
 
@@ -72,8 +73,8 @@ actor Messenger {
         return submission
     }
 
-    /// Uploads `submissions` as one request. A transport or decoding failure leaves every
-    /// submission's acceptance unknown.
+    /// Uploads `submissions` as one request. Pre-processing HTTP rejections are definitive;
+    /// transport, server or decoding failures leave acceptance unknown.
     func submit(userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]) async -> [Submitted] {
         if submissions.isEmpty { return [] }
         var request = Obscura_V1_SendMessageRequest()
@@ -82,25 +83,41 @@ actor Messenger {
             let response = try Obscura_V1_SendMessageResponse(serializedBytes: try await api.sendMessage(request.serializedData()))
             return try submissionResults(userId: userId, submissions: submissions, response: response)
         } catch {
+            let status: SubmissionStatus
+            if let failure = error as? ObscuraError, case .http(let code, _) = failure,
+               [400, 401, 403, 413].contains(code) {
+                status = .rejected
+            } else {
+                status = .unknown
+            }
             return submissions.map {
-                Submitted(SubmissionResult(userId: userId, deviceId: uuidString($0.deviceID), status: .unknown, error: "\(error)"))
+                Submitted(SubmissionResult(userId: userId, deviceId: uuidString($0.deviceID), status: status, error: "\(error)"))
             }
         }
     }
 
     /// A valid MAC proves the sender holds this device's session, so `senderDeviceUuid` is a sound
     /// attribution once decrypt succeeds.
-    func decrypt(senderDeviceUuid: String, _ encrypted: Obscura_Client_V1_EncryptedMessage) throws -> Data {
+    func decryptAndPersist<T: Sendable>(senderDeviceUuid: String, _ encrypted: Obscura_Client_V1_EncryptedMessage,
+                                       persist: @Sendable (Data, Database) throws -> T) throws -> T {
+        try store.transaction { database, context in
+            let plaintext = try decrypt(senderDeviceUuid: senderDeviceUuid, encrypted, context: context)
+            return try persist(plaintext, database)
+        }
+    }
+
+    func decrypt(senderDeviceUuid: String, _ encrypted: Obscura_Client_V1_EncryptedMessage,
+                 context: StoreContext = NullContext()) throws -> Data {
         let address = try Self.address(senderDeviceUuid)
         switch encrypted.type {
         case .prekeyMessage:
             return Data(try signalDecryptPreKey(
                 message: PreKeySignalMessage(bytes: encrypted.content), from: address,
                 sessionStore: store, identityStore: store, preKeyStore: store, signedPreKeyStore: store,
-                kyberPreKeyStore: store, context: NullContext()))
+                kyberPreKeyStore: store, context: context))
         case .encryptedMessage:
             return Data(try signalDecrypt(message: SignalMessage(bytes: encrypted.content), from: address,
-                                          sessionStore: store, identityStore: store, context: NullContext()))
+                                          sessionStore: store, identityStore: store, context: context))
         case .unspecified, .UNRECOGNIZED:
             throw ObscuraError.protocolViolation("encrypted message type \(encrypted.type.rawValue)")
         }

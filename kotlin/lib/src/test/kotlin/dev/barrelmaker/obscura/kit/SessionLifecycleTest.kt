@@ -42,6 +42,39 @@ class SessionLifecycleTest {
         .body(if (status == 200) """{"token":"${jwt(SELF_USER_ID, FAR_FUTURE)}","refreshToken":"rotated"}""" else "{}")
         .bodyDelay(300, TimeUnit.MILLISECONDS).build()
 
+    @Test fun `wrong credentials on a local device issue exactly one password request`() = runBlocking {
+        val c = sessionClient(url, storedSession())
+        server.enqueue(MockResponse.Builder().code(401).body("invalid credentials").build())
+        // A second response makes the pre-fix extra password request fail promptly instead of hanging.
+        server.enqueue(MockResponse.Builder().code(401).body("invalid credentials").build())
+
+        assertEquals(LoginScenario.INVALID_CREDENTIALS, c.login("self", "wrong password"))
+        assertEquals(1, server.requestCount)
+        assertEquals(AuthState.LOGGED_OUT, c.authState.value)
+        assertTrue(server.takeRequest(5, TimeUnit.SECONDS)!!.body!!.utf8().contains(SELF_DEVICE_ID))
+    }
+
+    @Test fun `authenticated REST operation joins a refresh already in flight before using its token`() = runBlocking {
+        val storage = storedSession()
+        val c = sessionClient(url, storage)
+        assertTrue(c.auth.restore())
+        server.enqueue(refresh())
+        val pending = async(Dispatchers.Default) { c.auth.refresh() }
+        assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+        server.enqueue(MockResponse.Builder().code(204).build())
+
+        c.registerPushToken("push-token")
+
+        assertEquals("rotated", storage.data!!["refreshToken"])
+        val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+        assertEquals("/v1/push-tokens", request.url.encodedPath)
+        assertEquals("Bearer ${c.auth.requireCredentials().token}", request.headers["Authorization"])
+        assertEquals(TokenStatus.FRESH, pending.await())
+        assertEquals(2, server.requestCount)
+        c.auth.end()
+        Unit
+    }
+
     @Test fun `restore rejects missing Signal identity and a mismatched device before authentication`() = runBlocking {
         val missing = newClient(url, storedSession())
         missing.devices.storeIdentity(SELF_DEVICE_ID)

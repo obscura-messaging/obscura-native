@@ -53,6 +53,40 @@ final class SubmissionResultsTests: XCTestCase {
         XCTAssertEqual(malformed.map(\.status), [.unknown])
         XCTAssertNotNil(malformed.first?.error)
     }
+
+    func testDefinitiveHTTPRejectionsAreNotUnknownButServerAndTransportFailuresAre() async throws {
+        XCTAssertTrue(URLProtocol.registerClass(SubmissionFailureProtocol.self))
+        defer { URLProtocol.unregisterClass(SubmissionFailureProtocol.self) }
+        let messenger = Messenger(api: try APIClient(baseURL: "https://submission-failure.invalid"),
+                                  store: try signalStoreWithIdentity())
+        for status in [400, 401, 403, 413, 500] {
+            SubmissionFailureProtocol.status.withLock { $0 = status }
+            let results = await messenger.submit(userId: "user", submissions: [submission(1), submission(2)]).map(\.result)
+            XCTAssertEqual(results.map(\.status), Array(repeating: status == 500 ? .unknown : .rejected, count: 2),
+                           "HTTP \(status)")
+            XCTAssertTrue(results.allSatisfy { $0.error?.contains("\(status)") == true })
+        }
+        SubmissionFailureProtocol.status.withLock { $0 = nil }
+        let transport = await messenger.submit(userId: "user", submissions: [submission(1)]).map(\.result)
+        XCTAssertEqual(transport.map(\.status), [.unknown], "a lost response does not prove non-acceptance")
+    }
+}
+
+private final class SubmissionFailureProtocol: URLProtocol {
+    static let status = Locked<Int?>(nil)
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "submission-failure.invalid" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let status = Self.status.withLock({ $0 }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            return
+        }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                                                            headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("pre-processing failure \(status)".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 
 private final class SubmissionResponseProtocol: URLProtocol {

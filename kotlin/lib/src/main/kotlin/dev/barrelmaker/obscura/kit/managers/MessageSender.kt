@@ -60,8 +60,9 @@ internal class MessageSender(
         val fresh = refresh(userId).getOrElse { return@withLock firstPass }
         val gone = missing - fresh.deviceIds.toSet()
         val added = targetsOf(fresh.deviceIds) - targets.toSet()
-        firstPass.filterNot { it.deviceId in gone } + fresh.failures +
-            submit(userId, added, message, acceptedDeviceIds).map { it.result }
+        (firstPass.filterNot { it.deviceId in gone } + fresh.failures +
+            submit(userId, added, message, acceptedDeviceIds).map { it.result })
+            .ifEmpty { listOf(rejected(userId, null, "No devices found")) }
     }
 
     /** [send], failing when no device accepted. For control messages that must reach the user. */

@@ -101,6 +101,7 @@ internal class AuthManager(
                 return LoginScenario.EXISTING_DEVICE
             } catch (e: ObscuraError.Http) {
                 if (e.status !in REJECTION_STATUSES) throw e
+                return LoginScenario.INVALID_CREDENTIALS
             }
         }
         try {
@@ -109,7 +110,7 @@ internal class AuthManager(
             if (e.status in REJECTION_STATUSES) return LoginScenario.INVALID_CREDENTIALS
             throw e
         }
-        return if (localDeviceId != null) LoginScenario.DEVICE_MISMATCH else LoginScenario.NEW_DEVICE
+        return LoginScenario.NEW_DEVICE
     }
 
     suspend fun loginAndProvision(username: String, password: String) {
@@ -176,11 +177,10 @@ internal class AuthManager(
     private suspend fun refreshIfNeeded(force: Boolean): TokenStatus {
         val attempt = synchronized(lock) {
             val current = credentials ?: return TokenStatus.REJECTED
+            refreshInFlight?.takeIf { it.isActive }?.let { return@synchronized it }
             if (!force && secondsUntilExpiry(current.token) > FRESHNESS_MARGIN_S) return TokenStatus.FRESH
-            refreshInFlight?.takeIf { it.isActive } ?: run {
-                val version = generation
-                scope.async { performRefresh(current, version) }.also { refreshInFlight = it }
-            }
+            val version = generation
+            scope.async { performRefresh(current, version) }.also { refreshInFlight = it }
         }
         return attempt.await()
     }

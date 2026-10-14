@@ -48,6 +48,10 @@ class InboxStore internal constructor(
 
     /** True when a row was inserted, false when [InboxInsert.envelopeId] was already stored. */
     internal suspend fun put(record: InboxInsert): Boolean = withContext(dispatcher) {
+        putInTransaction(record)
+    }
+
+    internal fun putInTransaction(record: InboxInsert): Boolean =
         db.transactionWithResult {
             val existed = queries.existsByEnvelopeId(record.envelopeId).executeAsOne()
             queries.insertRow(
@@ -59,7 +63,6 @@ class InboxStore internal constructor(
             }
             !existed
         }
-    }
 
     /** The oldest rows, without removing them. Peeking twice returns the same rows. */
     suspend fun peek(limit: Int = 50): List<InboxRecord> = withContext(dispatcher) {
