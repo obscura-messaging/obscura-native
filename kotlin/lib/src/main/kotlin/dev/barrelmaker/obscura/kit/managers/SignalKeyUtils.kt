@@ -26,11 +26,13 @@ internal object SignalKeyUtils {
         )
     }
 
-    /** [count] more one-time prekeys after the highest stored id, with the current identity. */
+    /** Refill with the current identity and a fresh signed prekey; earlier signed keys remain stored. */
     fun generateMorePreKeys(store: SignalStore, count: Int): DeviceKeys = DeviceKeys(
         identityKey = store.identityKeyPair.publicKey.serialize().toBase64(),
         registrationId = store.localRegistrationId,
-        signedPreKey = store.loadSignedPreKey(SIGNED_PREKEY_ID).toApiJson(),
+        signedPreKey = generateSignedPreKey(
+            store, store.identityKeyPair, Math.toIntExact(store.getHighestSignedPreKeyId() + 1),
+        ).toApiJson(),
         oneTimePreKeys = generateOneTimePreKeys(store, store.getHighestPreKeyId().toInt() + 1, count).toApiJson(),
     )
 

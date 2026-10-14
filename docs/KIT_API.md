@@ -185,7 +185,10 @@ An acknowledgement deletes the server's copy. For each envelope:
 Malformed identity, failed decrypt, or failed durable handling is logged
 and not acknowledged. An inbox duplicate counts as persisted and is
 acknowledged without another wake-up. Prekeys below 20 trigger replenishment
-of 50, with at most one upload in flight; failures are logged.
+of 50, with at most one upload in flight; failures are logged. Each refill
+also generates a signed prekey with an id above every locally stored signed
+prekey id, as required by the server. The identity stays unchanged, and
+earlier signed prekeys remain stored to decrypt delayed messages.
 
 | Payload | Handling |
 |---|---|

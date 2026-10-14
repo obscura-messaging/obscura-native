@@ -4,24 +4,32 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.signal.libsignal.protocol.IdentityKeyPair
+import org.signal.libsignal.protocol.SessionBuilder
+import org.signal.libsignal.protocol.SessionCipher
+import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.Curve
+import org.signal.libsignal.protocol.message.PreKeySignalMessage
+import org.signal.libsignal.protocol.state.PreKeyBundle
 
 class SignalKeyUtilsTest {
 
     private lateinit var store: SignalStore
+    private lateinit var db: ObscuraDatabase
     private lateinit var identity: IdentityKeyPair
 
     @BeforeEach
     fun setup() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ObscuraDatabase.Schema.create(driver)
-        store = SignalStore(ObscuraDatabase(driver))
+        db = ObscuraDatabase(driver)
+        store = SignalStore(db)
         identity = store.generateIdentity().first
     }
 
@@ -78,5 +86,68 @@ class SignalKeyUtilsTest {
 
         assertEquals(listOf(50, 51, 52), json.map { it.keyId })
         assertTrue(json.all { it.publicKey.isNotEmpty() })
+    }
+
+    @Test
+    fun `every refill advances the signed prekey id required by the server across reloads`() {
+        val initial = SignalKeyUtils.generateDeviceKeys(store)
+        var serverMaxId = initial.signedPreKey.keyId
+        val records = mutableMapOf(serverMaxId to store.loadSignedPreKey(serverMaxId).serialize())
+
+        repeat(3) { refill ->
+            store = SignalStore(db)
+            val upload = SignalKeyUtils.generateMorePreKeys(store, 50)
+
+            assertTrue(upload.signedPreKey.keyId > serverMaxId, "the server rejects an equal or lower signed prekey id")
+            assertEquals(serverMaxId + 1, upload.signedPreKey.keyId)
+            assertEquals(initial.identityKey, upload.identityKey)
+            assertEquals(initial.registrationId, upload.registrationId)
+            assertEquals((101 + refill * 50..150 + refill * 50).toList(), upload.oneTimePreKeys.map { it.keyId })
+            val signed = store.loadSignedPreKey(upload.signedPreKey.keyId)
+            assertEquals(signed.toApiJson(), upload.signedPreKey)
+            assertTrue(Curve.verifySignature(store.identityKeyPair.publicKey.publicKey, signed.keyPair.publicKey.serialize(), signed.signature))
+            records.forEach { (id, bytes) -> assertArrayEquals(bytes, store.loadSignedPreKey(id).serialize()) }
+            serverMaxId = upload.signedPreKey.keyId
+            records[serverMaxId] = signed.serialize()
+        }
+    }
+
+    @Test
+    fun `a refill after an unpublished attempt does not reuse its signed prekey id`() {
+        SignalKeyUtils.generateDeviceKeys(store)
+        val unpublished = SignalKeyUtils.generateMorePreKeys(store, 50)
+        store = SignalStore(db)
+
+        val retry = SignalKeyUtils.generateMorePreKeys(store, 50)
+
+        assertEquals(3, retry.signedPreKey.keyId)
+        assertTrue(retry.signedPreKey.keyId > unpublished.signedPreKey.keyId)
+        assertEquals((151..200).toList(), retry.oneTimePreKeys.map { it.keyId })
+        assertTrue(store.containsSignedPreKey(unpublished.signedPreKey.keyId))
+    }
+
+    @Test
+    fun `a message using an earlier bundle still decrypts after signed prekey rotation`() {
+        SignalKeyUtils.generateDeviceKeys(store)
+        val signed = store.loadSignedPreKey(1)
+        val preKey = store.loadPreKey(1)
+        val senderDriver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        senderDriver.use { driver ->
+            ObscuraDatabase.Schema.create(driver)
+            val sender = SignalStore(ObscuraDatabase(driver)).also { it.generateIdentity() }
+            val receiverAddress = SignalProtocolAddress("receiver", 1)
+            SessionBuilder(sender, receiverAddress).process(PreKeyBundle(
+                store.localRegistrationId, 1, preKey.id, preKey.keyPair.publicKey,
+                signed.id, signed.keyPair.publicKey, signed.signature, store.identityKeyPair.publicKey,
+            ))
+            val plaintext = "delayed message".toByteArray()
+            val ciphertext = SessionCipher(sender, receiverAddress).encrypt(plaintext)
+
+            repeat(2) { SignalKeyUtils.generateMorePreKeys(store, 50) }
+            store = SignalStore(db)
+
+            assertArrayEquals(plaintext, SessionCipher(store, SignalProtocolAddress("sender", 1))
+                .decrypt(PreKeySignalMessage(ciphertext.serialize())))
+        }
     }
 }

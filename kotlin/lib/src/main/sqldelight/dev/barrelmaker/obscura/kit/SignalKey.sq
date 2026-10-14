@@ -71,6 +71,9 @@ SELECT record FROM SignalSignedPreKey WHERE id = ?;
 selectAllSignedPreKeys:
 SELECT record FROM SignalSignedPreKey;
 
+highestSignedPreKeyId:
+SELECT MAX(id) FROM SignalSignedPreKey;
+
 insertSignedPreKey:
 INSERT OR REPLACE INTO SignalSignedPreKey(id, record) VALUES (?, ?);
 
