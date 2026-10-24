@@ -249,8 +249,8 @@ extension ObscuraClient {
                 envelopeId: envelopeId, kind: "APP_ENTRY", senderUserId: senderUserId, senderDeviceId: senderDeviceId,
                 modelKey: entry.model, entryId: entry.id, sentAt: Self.clampFuture(entry.timestamp), payload: entry.data))
             return inserted ? entry.model : nil
-        case nil:
-            // An arm this kit does not know. Inboxed whole rather than destroyed.
+        case nil, .friendListSync?:
+            // An arm this kit does not know or does not handle yet. Inboxed whole rather than destroyed.
             _ = try await inbox.put(InboxInsert(
                 envelopeId: envelopeId, kind: "UNKNOWN", senderUserId: senderUserId, senderDeviceId: senderDeviceId,
                 modelKey: nil, entryId: nil, sentAt: nil, payload: message.serializedData()))

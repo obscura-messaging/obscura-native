@@ -6,7 +6,8 @@
     { "wire": "friend_request", "app": "FRIEND_REQUEST" },
     { "wire": "friend_accept", "app": "FRIEND_ACCEPT" },
     { "wire": "app_entry", "app": "APP_ENTRY" },
-    { "wire": "typing_signal", "app": "TYPING_SIGNAL" }
+    { "wire": "typing_signal", "app": "TYPING_SIGNAL" },
+    { "wire": "friend_list_sync", "app": "FRIEND_LIST_SYNC" }
   ],
   "typingStates": [
     { "wire": "TYPING_STATE_STARTED", "app": "started" },

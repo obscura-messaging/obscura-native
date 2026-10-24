@@ -22,7 +22,7 @@ CONTRACT = CONFORMANCE_DIR.parents[1] / "docs" / "KIT_API.md"
 
 # The vector files this validator knows how to check. Adding a new behavior
 # class is a deliberate act: register its file + a checker here (fail-loud).
-KNOWN_FILES = {"wire"}
+KNOWN_FILES = {"wire", "link"}
 
 
 class Report:
@@ -122,8 +122,97 @@ def check_wire(rep: Report, doc: dict) -> None:
                     rep.err(w + " appEntry", f"'timestamp' must be a number, got {ms.get('timestamp')!r}")
 
 
+def _is_hex(rep: Report, where: str, obj: dict, key: str, length: int | None = None) -> None:
+    v = obj.get(key)
+    if not isinstance(v, str) or len(v) % 2 or any(c not in "0123456789abcdef" for c in v):
+        rep.err(where, f"'{key}' must be lowercase hex, got {v!r}")
+    elif length is not None and len(v) != 2 * length:
+        rep.err(where, f"'{key}' must be {length} bytes, got {len(v) // 2}")
+
+
+def _is_uint(rep: Report, where: str, obj: dict, key: str) -> None:
+    v = obj.get(key)
+    if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v < 2**53:
+        rep.err(where, f"'{key}' must be an integer in [0, 2^53), got {v!r}")
+
+
+FRIEND_STATUSES = {"FRIEND_STATUS_PENDING_SENT", "FRIEND_STATUS_PENDING_RECEIVED", "FRIEND_STATUS_ACCEPTED"}
+
+
+def check_link(rep: Report, doc: dict) -> None:
+    f = "link.json"
+    _check_common(rep, f, doc, "link")
+    rep.only_keys(f, doc, {"version", "kind", "description", "envelopes", "linkCodes"})
+    if rep.is_nonempty_list(f, doc, "envelopes"):
+        _unique_names(rep, f + " envelopes", doc["envelopes"])
+        for i, e in enumerate(doc["envelopes"]):
+            w = f"{f} envelopes[{i}]"
+            if not isinstance(e, dict):
+                rep.err(w, "must be an object")
+                continue
+            rep.only_keys(w, e, {"name", "newDevicePrivateKey", "newDevicePublicKey", "primaryPrivateKey",
+                                 "primaryPublicKey", "sharedSecret", "key", "nonce", "linkBundle", "plaintext",
+                                 "ciphertext", "linkEnvelope"})
+            rep.is_str(w, e, "name")
+            for k in ("newDevicePrivateKey", "primaryPrivateKey", "sharedSecret", "key"):
+                _is_hex(rep, w, e, k, 32)
+            for k in ("newDevicePublicKey", "primaryPublicKey"):
+                _is_hex(rep, w, e, k, 33)
+            _is_hex(rep, w, e, "nonce", 12)
+            for k in ("plaintext", "ciphertext", "linkEnvelope"):
+                _is_hex(rep, w, e, k)
+            if not rep.is_dict(w, e, "linkBundle"):
+                continue
+            b, wb = e["linkBundle"], w + " linkBundle"
+            rep.only_keys(wb, b, {"identityPrivateKey", "identityPublicKey", "identityKeyPair", "userId", "username",
+                                  "friendListVersion", "friends", "history"})
+            _is_hex(rep, wb, b, "identityPrivateKey", 32)
+            _is_hex(rep, wb, b, "identityPublicKey", 33)
+            _is_hex(rep, wb, b, "identityKeyPair")
+            rep.is_str(wb, b, "userId")
+            rep.is_str(wb, b, "username")
+            _is_uint(rep, wb, b, "friendListVersion")
+            if not isinstance(b.get("friends"), list):
+                rep.err(wb, "'friends' must be an array")
+            else:
+                for j, fr in enumerate(b["friends"]):
+                    wf = f"{wb} friends[{j}]"
+                    if not isinstance(fr, dict):
+                        rep.err(wf, "must be an object")
+                        continue
+                    rep.only_keys(wf, fr, {"userId", "username", "status"})
+                    rep.is_str(wf, fr, "userId")
+                    rep.is_str(wf, fr, "username")
+                    if fr.get("status") not in FRIEND_STATUSES:
+                        rep.err(wf, f"'status' must be one of {sorted(FRIEND_STATUSES)}")
+            if "history" in b and rep.is_dict(wb, b, "history"):
+                h = b["history"]
+                rep.only_keys(wb + " history", h, {"attachmentId", "contentKey", "nonce"})
+                rep.is_str(wb + " history", h, "attachmentId")
+                _is_hex(rep, wb + " history", h, "contentKey", 32)
+                _is_hex(rep, wb + " history", h, "nonce", 12)
+    if rep.is_nonempty_list(f, doc, "linkCodes"):
+        _unique_names(rep, f + " linkCodes", doc["linkCodes"])
+        for i, c in enumerate(doc["linkCodes"]):
+            w = f"{f} linkCodes[{i}]"
+            if not isinstance(c, dict):
+                rep.err(w, "must be an object")
+                continue
+            rep.only_keys(w, c, {"name", "sessionId", "ephemeralPublicKey", "deviceName", "code"})
+            for k in ("name", "sessionId", "deviceName", "code"):
+                rep.is_str(w, c, k)
+            _is_hex(rep, w, c, "ephemeralPublicKey", 33)
+            code = c.get("code")
+            if isinstance(code, str) and (set(code) - set(BASE64URL) or "=" in code):
+                rep.err(w, "'code' must be base64url without padding")
+
+
+BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
 CHECKERS = {
     "wire": check_wire,
+    "link": check_link,
 }
 
 

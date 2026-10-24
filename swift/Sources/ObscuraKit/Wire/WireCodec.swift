@@ -9,6 +9,7 @@ enum WireCodec {
         case .friendAccept?: return "FRIEND_ACCEPT"
         case .appEntry?: return "APP_ENTRY"
         case .typingSignal?: return "TYPING_SIGNAL"
+        case .friendListSync?: return "FRIEND_LIST_SYNC"
         case nil: return ""
         }
     }

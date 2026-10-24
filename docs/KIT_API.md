@@ -29,9 +29,10 @@ Wire mappings live in each kit's `WireCodec` and are checked against
 [`wire.json`](../protocol/conformance/wire.json). `AppEntry` encoding
 preserves model, id, timestamp and data; byte-canonical encoding is not
 required. Typing maps only STARTED/STOPPED; unspecified states are ignored.
+The device-link envelope derivation and link code encoding are checked against
+[`link.json`](../protocol/conformance/link.json).
 
-Device linking, approval codes, takeover, device announcements, and
-friendship export/import do not exist.
+Takeover and device announcements do not exist.
 
 ## Construction and persistence
 
@@ -210,6 +211,7 @@ transaction.
 | `APP_ENTRY` | Inbox opaque `data`, model, id and timestamp |
 | `FRIEND_REQUEST`, `FRIEND_ACCEPT` | Kit-internal friend transition |
 | `TYPING_SIGNAL` | Ephemeral, no inbox row |
+| `FRIEND_LIST_SYNC` | Kit-internal: replaces the friend list if sent by the account's primary with a newer version, otherwise ignored |
 | Unknown/unset arm | Inbox the whole serialized message as `UNKNOWN` |
 
 A request from an unknown sender becomes pending-received. Crossed
