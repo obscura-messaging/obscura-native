@@ -20,12 +20,12 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
-struct Obscura_V1_SendMessageRequest: Sendable {
+nonisolated struct Obscura_V1_SendMessageRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -34,7 +34,7 @@ struct Obscura_V1_SendMessageRequest: Sendable {
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  struct Submission: Sendable {
+  nonisolated struct Submission: Sendable {
     // SwiftProtobuf.Message conformance is added in an extension below. See the
     // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
     // methods supported on all messages.
@@ -56,7 +56,7 @@ struct Obscura_V1_SendMessageRequest: Sendable {
   init() {}
 }
 
-struct Obscura_V1_SendMessageResponse: Sendable {
+nonisolated struct Obscura_V1_SendMessageResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -64,9 +64,12 @@ struct Obscura_V1_SendMessageResponse: Sendable {
   /// If empty, all submissions in the batch were successfully queued.
   var failedSubmissions: [Obscura_V1_SendMessageResponse.FailedSubmission] = []
 
+  /// One entry per target user rejected for an incomplete device set.
+  var deviceMismatches: [Obscura_V1_SendMessageResponse.DeviceMismatch] = []
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  enum ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable {
+  nonisolated enum ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable {
     typealias RawValue = Int
     case unspecified // = 0
 
@@ -81,6 +84,9 @@ struct Obscura_V1_SendMessageResponse: Sendable {
 
     /// Message payload is missing
     case messageMissing // = 4
+
+    /// The target user's device set is not covered exactly; see device_mismatches
+    case deviceMismatch // = 5
     case UNRECOGNIZED(Int)
 
     init() {
@@ -94,6 +100,7 @@ struct Obscura_V1_SendMessageResponse: Sendable {
       case 2: self = .malformedDeviceID
       case 3: self = .malformedSubmissionID
       case 4: self = .messageMissing
+      case 5: self = .deviceMismatch
       default: self = .UNRECOGNIZED(rawValue)
       }
     }
@@ -105,6 +112,7 @@ struct Obscura_V1_SendMessageResponse: Sendable {
       case .malformedDeviceID: return 2
       case .malformedSubmissionID: return 3
       case .messageMissing: return 4
+      case .deviceMismatch: return 5
       case .UNRECOGNIZED(let i): return i
       }
     }
@@ -116,11 +124,12 @@ struct Obscura_V1_SendMessageResponse: Sendable {
       .malformedDeviceID,
       .malformedSubmissionID,
       .messageMissing,
+      .deviceMismatch,
     ]
 
   }
 
-  struct FailedSubmission: Sendable {
+  nonisolated struct FailedSubmission: Sendable {
     // SwiftProtobuf.Message conformance is added in an extension below. See the
     // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
     // methods supported on all messages.
@@ -138,11 +147,28 @@ struct Obscura_V1_SendMessageResponse: Sendable {
     init() {}
   }
 
+  /// A target user whose submissions were all rejected with ERROR_CODE_DEVICE_MISMATCH.
+  nonisolated struct DeviceMismatch: Sendable {
+    // SwiftProtobuf.Message conformance is added in an extension below. See the
+    // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+    // methods supported on all messages.
+
+    /// UUID of the target user (16 bytes)
+    var userID: Data = Data()
+
+    /// Current devices of that user that were not targeted (16 bytes each)
+    var missingDeviceIds: [Data] = []
+
+    var unknownFields = SwiftProtobuf.UnknownStorage()
+
+    init() {}
+  }
+
   init() {}
 }
 
 /// The top-level frame exchanged over the WebSocket connection.
-struct Obscura_V1_WebSocketFrame: Sendable {
+nonisolated struct Obscura_V1_WebSocketFrame: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -178,7 +204,7 @@ struct Obscura_V1_WebSocketFrame: Sendable {
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  enum OneOf_Payload: Equatable, Sendable {
+  nonisolated enum OneOf_Payload: Equatable, Sendable {
     /// Client -> Server: Acknowledge receipt of a message and triggers server-side deletion.
     case ack(Obscura_V1_AckMessage)
     /// Server -> Client: Notification that one-time pre-keys are running low.
@@ -192,7 +218,7 @@ struct Obscura_V1_WebSocketFrame: Sendable {
 }
 
 /// Sent by client to confirm processing. Server deletes the message upon receipt.
-struct Obscura_V1_AckMessage: Sendable {
+nonisolated struct Obscura_V1_AckMessage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -205,7 +231,7 @@ struct Obscura_V1_AckMessage: Sendable {
   init() {}
 }
 
-struct Obscura_V1_PreKeyStatus: Sendable {
+nonisolated struct Obscura_V1_PreKeyStatus: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -222,7 +248,7 @@ struct Obscura_V1_PreKeyStatus: Sendable {
 
 /// A batch of envelopes for bulk message delivery over WebSocket.
 /// Server -> Client: Multiple messages delivered in a single frame.
-struct Obscura_V1_EnvelopeBatch: Sendable {
+nonisolated struct Obscura_V1_EnvelopeBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -236,7 +262,7 @@ struct Obscura_V1_EnvelopeBatch: Sendable {
 
 /// Represents a message waiting in the queue for the connected device.
 /// The client MUST reply with an `AckMessage` containing this message's ID.
-struct Obscura_V1_Envelope: Sendable {
+nonisolated struct Obscura_V1_Envelope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -244,7 +270,11 @@ struct Obscura_V1_Envelope: Sendable {
   /// UUID of the message (16 bytes).
   var id: Data = Data()
 
-  /// UUID of the sender (16 bytes).
+  /// UUID of the sending USER (16 bytes), server-stamped. This is Signal's
+  /// Envelope.source_service_id: a routing/attribution HINT, not a trust root. The
+  /// recipient authenticates the sender via the Signal session (identity key), and
+  /// takes the display name from its own friend graph — never by trusting this
+  /// field or the payload. See TRANSPORT.md.
   var senderID: Data = Data()
 
   /// Server-generated timestamp (ms) of when the message was received.
@@ -253,10 +283,10 @@ struct Obscura_V1_Envelope: Sendable {
   /// The encrypted message payload
   var message: Data = Data()
 
-  /// UUID of the sending *device* (16 bytes), stamped by the server from the
-  /// sender's device-scoped JWT — the client cannot forge it. Used to select the
-  /// inbound Signal session (Phase 2). Hand-added to this committed generated file
-  /// mirroring `senderID` (field 2, bytes); protoc-gen-swift is unavailable here.
+  /// UUID of the sending DEVICE (16 bytes), server-stamped from the sender's
+  /// device-scoped JWT (unforgeable). This is Signal's Envelope.source_device:
+  /// Signal sessions are pairwise device-to-device, so the recipient selects the
+  /// inbound session by this device. A successful MAC then proves the sender.
   var senderDeviceID: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -266,9 +296,9 @@ struct Obscura_V1_Envelope: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate let _protobuf_package = "obscura.v1"
+fileprivate nonisolated let _protobuf_package = "obscura.v1"
 
-extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SendMessageRequest"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}messages\0")
 
@@ -298,7 +328,7 @@ extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-extension Obscura_V1_SendMessageRequest.Submission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_SendMessageRequest.Submission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = Obscura_V1_SendMessageRequest.protoMessageName + ".Submission"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}submission_id\0\u{3}device_id\0\u{1}message\0")
 
@@ -338,9 +368,9 @@ extension Obscura_V1_SendMessageRequest.Submission: SwiftProtobuf.Message, Swift
   }
 }
 
-extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SendMessageResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}failed_submissions\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}failed_submissions\0\u{3}device_mismatches\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -349,6 +379,7 @@ extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, SwiftProtobuf._
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeRepeatedMessageField(value: &self.failedSubmissions) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.deviceMismatches) }()
       default: break
       }
     }
@@ -358,21 +389,25 @@ extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, SwiftProtobuf._
     if !self.failedSubmissions.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.failedSubmissions, fieldNumber: 1)
     }
+    if !self.deviceMismatches.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.deviceMismatches, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Obscura_V1_SendMessageResponse, rhs: Obscura_V1_SendMessageResponse) -> Bool {
     if lhs.failedSubmissions != rhs.failedSubmissions {return false}
+    if lhs.deviceMismatches != rhs.deviceMismatches {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-extension Obscura_V1_SendMessageResponse.ErrorCode: SwiftProtobuf._ProtoNameProviding {
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ERROR_CODE_UNSPECIFIED\0\u{1}ERROR_CODE_INVALID_DEVICE\0\u{1}ERROR_CODE_MALFORMED_DEVICE_ID\0\u{1}ERROR_CODE_MALFORMED_SUBMISSION_ID\0\u{1}ERROR_CODE_MESSAGE_MISSING\0")
+nonisolated extension Obscura_V1_SendMessageResponse.ErrorCode: SwiftProtobuf._ProtoNameProviding {
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ERROR_CODE_UNSPECIFIED\0\u{1}ERROR_CODE_INVALID_DEVICE\0\u{1}ERROR_CODE_MALFORMED_DEVICE_ID\0\u{1}ERROR_CODE_MALFORMED_SUBMISSION_ID\0\u{1}ERROR_CODE_MESSAGE_MISSING\0\u{1}ERROR_CODE_DEVICE_MISMATCH\0")
 }
 
-extension Obscura_V1_SendMessageResponse.FailedSubmission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_SendMessageResponse.FailedSubmission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = Obscura_V1_SendMessageResponse.protoMessageName + ".FailedSubmission"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}submission_id\0\u{3}error_code\0\u{3}error_message\0")
 
@@ -412,7 +447,42 @@ extension Obscura_V1_SendMessageResponse.FailedSubmission: SwiftProtobuf.Message
   }
 }
 
-extension Obscura_V1_WebSocketFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_SendMessageResponse.DeviceMismatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = Obscura_V1_SendMessageResponse.protoMessageName + ".DeviceMismatch"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}missing_device_ids\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.userID) }()
+      case 2: try { try decoder.decodeRepeatedBytesField(value: &self.missingDeviceIds) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.userID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.userID, fieldNumber: 1)
+    }
+    if !self.missingDeviceIds.isEmpty {
+      try visitor.visitRepeatedBytesField(value: self.missingDeviceIds, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Obscura_V1_SendMessageResponse.DeviceMismatch, rhs: Obscura_V1_SendMessageResponse.DeviceMismatch) -> Bool {
+    if lhs.userID != rhs.userID {return false}
+    if lhs.missingDeviceIds != rhs.missingDeviceIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Obscura_V1_WebSocketFrame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".WebSocketFrame"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\u{b}ack\0\u{3}pre_key_status\0\u{3}envelope_batch\0")
 
@@ -496,7 +566,7 @@ extension Obscura_V1_WebSocketFrame: SwiftProtobuf.Message, SwiftProtobuf._Messa
   }
 }
 
-extension Obscura_V1_AckMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_AckMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AckMessage"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_ids\0")
 
@@ -526,7 +596,7 @@ extension Obscura_V1_AckMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
   }
 }
 
-extension Obscura_V1_PreKeyStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_PreKeyStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".PreKeyStatus"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}one_time_pre_key_count\0\u{3}min_threshold\0")
 
@@ -561,7 +631,7 @@ extension Obscura_V1_PreKeyStatus: SwiftProtobuf.Message, SwiftProtobuf._Message
   }
 }
 
-extension Obscura_V1_EnvelopeBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_EnvelopeBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".EnvelopeBatch"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}envelopes\0")
 
@@ -591,7 +661,7 @@ extension Obscura_V1_EnvelopeBatch: SwiftProtobuf.Message, SwiftProtobuf._Messag
   }
 }
 
-extension Obscura_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+nonisolated extension Obscura_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}sender_id\0\u{1}timestamp\0\u{1}message\0\u{3}sender_device_id\0")
 
