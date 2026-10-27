@@ -102,6 +102,19 @@ class ReceivePathTest {
     }
 
     @Test
+    fun `entry bytes with NUL and awkward characters are inboxed byte for byte`() = runBlocking {
+        val c = authenticatedClient()
+        val bytes = "a\u0000b\u0000 é 😀 \u2028\r\n".toByteArray() + byteArrayOf(0, 0, -1, 0x7F)
+        val message = ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry {
+            model = "m"; id = "e"; timestamp = 1; data = ByteString.copyFrom(bytes)
+        }).build()
+
+        c.receive(ClientMessage.parseFrom(message.toByteArray()))
+
+        assertArrayEquals(bytes, c.inbox.peek().single().payload)
+    }
+
+    @Test
     fun `an unknown arm is inboxed whole as UNKNOWN and not announced`() = runBlocking {
         val c = authenticatedClient()
         val unknown = ClientMessage.newBuilder().setTimestamp(5).build()

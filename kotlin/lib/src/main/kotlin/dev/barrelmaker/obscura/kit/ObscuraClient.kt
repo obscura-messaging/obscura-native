@@ -120,7 +120,7 @@ class ObscuraClient(
 
     init {
         lateinit var authRef: AuthManager
-        api = APIClient(config.apiUrl) { authRef.credentials?.token }
+        api = APIClient(config.apiUrl, refresh = { authRef.refresh() }) { authRef.credentials?.token }
         auth = AuthManager(
             api, signalStore, devices, sessionStorage, config.deviceName, scope,
             logger = { logger },
@@ -830,17 +830,9 @@ class ObscuraClient(
         return self
     }
 
-    /**
-     * The account's devices from the server; this device's directory and primary follow them. A
-     * rejected token is checked with a refresh, which ends the session of an unlinked device.
-     */
+    /** The account's devices from the server; this device's directory and primary follow them. */
     private suspend fun ownDevices(self: Credentials): List<OwnDevice> {
-        val list = try {
-            api.fetchOwnDevices()
-        } catch (e: ObscuraError.Http) {
-            if (e.status == 401 && auth.refresh() == TokenStatus.REJECTED) throw ObscuraError.NotAuthenticated()
-            throw e
-        }
+        val list = api.fetchOwnDevices()
         if (auth.credentials?.deviceId == self.deviceId && auth.credentials?.userId == self.userId) {
             devices.replace(self.userId, list.map { it.deviceId })
             devices.setPrimary(list.singleOrNull { it.isPrimary }?.deviceId)
