@@ -41,8 +41,9 @@ internal class MessageSender(
     /**
      * When every known target is in [acceptedDeviceIds], a request with no submission asks the
      * server whether the user has another device: if not, they are reported accepted; if so, the
-     * whole device set is submitted, as completeness requires. Otherwise every target is submitted.
-     * A user left with no devices is one "No devices found" rejection.
+     * whole device set is submitted, as completeness requires. Otherwise every target is submitted
+     * and evidence devices are reported accepted. A user left with no devices and no evidence is
+     * one "No devices found" rejection.
      */
     suspend fun send(
         userId: String,
@@ -69,10 +70,12 @@ internal class MessageSender(
                 .getOrElse { return@withLock listOf(rejected(userId, it)) }
             val outcome = messenger.submit(userId, submissions)
             devices.remove(userId, outcome.submitted.filter { it.errorCode == ErrorCode.ERROR_CODE_INVALID_DEVICE }.map { it.result.deviceId!! })
-            val missing = outcome.missingDeviceIds ?: return@withLock if (devices.devicesOf(userId).isEmpty()) {
-                listOf(rejected(userId, "No devices found"))
-            } else {
-                outcome.submitted.map { it.result }
+            val missing = outcome.missingDeviceIds ?: return@withLock when {
+                targets.none { it in acceptedDeviceIds } && devices.devicesOf(userId).isEmpty() ->
+                    listOf(rejected(userId, "No devices found"))
+                else -> outcome.submitted.map {
+                    if (it.result.deviceId in acceptedDeviceIds) it.result.copy(status = SubmissionStatus.ACCEPTED, error = null) else it.result
+                }
             }
             devices.add(userId, missing)
             mismatched = outcome

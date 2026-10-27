@@ -211,6 +211,30 @@ class MessageSenderTest {
     }
 
     @Test
+    fun `evidence devices stay accepted when the empty request fails or they have since been deleted`() = runBlocking {
+        alice.directory.replace(bob.userId, listOf(bob.deviceId))
+        server.remove(bob)
+        assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
+
+        server.close()
+        assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
+    }
+
+    @Test
+    fun `a submitted evidence device is reported accepted even when it no longer exists`() = runBlocking {
+        val bobTablet = server.register(bob.userId)
+        alice.send(bob, "first")
+        server.remove(bob)
+        server.remove(bobTablet)
+
+        val results = alice.send(bob, "retry", accepted = setOf(bob.deviceId)).associateBy { it.deviceId }
+
+        assertEquals(accepted(bob), results[bob.deviceId])
+        assertEquals(REJECTED, results.getValue(bobTablet.deviceId).status)
+        assertEquals(emptyList<String>(), alice.directory.devicesOf(bob.userId))
+    }
+
+    @Test
     fun `a peer with no devices left is one user-level rejection in the same send`() = runBlocking {
         alice.send(bob, "first")
         server.remove(bob)
