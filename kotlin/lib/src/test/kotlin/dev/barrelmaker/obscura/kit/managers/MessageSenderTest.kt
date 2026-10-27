@@ -186,12 +186,41 @@ class MessageSenderTest {
     }
 
     @Test
-    fun `when every target has accepted evidence nothing is sent or fetched`() = runBlocking {
+    fun `when every target has evidence an empty request confirms the user and nothing is resent`() = runBlocking {
         alice.directory.replace(bob.userId, listOf(bob.deviceId))
 
         assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
         assertEquals(0, server.prekeysConsumed(bob.userId))
-        assertEquals(0, server.requests.size)
+        assertEquals(0, server.requests.single().second.messagesCount)
+        assertEquals(listOf(bob.userId), server.requests.single().second.recipientUserIdsList.map { UuidCodec.uuidString(it) })
+        assertEquals(emptyList<Received>(), bob.receive())
+    }
+
+    @Test
+    fun `when every target has evidence but a new device appeared the whole set is submitted`() = runBlocking {
+        alice.send(bob, "first")
+        bob.receive()
+        val bobTablet = server.register(bob.userId)
+
+        assertEquals(setOf(accepted(bob), accepted(bobTablet)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)).toSet())
+        assertEquals(0, server.requests[1].second.messagesCount)
+        assertEquals(setOf(bob.deviceId, bobTablet.deviceId), targetsOf(2))
+        assertEquals(listOf("retry"), bob.receive().map { it.message.appEntry.id })
+        assertEquals(listOf("retry"), bobTablet.receive().map { it.message.appEntry.id })
+        assertEquals(3, server.requests.size)
+    }
+
+    @Test
+    fun `a peer with no devices left is one user-level rejection in the same send`() = runBlocking {
+        alice.send(bob, "first")
+        server.remove(bob)
+
+        val result = alice.send(bob, "lost").single()
+
+        assertEquals(REJECTED, result.status)
+        assertNull(result.deviceId)
+        assertEquals("No devices found", result.error)
+        assertEquals(emptyList<String>(), alice.directory.devicesOf(bob.userId))
     }
 
     @Test

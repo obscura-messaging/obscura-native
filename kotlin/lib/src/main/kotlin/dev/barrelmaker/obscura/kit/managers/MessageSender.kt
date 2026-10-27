@@ -39,8 +39,10 @@ internal class MessageSender(
     private val recipientLocks = ConcurrentHashMap<String, Mutex>()
 
     /**
-     * Devices in [acceptedDeviceIds] are reported accepted without a request when they are all of
-     * the user's targets; otherwise every target is submitted, as the server requires.
+     * When every known target is in [acceptedDeviceIds], a request with no submission asks the
+     * server whether the user has another device: if not, they are reported accepted; if so, the
+     * whole device set is submitted, as completeness requires. Otherwise every target is submitted.
+     * A user left with no devices is one "No devices found" rejection.
      */
     suspend fun send(
         userId: String,
@@ -51,7 +53,14 @@ internal class MessageSender(
         repeat(MAX_ROUNDS) {
             val listed = targetsOf(userId)
             if (listed.isNotEmpty() && listed.all { it in acceptedDeviceIds }) {
-                return@withLock listed.map { SubmissionResult(userId, it, SubmissionStatus.ACCEPTED) }
+                val probe = messenger.submit(userId, emptyList())
+                val missing = probe.missingDeviceIds.orEmpty()
+                if (missing.all { it in acceptedDeviceIds }) {
+                    return@withLock listed.map { SubmissionResult(userId, it, SubmissionStatus.ACCEPTED) }
+                }
+                devices.add(userId, missing)
+                mismatched = probe
+                return@repeat
             }
             val targets = catching { sessionTargets(userId) }.getOrElse { return@withLock listOf(rejected(userId, it)) }
                 ?: return@repeat
@@ -60,7 +69,11 @@ internal class MessageSender(
                 .getOrElse { return@withLock listOf(rejected(userId, it)) }
             val outcome = messenger.submit(userId, submissions)
             devices.remove(userId, outcome.submitted.filter { it.errorCode == ErrorCode.ERROR_CODE_INVALID_DEVICE }.map { it.result.deviceId!! })
-            val missing = outcome.missingDeviceIds ?: return@withLock outcome.submitted.map { it.result }
+            val missing = outcome.missingDeviceIds ?: return@withLock if (devices.devicesOf(userId).isEmpty()) {
+                listOf(rejected(userId, "No devices found"))
+            } else {
+                outcome.submitted.map { it.result }
+            }
             devices.add(userId, missing)
             mismatched = outcome
         }

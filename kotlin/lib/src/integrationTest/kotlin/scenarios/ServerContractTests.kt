@@ -118,15 +118,14 @@ class ServerContractTests {
         try {
             sendAndVerify(alice, bob, "establish")
             val userId = bob.userId!!
-            val deviceId = bob.deviceId
             bob.resetAccount(bob.username!!, TEST_PASSWORD)
             suspend fun gone(text: String) = alice.send(listOf(userId), "directMessage", text, 1, text.toByteArray(), emptySet()).recipients
             val results = gone("not deliverable")
             assertEquals(1, results.size)
             assertEquals(userId, results.single().userId)
-            assertEquals(deviceId, results.single().deviceId)
+            assertNull(results.single().deviceId)
             assertEquals(SubmissionStatus.REJECTED, results.single().status)
-            assertFalse(results.single().error.isNullOrBlank())
+            assertEquals("No devices found", results.single().error)
             assertTrue(alice.devices.devicesOf(userId).isEmpty())
             assertEquals(SubmissionStatus.REJECTED, gone("no devices").single().status)
         } finally { alice.logout(); bob.logout() }
