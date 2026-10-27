@@ -28,14 +28,16 @@ public actor EntryStore {
     }
 
     public func put(model: String, entry: StoredEntry) async throws {
-        try await db.write { db in
-            try db.execute(sql: """
-                INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_device_id, local_metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, arguments: [
-                model, entry.id, entry.data, Int64(clamping: entry.sentAt), entry.authorDeviceId, entry.localMetadata,
-            ])
-        }
+        try await db.write { db in try Self.put(model: model, entry: entry, in: db) }
+    }
+
+    private static func put(model: String, entry: StoredEntry, in db: Database) throws {
+        try db.execute(sql: """
+            INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_device_id, local_metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, arguments: [
+            model, entry.id, entry.data, Int64(clamping: entry.sentAt), entry.authorDeviceId, entry.localMetadata,
+        ])
     }
 
     public func get(model: String, ids: [String]) async throws -> [StoredEntry] {
@@ -65,6 +67,37 @@ public actor EntryStore {
             }
         }
         try await ObscuraDatabase.truncateWAL(db)
+    }
+
+    /// Every entry of every model, without local metadata, for a newly linked device.
+    func snapshot() async throws -> Obscura_Client_V1_EntrySnapshot {
+        try await db.read { db in
+            var snapshot = Obscura_Client_V1_EntrySnapshot()
+            snapshot.entries = try Row.fetchAll(db, sql: "SELECT * FROM model_entries ORDER BY model_name, id").map { row in
+                let entry = Self.entry(row)
+                var exported = Obscura_Client_V1_SnapshotEntry()
+                exported.model = row["model_name"]
+                exported.id = entry.id
+                exported.data = Data(entry.data.utf8)
+                exported.sentAt = entry.sentAt
+                exported.authorDeviceID = entry.authorDeviceId
+                return exported
+            }
+            return snapshot
+        }
+    }
+
+    func importSnapshot(_ snapshot: Obscura_Client_V1_EntrySnapshot) async throws {
+        let entries = try snapshot.entries.map { exported in
+            guard let data = String(data: exported.data, encoding: .utf8) else {
+                throw ObscuraError.protocolViolation("history entry \(exported.model)/\(exported.id) is not UTF-8")
+            }
+            return (exported.model, StoredEntry(id: exported.id, data: data, sentAt: exported.sentAt,
+                                                authorDeviceId: exported.authorDeviceID, localMetadata: nil))
+        }
+        try await db.write { db in
+            for (model, entry) in entries { try Self.put(model: model, entry: entry, in: db) }
+        }
     }
 
     private static func entry(_ row: Row) -> StoredEntry {

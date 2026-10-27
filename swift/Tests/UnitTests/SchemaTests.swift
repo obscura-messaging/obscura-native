@@ -30,8 +30,8 @@ final class SchemaTests: XCTestCase {
         let store = PersistentSignalStore(db: db, logger: SilentLogger())
         try store.install(SignalKeys.generate())
         try await FriendStore(db: db).add("peer", username: "alice", status: .accepted)
-        try await DeviceStore(db: db).setLocalDeviceId("me")
-        try await DeviceStore(db: db).add(userId: "peer", deviceId: "d")
+        try await db.write { try DeviceStore.setLocalDevice("me", primaryDeviceId: "me", in: $0) }
+        try await DeviceStore(db: db).add(userId: "peer", deviceIds: ["d"])
         _ = try await InboxStore(db: db, logger: SilentLogger()).put(InboxInsert(
             envelopeId: "e", kind: "APP_ENTRY", senderUserId: "peer", senderDeviceId: "d",
             modelKey: "m", entryId: "1", sentAt: 1, payload: Data([1])))

@@ -1,20 +1,22 @@
 import Foundation
+import GRDB
 import XCTest
 @testable import ObscuraKit
 
 final class DeviceStoreTests: XCTestCase {
+    private var db: DatabaseQueue!
     private var devices: DeviceStore!
     private var friends: FriendStore!
 
     override func setUp() async throws {
-        let db = try ObscuraDatabase.inMemory()
+        db = try ObscuraDatabase.inMemory()
         devices = DeviceStore(db: db)
         friends = FriendStore(db: db)
     }
 
     func testDevicesAreListedPerUser() async throws {
-        try await devices.add(userId: "me", deviceId: "d1")
-        try await devices.add(userId: "peer", deviceId: "d2")
+        try await devices.add(userId: "me", deviceIds: ["d1"])
+        try await devices.add(userId: "peer", deviceIds: ["d2", "d2"])
 
         let mine = try await devices.deviceIds(of: "me")
         let theirs = try await devices.deviceIds(of: "peer")
@@ -22,33 +24,51 @@ final class DeviceStoreTests: XCTestCase {
         XCTAssertEqual(theirs, ["d2"])
     }
 
-    func testReplaceSwapsAUsersWholeListAndLeavesOthersAlone() async throws {
-        try await devices.add(userId: "me", deviceId: "old")
-        try await devices.add(userId: "peer", deviceId: "p1")
+    func testRemoveForgetsOnlyTheNamedDevices() async throws {
+        try await devices.add(userId: "peer", deviceIds: ["a", "b"])
 
-        try await devices.replace(userId: "me", deviceIds: ["b", "a", "a"])
+        try await devices.remove(userId: "peer", deviceIds: ["a", "unknown"])
+
+        let left = try await devices.deviceIds(of: "peer")
+        XCTAssertEqual(left, ["b"])
+    }
+
+    func testTheLocalDeviceAndItsPrimaryAreSingular() async throws {
+        let none = try await devices.localDeviceId()
+        let noPrimary = try await devices.isPrimary()
+        XCTAssertNil(none)
+        XCTAssertFalse(noPrimary)
+
+        try await db.write { try DeviceStore.setLocalDevice("first", primaryDeviceId: "first", in: $0) }
+        let primary = try await devices.isPrimary()
+        XCTAssertTrue(primary)
+        try await db.write { try DeviceStore.setLocalDevice("second", primaryDeviceId: "first", in: $0) }
+
+        let local = try await devices.localDeviceId()
+        let linked = try await devices.isPrimary()
+        XCTAssertEqual(local, "second")
+        XCTAssertFalse(linked)
+    }
+
+    func testReplaceOwnSwapsTheAccountsDevicesAndPrimaryAndLeavesOthersAlone() async throws {
+        try await db.write { try DeviceStore.setLocalDevice("me-1", primaryDeviceId: "old-primary", in: $0) }
+        try await devices.add(userId: "me", deviceIds: ["me-1", "gone"])
+        try await devices.add(userId: "peer", deviceIds: ["p1"])
+
+        try await devices.replaceOwn(userId: "me", deviceIds: ["me-1", "me-2"], primaryDeviceId: "me-2")
 
         let mine = try await devices.deviceIds(of: "me")
         let theirs = try await devices.deviceIds(of: "peer")
-        XCTAssertEqual(mine, ["a", "b"])
+        let primary = try await devices.primaryDeviceId()
+        XCTAssertEqual(mine, ["me-1", "me-2"])
         XCTAssertEqual(theirs, ["p1"])
-    }
-
-    func testTheLocalDeviceIdIsSingular() async throws {
-        let none = try await devices.localDeviceId()
-        XCTAssertNil(none)
-
-        try await devices.setLocalDeviceId("first")
-        try await devices.setLocalDeviceId("second")
-
-        let local = try await devices.localDeviceId()
-        XCTAssertEqual(local, "second")
+        XCTAssertEqual(primary, "me-2")
     }
 
     func testRemovingAFriendForgetsTheirDevices() async throws {
         try await friends.add("peer", username: "alice", status: .accepted)
-        try await devices.add(userId: "peer", deviceId: "dev-a")
-        try await devices.add(userId: "other", deviceId: "dev-b")
+        try await devices.add(userId: "peer", deviceIds: ["dev-a"])
+        try await devices.add(userId: "other", deviceIds: ["dev-b"])
 
         try await friends.remove("peer")
 
@@ -58,5 +78,40 @@ final class DeviceStoreTests: XCTestCase {
         XCTAssertNil(friend)
         XCTAssertEqual(peerDevices, [])
         XCTAssertEqual(otherDevices, ["dev-b"])
+    }
+
+    func testEveryFriendChangeBumpsTheVersionAndANoOpDoesNot() async throws {
+        func version() async throws -> UInt64 { try await db.read { try FriendStore.version(in: $0) } }
+        let initial = try await version()
+        XCTAssertEqual(initial, 0)
+
+        try await friends.add("a", username: "a", status: .pendingSent)
+        try await friends.updateStatus("a", .accepted)
+        let removedAccepted = try await friends.removePendingSent("a")
+        try await friends.add("b", username: "b", status: .pendingSent)
+        let removedPending = try await friends.removePendingSent("b")
+        try await friends.remove("a")
+        try await friends.remove("missing")
+
+        XCTAssertFalse(removedAccepted)
+        XCTAssertTrue(removedPending)
+        let final = try await version()
+        XCTAssertEqual(final, 5)
+    }
+
+    func testAReplacedListTakesTheGivenVersionAndContents() async throws {
+        try await friends.add("old", username: "old", status: .accepted)
+
+        try await db.write {
+            try FriendStore.replace([("new", "new", .pendingReceived)], version: 42, in: $0)
+        }
+
+        let all = try await friends.all()
+        XCTAssertEqual(all.map(\.userId), ["new"])
+        XCTAssertEqual(all.map(\.status), [.pendingReceived])
+        let sync = try await friends.listSync()
+        XCTAssertEqual(sync.version, 42)
+        XCTAssertEqual(sync.friends.map(\.userID), ["new"])
+        XCTAssertEqual(sync.friends.map(\.status), [.pendingReceived])
     }
 }

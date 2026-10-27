@@ -12,9 +12,12 @@ public enum AuthState: String, Sendable {
 public enum LoginScenario: Sendable {
     /// Authenticated as the stored local device.
     case existingDevice
-    /// No local device: call `loginAndProvision`.
-    case newDevice
-    /// The server does not know the stored local device: call `wipeDevice`, then `loginAndProvision`.
+    /// No local device, and the account has devices: link this device with `beginLink`.
+    case linkRequired
+    /// No local device, and the account has none (new or reset): call `provisionPrimary`.
+    case noDevices
+    /// The stored local device no longer belongs to the account (unlinked or reset): call `wipeDevice`,
+    /// then log in again.
     case deviceMismatch
     case invalidCredentials
 }
@@ -64,7 +67,7 @@ public actor ObscuraClient {
     nonisolated let api: APIClient
     nonisolated let db: DatabaseQueue
     nonisolated let friends: FriendStore
-    nonisolated let devices: DeviceStore
+    nonisolated let directory: DeviceStore
     nonisolated let signalStore: PersistentSignalStore
     nonisolated let messenger: Messenger
     nonisolated let logger: RecordingLogger
@@ -115,7 +118,7 @@ public actor ObscuraClient {
         self.deviceName = deviceName
         self.sessionStorage = sessionStorage
         self.friends = FriendStore(db: database)
-        self.devices = DeviceStore(db: database)
+        self.directory = DeviceStore(db: database)
         self.inbox = InboxStore(db: database, logger: recording)
         self.entries = EntryStore(db: database)
         self.signalStore = PersistentSignalStore(db: database, logger: recording)
@@ -152,6 +155,12 @@ public actor ObscuraClient {
     public var username: String? { session?.username }
     public var deviceId: String? { session?.deviceId }
 
+    /// Whether this device is the account's primary: provisioned first, the only one that links and
+    /// unlinks devices and changes the friend list. Confirmed from the server on every connect.
+    public var isPrimary: Bool {
+        get async throws { try await directory.isPrimary() }
+    }
+
     func requireSession() throws -> Session {
         guard let session else { throw ObscuraError.notAuthenticated }
         return session
@@ -159,58 +168,72 @@ public actor ObscuraClient {
 
     // MARK: - Auth
 
+    /// Creates the account and provisions this device as its primary.
     public func register(_ username: String, _ password: String) async throws {
         try await requireUnprovisionedDevice()
         let account = try await api.registerUser(username, password)
-        try await provision(username: username, userToken: account.token)
+        try await provisionPrimary(username: username, userToken: account.token)
     }
 
     /// Only `.existingDevice` changes the client's state.
     public func login(_ username: String, _ password: String) async throws -> LoginScenario {
-        let localDeviceId = try await devices.localDeviceId()
-        if let localDeviceId, try signalStore.hasIdentity() {
-            do {
-                let response = try await api.login(username, password, deviceId: localDeviceId)
-                // The server answers an unknown device id with a user-scoped token, not an error.
-                guard APIClient.deviceId(response.token) == localDeviceId else { return .deviceMismatch }
-                try begin(session(response, username: username))
-                return .existingDevice
-            } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
-                return .invalidCredentials
-            }
-        }
+        let localDeviceId = try await directory.localDeviceId()
+        let usable = try localDeviceId != nil && signalStore.hasIdentity()
+        let response: AuthResponse
         do {
-            _ = try await api.login(username, password, deviceId: nil)
+            response = try await api.login(username, password, deviceId: usable ? localDeviceId : nil)
         } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
             return .invalidCredentials
         }
-        return localDeviceId == nil ? .newDevice : .deviceMismatch
+        if let localDeviceId {
+            // The server answers a device that is not the account's with a user-scoped token, not an error.
+            guard usable, APIClient.deviceId(response.token) == localDeviceId else { return .deviceMismatch }
+            try begin(session(response, username: username))
+            return .existingDevice
+        }
+        return try await api.listDevices(bearer: response.token).isEmpty ? .noDevices : .linkRequired
     }
 
-    public func loginAndProvision(_ username: String, _ password: String) async throws {
+    /// For `.noDevices`: provisions this device as the primary of an account without devices, with a new
+    /// identity.
+    public func provisionPrimary(_ username: String, _ password: String) async throws {
         try await requireUnprovisionedDevice()
         let account = try await api.login(username, password, deviceId: nil)
-        try await provision(username: username, userToken: account.token)
+        try await provisionPrimary(username: username, userToken: account.token)
     }
 
-    private func requireUnprovisionedDevice() async throws {
-        guard try await devices.localDeviceId() == nil, try !signalStore.hasIdentity() else {
+    /// Deletes every device of the account and its identity on the server, then this device's local
+    /// data. The next device provisioned, with `provisionPrimary`, is the new primary.
+    public func resetAccount(_ username: String, _ password: String) async throws {
+        try await api.resetAccount(username, password)
+        try await signOut(revoking: false)
+        try await ObscuraDatabase.wipe(db)
+    }
+
+    func requireUnprovisionedDevice() async throws {
+        guard try await directory.localDeviceId() == nil, try !signalStore.hasIdentity() else {
             throw ObscuraError.invalidArgument("local device exists; wipeDevice before provisioning")
         }
     }
 
-    private func provision(username: String, userToken: String) async throws {
-        api.setToken(userToken)
+    func requirePrimary() async throws {
+        _ = try requireSession()
+        guard try await directory.isPrimary() else { throw ObscuraError.notPrimary }
+    }
+
+    private func provisionPrimary(username: String, userToken: String) async throws {
         let keys = try SignalKeys.generate()
-        let response = try await api.provisionDevice(name: deviceName, keys: keys.upload())
+        let response = try await api.createDevice(keys.deviceRequest(name: deviceName, linkSessionId: nil), bearer: userToken)
         let session = try session(response, username: username)
-        try signalStore.install(keys)
-        try await devices.setLocalDeviceId(session.deviceId)
-        try await devices.add(userId: session.userId, deviceId: session.deviceId)
+        try await db.write { db in
+            try PersistentSignalStore.install(keys, in: db)
+            try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: session.deviceId, in: db)
+            try DeviceStore.add(userId: session.userId, deviceId: session.deviceId, in: db)
+        }
         try begin(session)
     }
 
-    private func session(_ response: AuthResponse, username: String) throws -> Session {
+    func session(_ response: AuthResponse, username: String) throws -> Session {
         guard let userId = APIClient.userId(response.token), let deviceId = APIClient.deviceId(response.token),
               let refreshToken = response.refreshToken else {
             throw ObscuraError.protocolViolation("device token lacks a user id, a device id or a refresh token")
@@ -223,7 +246,7 @@ public actor ObscuraClient {
         stopSessionWork()
         api.setToken(session.token)
         self.session = session
-        sender = MessageSender(messenger: messenger, devices: devices, api: api, logger: logger, selfDeviceId: session.deviceId)
+        sender = MessageSender(messenger: messenger, devices: directory, api: api, logger: logger, selfDeviceId: session.deviceId)
         refreshFailures = 0
         startRefreshLoop()
         auth.set(.authenticated)
@@ -231,6 +254,17 @@ public actor ObscuraClient {
 
     /// Keeps local data. Revoking the refresh token on the server is best effort.
     public func logout() async throws {
+        try await signOut(revoking: true)
+    }
+
+    /// `logout()`, then deletes every piece of local kit data.
+    public func wipeDevice() async throws {
+        try await logout()
+        try await ObscuraDatabase.wipe(db)
+    }
+
+    /// Without revoking when the server has already deleted this device.
+    func signOut(revoking: Bool) async throws {
         let ended = session
         stopSessionWork()
         session = nil
@@ -240,19 +274,13 @@ public actor ObscuraClient {
         typingSentAt = [:]
         auth.set(.loggedOut)
         try storeSession { try sessionStorage.clear() }
-        if let ended {
+        if revoking, let ended {
             do {
                 try await api.logout(ended.refreshToken, token: ended.token)
             } catch {
                 logger.log("refresh token revocation failed: \(error)")
             }
         }
-    }
-
-    /// `logout()`, then deletes every piece of local kit data.
-    public func wipeDevice() async throws {
-        try await logout()
-        try await ObscuraDatabase.wipe(db)
     }
 
     /// True when a stored session was restored; the client is then authenticated and connected if
@@ -263,7 +291,7 @@ public actor ObscuraClient {
         do {
             guard let stored = try storeSession({ try sessionStorage.load() }) else { return false }
             guard let restored = Session(stored: stored), try signalStore.hasIdentity(),
-                  try await devices.localDeviceId() == restored.deviceId,
+                  try await directory.localDeviceId() == restored.deviceId,
                   APIClient.userId(restored.token) == restored.userId,
                   APIClient.deviceId(restored.token) == restored.deviceId else {
                 try storeSession { try sessionStorage.clear() }

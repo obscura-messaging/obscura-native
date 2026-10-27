@@ -3,7 +3,7 @@ import GRDB
 
 enum ObscuraDatabase {
     static let tables = [
-        "friends", "device_identity", "devices",
+        "friends", "friend_list_version", "device_identity", "devices",
         "signal_local_identity", "signal_identities", "signal_prekeys", "signal_signed_prekeys", "signal_sessions",
         "inbox_rows", "model_entries",
     ]
@@ -59,9 +59,14 @@ enum ObscuraDatabase {
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE friend_list_version (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    version INTEGER NOT NULL
+                );
                 CREATE TABLE device_identity (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
-                    device_id TEXT NOT NULL
+                    device_id TEXT NOT NULL,
+                    primary_device_id TEXT NOT NULL
                 );
                 CREATE TABLE devices (
                     user_id TEXT NOT NULL,
@@ -74,7 +79,7 @@ enum ObscuraDatabase {
                     registration_id INTEGER NOT NULL
                 );
                 CREATE TABLE signal_identities (
-                    address TEXT PRIMARY KEY,
+                    user_id TEXT PRIMARY KEY,
                     key_data BLOB NOT NULL
                 );
                 CREATE TABLE signal_prekeys (

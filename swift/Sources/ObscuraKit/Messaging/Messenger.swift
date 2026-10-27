@@ -14,45 +14,71 @@ actor Messenger {
         self.store = store
     }
 
-    /// Send and receive must build the same address for a device, or its session splits in two. The
-    /// device UUID identifies the peer; libsignal's device-id slot is a constant.
+    /// libsignal's device-id slot. The device UUID identifies the peer, so the slot is a constant.
+    static let deviceSlot: UInt32 = 1
+
+    /// Send and receive must build the same address for a device, or its session splits in two.
     static func address(_ deviceUuid: String) throws -> ProtocolAddress {
-        try ProtocolAddress(name: deviceUuid, deviceId: 1)
+        try ProtocolAddress(name: deviceUuid, deviceId: deviceSlot)
     }
 
     func hasSession(_ deviceUuid: String) throws -> Bool {
         try store.loadSession(for: Self.address(deviceUuid), context: NullContext())?.hasCurrentState ?? false
     }
 
-    /// Processing a bundle over an established session would restart the ratchet, so an existing
-    /// session always wins.
-    func establishSession(_ bundle: PreKeyBundleResponse) throws {
-        guard try !hasSession(bundle.deviceId) else { return }
-        guard let identityKey = Data(base64Encoded: bundle.identityKey),
-              let signedPreKey = Data(base64Encoded: bundle.signedPreKey.publicKey),
-              let signature = Data(base64Encoded: bundle.signedPreKey.signature) else {
-            throw ObscuraError.protocolViolation("invalid base64 in bundle for \(bundle.deviceId)")
+    /// Parses one fetch of a user's bundles. Every bundle must carry the same identity key and a signed
+    /// prekey that verifies against it, or the whole fetch is refused.
+    static func verifiedBundles(_ responses: [PreKeyBundleResponse]) throws -> [(deviceId: String, bundle: PreKeyBundle)] {
+        let parsed = try responses.map { ($0.deviceId, try bundle($0)) }
+        let identities = Set(parsed.map { Data($0.1.identityKey.serialize()) })
+        guard identities.count <= 1 else {
+            throw ObscuraError.protocolViolation("bundles carry \(identities.count) different identity keys")
+        }
+        for (deviceId, bundle) in parsed {
+            guard try bundle.identityKey.publicKey.verifySignature(message: bundle.signedPreKeyPublic.serialize(),
+                                                                   signature: bundle.signedPreKeySignature) else {
+                throw ObscuraError.protocolViolation("signed prekey of device \(deviceId) does not verify")
+            }
+        }
+        return parsed
+    }
+
+    private static func bundle(_ response: PreKeyBundleResponse) throws -> PreKeyBundle {
+        guard let identityKey = Data(base64Encoded: response.identityKey),
+              let signedPreKey = Data(base64Encoded: response.signedPreKey.publicKey),
+              let signature = Data(base64Encoded: response.signedPreKey.signature) else {
+            throw ObscuraError.protocolViolation("invalid base64 in bundle for \(response.deviceId)")
         }
         let identity = try IdentityKey(bytes: identityKey)
         let signedPublic = try PublicKey(signedPreKey)
-        let registrationId = UInt32(bundle.registrationId)
-        let signedPreKeyId = UInt32(bundle.signedPreKey.keyId)
-
-        let preKeyBundle: PreKeyBundle
-        if let oneTime = bundle.oneTimePreKey {
-            guard let oneTimeKey = Data(base64Encoded: oneTime.publicKey) else {
-                throw ObscuraError.protocolViolation("invalid one-time prekey for \(bundle.deviceId)")
-            }
-            preKeyBundle = try PreKeyBundle(
-                registrationId: registrationId, deviceId: 1, prekeyId: UInt32(oneTime.keyId), prekey: PublicKey(oneTimeKey),
-                signedPrekeyId: signedPreKeyId, signedPrekey: signedPublic, signedPrekeySignature: signature, identity: identity)
-        } else {
-            preKeyBundle = try PreKeyBundle(
-                registrationId: registrationId, deviceId: 1,
+        let registrationId = UInt32(response.registrationId)
+        let signedPreKeyId = UInt32(response.signedPreKey.keyId)
+        guard let oneTime = response.oneTimePreKey else {
+            return try PreKeyBundle(
+                registrationId: registrationId, deviceId: deviceSlot,
                 signedPrekeyId: signedPreKeyId, signedPrekey: signedPublic, signedPrekeySignature: signature, identity: identity)
         }
-        try processPreKeyBundle(preKeyBundle, for: Self.address(bundle.deviceId),
-                                sessionStore: store, identityStore: store, context: NullContext())
+        guard let oneTimeKey = Data(base64Encoded: oneTime.publicKey) else {
+            throw ObscuraError.protocolViolation("invalid one-time prekey for \(response.deviceId)")
+        }
+        return try PreKeyBundle(
+            registrationId: registrationId, deviceId: deviceSlot, prekeyId: UInt32(oneTime.keyId), prekey: PublicKey(oneTimeKey),
+            signedPrekeyId: signedPreKeyId, signedPrekey: signedPublic, signedPrekeySignature: signature, identity: identity)
+    }
+
+    /// Verifies one fetch of `userId`'s bundles, lists their devices in the directory (identity trust
+    /// resolves through it), and builds a session for each device that has none. A refused fetch stores
+    /// nothing. Processing a bundle over an established session would restart the ratchet, so an
+    /// existing session always wins.
+    func establishSessions(userId: String, _ responses: [PreKeyBundleResponse]) throws {
+        let bundles = try Self.verifiedBundles(responses)
+        try store.transaction { database, _ in
+            for (deviceId, _) in bundles { try DeviceStore.add(userId: userId, deviceId: deviceId, in: database) }
+        }
+        for (deviceId, bundle) in bundles where try !hasSession(deviceId) {
+            try processPreKeyBundle(bundle, for: Self.address(deviceId), sessionStore: store, identityStore: store,
+                                    context: NullContext())
+        }
     }
 
     /// Encrypts for one device with its existing session.
@@ -73,15 +99,14 @@ actor Messenger {
         return submission
     }
 
-    /// Uploads `submissions` as one request. Pre-processing HTTP rejections are definitive;
-    /// transport, server or decoding failures leave acceptance unknown.
-    func submit(userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]) async -> [Submitted] {
-        if submissions.isEmpty { return [] }
+    /// Uploads `submissions` to one user's devices as one request. Pre-processing HTTP rejections are
+    /// definitive; transport, server or decoding failures leave acceptance unknown.
+    func submit(userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]) async -> SubmitOutcome {
         var request = Obscura_V1_SendMessageRequest()
         request.messages = submissions
         do {
             let response = try Obscura_V1_SendMessageResponse(serializedBytes: try await api.sendMessage(request.serializedData()))
-            return try submissionResults(userId: userId, submissions: submissions, response: response)
+            return try submitOutcome(userId: userId, submissions: submissions, response: response)
         } catch {
             let status: SubmissionStatus
             if let failure = error as? ObscuraError, case .http(let code, _) = failure,
@@ -90,17 +115,21 @@ actor Messenger {
             } else {
                 status = .unknown
             }
-            return submissions.map {
+            return SubmitOutcome(submitted: submissions.map {
                 Submitted(SubmissionResult(userId: userId, deviceId: uuidString($0.deviceID), status: status, error: "\(error)"))
-            }
+            }, missingDeviceIds: [])
         }
     }
 
-    /// A valid MAC proves the sender holds this device's session, so `senderDeviceUuid` is a sound
-    /// attribution once decrypt succeeds.
-    func decryptAndPersist<T: Sendable>(senderDeviceUuid: String, _ encrypted: Obscura_Client_V1_EncryptedMessage,
+    /// Records the server-stamped sender device in the directory, decrypts, and persists, in one
+    /// transaction: identity trust resolves the device to its user, and a failed decrypt rolls the
+    /// directory write back. A valid MAC proves the sender holds this device's session, so the stamped
+    /// pair is a sound attribution once decrypt succeeds.
+    func decryptAndPersist<T: Sendable>(senderUserId: String, senderDeviceUuid: String,
+                                       _ encrypted: Obscura_Client_V1_EncryptedMessage,
                                        persist: @Sendable (Data, Database) throws -> T) throws -> T {
         try store.transaction { database, context in
+            try DeviceStore.add(userId: senderUserId, deviceId: senderDeviceUuid, in: database)
             let plaintext = try decrypt(senderDeviceUuid: senderDeviceUuid, encrypted, context: context)
             return try persist(plaintext, database)
         }
