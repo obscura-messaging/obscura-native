@@ -61,7 +61,7 @@ internal object LinkCrypto {
         } catch (e: InvalidProtocolBufferException) {
             throw ObscuraError.InvalidArgument("Invalid link code")
         }
-        if (code.sessionId.isBlank() || runCatching { publicKey(code) }.isFailure) throw ObscuraError.InvalidArgument("Invalid link code")
+        if (code.sessionId.isEmpty() || runCatching { publicKey(code) }.isFailure) throw ObscuraError.InvalidArgument("Invalid link code")
         return code
     }
 

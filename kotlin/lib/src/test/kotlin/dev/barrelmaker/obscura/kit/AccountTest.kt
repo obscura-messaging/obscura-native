@@ -272,8 +272,17 @@ class AccountTest {
     @Test fun `a malformed link code is an invalid argument`() = runBlocking {
         val primary = sessionClient(url, storedSession())
         assertTrue(primary.auth.restore())
-        for (code in listOf("", "not base64!", "AAAA=", LinkCrypto.encodeCode(obscura.client.v1.Client.LinkCode.newBuilder().setSessionId("s").build()))) {
+        val key = com.google.protobuf.ByteString.copyFrom(Curve.generateKeyPair().publicKey.serialize())
+        val valid = LinkCrypto.encodeCode(obscura.client.v1.Client.LinkCode.newBuilder().setSessionId("s").setEphemeralPublicKey(key).build())
+        assertEquals("", ObscuraClient.linkCodeDeviceName(valid))
+        val notLinkCode = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(byteArrayOf(-1, -1, -1))
+        for (code in listOf(
+            "", "not base64!", notLinkCode, "$valid=",
+            LinkCrypto.encodeCode(obscura.client.v1.Client.LinkCode.newBuilder().setSessionId("s").build()),
+            LinkCrypto.encodeCode(obscura.client.v1.Client.LinkCode.newBuilder().setEphemeralPublicKey(key).build()),
+        )) {
             assertTrue(runCatching { primary.approveLink(code) }.exceptionOrNull() is ObscuraError.InvalidArgument, code)
+            assertTrue(runCatching { ObscuraClient.linkCodeDeviceName(code) }.exceptionOrNull() is ObscuraError.InvalidArgument, code)
         }
         primary.auth.end()
         Unit

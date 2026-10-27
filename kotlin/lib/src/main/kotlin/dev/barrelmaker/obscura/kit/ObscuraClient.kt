@@ -849,14 +849,17 @@ class ObscuraClient(
         logger.log(message)
     }
 
-    private companion object {
-        const val MESSAGE_RECEIVED_CAPACITY = 100
-        const val DEBUG_LOG_SIZE = 200
-        const val PREKEY_MIN_COUNT = 20L
-        const val PREKEY_REPLENISH_COUNT = 50
-        const val PUSH_IDLE_MS = 500L
-        const val PUSH_RECENT_ACTIVITY_MS = 10_000L
-        const val LINK_WAIT_S = 25
+    companion object {
+        /** The name a new device put in its link [code], to show before [approveLink]. No network. */
+        fun linkCodeDeviceName(code: String): String = LinkCrypto.decodeCode(code).deviceName
+
+        private const val MESSAGE_RECEIVED_CAPACITY = 100
+        private const val DEBUG_LOG_SIZE = 200
+        private const val PREKEY_MIN_COUNT = 20L
+        private const val PREKEY_REPLENISH_COUNT = 50
+        private const val PUSH_IDLE_MS = 500L
+        private const val PUSH_RECENT_ACTIVITY_MS = 10_000L
+        private const val LINK_WAIT_S = 25
     }
 }
 

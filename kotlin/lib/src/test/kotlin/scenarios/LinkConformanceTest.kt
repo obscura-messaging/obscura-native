@@ -1,6 +1,7 @@
 package scenarios
 
 import com.google.protobuf.ByteString
+import dev.barrelmaker.obscura.kit.ObscuraClient
 import dev.barrelmaker.obscura.kit.crypto.LinkCrypto
 import dev.barrelmaker.obscura.kit.stores.FriendData
 import dev.barrelmaker.obscura.kit.stores.FriendStatus
@@ -105,6 +106,7 @@ class LinkConformanceTest {
         assertEquals(v.getString("sessionId"), decoded.sessionId)
         assertEquals(v.getString("ephemeralPublicKey"), decoded.ephemeralPublicKey.toByteArray().hex())
         assertEquals(v.getString("deviceName"), decoded.deviceName)
+        assertEquals(v.getString("deviceName"), ObscuraClient.linkCodeDeviceName(v.getString("code")))
 
         val own = LinkCode.newBuilder()
             .setSessionId(v.getString("sessionId"))
