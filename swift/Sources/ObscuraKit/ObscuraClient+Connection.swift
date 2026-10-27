@@ -53,14 +53,7 @@ extension ObscuraClient {
         do {
             guard try await freshToken() != .rejected else { throw ObscuraError.notAuthenticated }
             guard generation == connectionGeneration else { throw CancellationError() }
-            do {
-                try await listOwnDevices()
-            } catch ObscuraError.http(status: 401, body: let body) {
-                // A device deleted on the server (unlinked or reset) also has its refresh token
-                // rejected, which signs it out.
-                _ = try await refresh()
-                throw ObscuraError.http(status: 401, body: body)
-            }
+            try await listOwnDevices()
             guard generation == connectionGeneration else { throw CancellationError() }
             let socket = try await GatewaySocket.open(gatewayURL(ticket: api.fetchGatewayTicket()), logger: logger)
             guard generation == connectionGeneration, session != nil else {

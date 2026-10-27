@@ -1,8 +1,19 @@
 import Foundation
 
+/// How a request authenticates.
+enum Auth {
+    /// The signed-in device's token. A 401 runs the client's shared refresh: a rejected refresh signs
+    /// out and throws `notAuthenticated`, a successful one retries the request once.
+    case device
+    /// An explicit token, such as a short-lived account token; never refreshed.
+    case bearer(String)
+    case none
+}
+
 actor APIClient {
     nonisolated let baseURL: URL
     private nonisolated let token = Locked<String?>(nil)
+    private nonisolated let tokenRejected = Locked<(@Sendable () async throws -> TokenStatus)?>(nil)
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -18,6 +29,11 @@ actor APIClient {
 
     nonisolated func setToken(_ token: String?) {
         self.token.withLock { $0 = token }
+    }
+
+    /// The client's shared refresh, run when the server rejects the device token.
+    nonisolated func onTokenRejected(_ refresh: @escaping @Sendable () async throws -> TokenStatus) {
+        tokenRejected.withLock { $0 = refresh }
     }
 
     // MARK: - JWT
@@ -47,14 +63,14 @@ actor APIClient {
 
     private func request(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Data? = nil,
                          contentType: String = "application/json", headers: [String: String] = [:],
-                         bearer: String? = nil) async throws -> Data {
+                         auth: Auth = .device) async throws -> Data {
         try await exchange(path, method: method, query: query, body: body, contentType: contentType, headers: headers,
-                           bearer: bearer).data
+                           auth: auth).data
     }
 
     private func exchange(_ path: String, method: String, query: [URLQueryItem] = [], body: Data? = nil,
                           contentType: String = "application/json", headers: [String: String] = [:],
-                          bearer: String? = nil) async throws -> (data: Data, status: Int) {
+                          auth: Auth = .device) async throws -> (data: Data, status: Int) {
         guard var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false) else {
             throw ObscuraError.invalidArgument("path \(path)")
         }
@@ -64,9 +80,29 @@ actor APIClient {
         request.httpMethod = method
         request.httpBody = body
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        if let token = bearer ?? token.withLock({ $0 }) { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        switch auth {
+        case .device:
+            do {
+                return try await send(request, path, token: token.withLock { $0 })
+            } catch ObscuraError.http(status: 401, body: let body) {
+                switch try await tokenRejected.withLock({ $0 })?() ?? .rejected {
+                case .fresh: return try await send(request, path, token: token.withLock { $0 })
+                case .rejected: throw ObscuraError.notAuthenticated
+                case .unavailable: throw ObscuraError.http(status: 401, body: body)
+                }
+            }
+        case .bearer(let bearer):
+            return try await send(request, path, token: bearer)
+        case .none:
+            return try await send(request, path, token: nil)
+        }
+    }
 
+    /// Sends with 429/503 retries.
+    private func send(_ request: URLRequest, _ path: String, token: String?) async throws -> (data: Data, status: Int) {
+        var request = request
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         var retries = 0
         while true {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -85,9 +121,9 @@ actor APIClient {
     }
 
     private func json<T: Decodable>(_ path: String, method: String = "GET", body: (any Encodable)? = nil,
-                                    bearer: String? = nil) async throws -> T {
+                                    auth: Auth = .device) async throws -> T {
         try decoder.decode(T.self, from: await request(path, method: method, body: body.map { try encoder.encode($0) },
-                                                       bearer: bearer))
+                                                       auth: auth))
     }
 
     private func call(_ path: String, method: String, body: any Encodable) async throws {
@@ -97,33 +133,34 @@ actor APIClient {
     // MARK: - Endpoints
 
     func registerUser(_ username: String, _ password: String) async throws -> AuthResponse {
-        try await json("v1/users", method: "POST", body: ["username": username, "password": password])
+        try await json("v1/users", method: "POST", body: ["username": username, "password": password], auth: .none)
     }
 
     func login(_ username: String, _ password: String, deviceId: String?) async throws -> AuthResponse {
         var body = ["username": username, "password": password]
         body["deviceId"] = deviceId
-        return try await json("v1/sessions", method: "POST", body: body)
+        return try await json("v1/sessions", method: "POST", body: body, auth: .none)
     }
 
     func refreshSession(_ refreshToken: String) async throws -> AuthResponse {
-        try await json("v1/sessions/refresh", method: "POST", body: ["refreshToken": refreshToken])
+        try await json("v1/sessions/refresh", method: "POST", body: ["refreshToken": refreshToken], auth: .none)
     }
 
     /// Takes the session's access token explicitly: the client has already forgotten it.
     func logout(_ refreshToken: String, token: String) async throws {
-        _ = try await request("v1/sessions", method: "DELETE", body: encoder.encode(["refreshToken": refreshToken]), bearer: token)
+        _ = try await request("v1/sessions", method: "DELETE", body: encoder.encode(["refreshToken": refreshToken]),
+                               auth: .bearer(token))
     }
 
     /// Takes a user-scoped token explicitly: it is never the client's token.
     func createDevice(_ device: CreateDeviceRequest, bearer: String) async throws -> AuthResponse {
-        try await json("v1/devices", method: "POST", body: device, bearer: bearer)
+        try await json("v1/devices", method: "POST", body: device, auth: .bearer(bearer))
     }
 
     /// The account's devices. `bearer` is a user-scoped token; nil uses the device's own token.
     func listDevices(bearer: String? = nil) async throws -> [DeviceResponse] {
         struct Directory: Decodable { let devices: [DeviceResponse] }
-        let response: Directory = try await json("v1/devices", bearer: bearer)
+        let response: Directory = try await json("v1/devices", auth: bearer.map(Auth.bearer) ?? .device)
         return response.devices
     }
 
@@ -133,7 +170,7 @@ actor APIClient {
 
     func resetAccount(_ username: String, _ password: String) async throws {
         _ = try await request("v1/account/reset", method: "POST",
-                              body: encoder.encode(["username": username, "password": password]))
+                              body: encoder.encode(["username": username, "password": password]), auth: .none)
     }
 
     func uploadPreKeys(_ keys: PreKeysUpload) async throws {
@@ -151,13 +188,13 @@ actor APIClient {
     }
 
     func createLinkSession(bearer: String) async throws -> LinkSessionResponse {
-        try await json("v1/link-sessions", method: "POST", bearer: bearer)
+        try await json("v1/link-sessions", method: "POST", auth: .bearer(bearer))
     }
 
     /// The primary's body once the session is approved; nil if it was not approved within `wait` seconds.
     func awaitLinkSession(_ id: String, wait: Int, bearer: String) async throws -> Data? {
         let response = try await exchange("v1/link-sessions/\(id)", method: "GET",
-                                          query: [URLQueryItem(name: "wait", value: "\(wait)")], bearer: bearer)
+                                          query: [URLQueryItem(name: "wait", value: "\(wait)")], auth: .bearer(bearer))
         return response.status == 204 ? nil : response.data
     }
 

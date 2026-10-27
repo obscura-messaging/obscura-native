@@ -88,7 +88,9 @@ final class SubmissionResultsTests: XCTestCase {
             let results = await messenger.submit(userId: "05050505-0505-0505-0505-050505050505", submissions: [submission(1), submission(2)]).submitted.map(\.result)
             XCTAssertEqual(results.map(\.status), Array(repeating: [400, 413].contains(status) ? .rejected : .unknown,
                                                          count: 2), "HTTP \(status)")
-            XCTAssertTrue(results.allSatisfy { $0.error?.contains("\(status)") == true })
+            // A 401 with a rejected refresh signs out instead of describing the message.
+            let described = status == 401 ? "\(ObscuraError.notAuthenticated)" : "\(status)"
+            XCTAssertTrue(results.allSatisfy { $0.error?.contains(described) == true }, "HTTP \(status)")
         }
         SubmissionFailureProtocol.status.withLock { $0 = nil }
         let transport = await messenger.submit(userId: "05050505-0505-0505-0505-050505050505", submissions: [submission(1)]).submitted.map(\.result)

@@ -11,7 +11,7 @@ import LibSignalClient
 /// submissions are all rejected with `ERROR_CODE_DEVICE_MISMATCH` unless they cover the user's devices
 /// other than the sender, and
 /// a submission for an unknown device or the sender fails with `ERROR_CODE_INVALID_DEVICE`. Refresh
-/// tokens are always rejected.
+/// tokens are rejected unless ``acceptRefresh(token:refreshToken:)`` says otherwise.
 ///
 /// Served through ``FakeServerProtocol`` for requests to ``host``; one server is active at a time.
 final class FakeObscuraServer: @unchecked Sendable {
@@ -32,9 +32,17 @@ final class FakeObscuraServer: @unchecked Sendable {
     private var linkSessions: [String: (userId: String, body: Data?)] = [:]
     private var attachments: [String: Data] = [:]
     private var createDeviceStatus = 201
+    private var tokenRejections = 0
+    private var refreshed: [String: String]?
 
     func failDeviceList(status: Int) { lock.withLock { listStatus = status } }
     func failDeviceCreation(status: Int) { lock.withLock { createDeviceStatus = status } }
+    /// Answers the next `count` token-authenticated requests with 401.
+    func rejectTokens(_ count: Int) { lock.withLock { tokenRejections = count } }
+    /// Lets refreshes succeed with these tokens instead of being rejected.
+    func acceptRefresh(token: String, refreshToken: String) {
+        lock.withLock { refreshed = ["token": token, "refreshToken": refreshToken] }
+    }
 
     /// Lets `username` log in (any password) as `userId`.
     func account(_ username: String, userId: String) { lock.withLock { accounts[username] = userId } }
@@ -88,6 +96,10 @@ final class FakeObscuraServer: @unchecked Sendable {
         let path = request.url!.path
         let token = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") ?? ""
         let callerDevice = APIClient.deviceId(token) ?? token
+        if !token.isEmpty, !path.hasPrefix("/v1/sessions"), lock.withLock({
+            defer { tokenRejections = max(0, tokenRejections - 1) }
+            return tokenRejections > 0
+        }) { return (401, Data()) }
         if request.httpMethod == "GET", path == "/v1/devices" { return deviceList(token) }
         if request.httpMethod == "POST", path == "/v1/sessions" { return login(body) }
         if request.httpMethod == "POST", path == "/v1/devices" { return lock.withLock { (createDeviceStatus, Data()) } }
@@ -109,7 +121,9 @@ final class FakeObscuraServer: @unchecked Sendable {
             return accept(from: callerDevice, body)
         }
         if request.httpMethod == "DELETE", path == "/v1/sessions" { return (200, Data()) }
-        if path == "/v1/sessions/refresh" { return (401, Data()) }
+        if path == "/v1/sessions/refresh" {
+            return lock.withLock { refreshed.map { (200, try! JSONSerialization.data(withJSONObject: $0)) } ?? (401, Data()) }
+        }
         if request.httpMethod == "DELETE", path.hasPrefix("/v1/devices/") {
             return lock.withLock {
                 devices.removeValue(forKey: String(path.dropFirst("/v1/devices/".count))) == nil ? (404, Data()) : (200, Data())

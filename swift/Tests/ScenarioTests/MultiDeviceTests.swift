@@ -122,9 +122,9 @@ final class MultiDeviceTests: XCTestCase {
         let tablet = try await TestUser.link(to: alice, name: "tablet")
 
         try await alice.client.unlinkDevice(laptop.deviceId)
-        _ = try await eventually("laptop is signed out once the server closes its socket") {
-            laptop.client.authState == .loggedOut ? true : nil
-        }
+        await laptop.client.disconnect()
+        await assertThrows(.notAuthenticated) { _ = try await laptop.client.devices() }
+        XCTAssertEqual(laptop.client.authState, .loggedOut, "a rejected token and refresh sign the device out")
         let laptopLogin = try await laptop.client.login(alice.username, TestServer.password)
         XCTAssertEqual(laptopLogin, .deviceMismatch)
 

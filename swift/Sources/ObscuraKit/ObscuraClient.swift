@@ -124,6 +124,7 @@ public actor ObscuraClient {
         self.signalStore = PersistentSignalStore(db: database, logger: recording)
         self.messenger = Messenger(api: api, store: signalStore)
         (messageReceived, messageContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(100))
+        api.onTokenRejected { [weak self] in try await self?.refresh() ?? .rejected }
     }
 
     deinit {

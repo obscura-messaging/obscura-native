@@ -168,6 +168,28 @@ final class MultiDeviceTests: XCTestCase {
         XCTAssertEqual(devices.map(\.deviceId), [phone.deviceId])
     }
 
+    func testARejectedTokenWhoseRefreshIsRejectedSignsOutAndThrowsNotAuthenticated() async throws {
+        server.remove(laptop)
+
+        await assertThrows(.notAuthenticated) { _ = try await self.laptopClient.devices() }
+
+        XCTAssertEqual(laptopClient.authState, .loggedOut)
+    }
+
+    func testARejectedTokenIsRefreshedOnceAndTheRequestRetried() async throws {
+        let fresh = jwt(userId: phone.userId, deviceId: phone.deviceId)
+        server.acceptRefresh(token: fresh, refreshToken: "rotated")
+        server.rejectTokens(1)
+
+        let devices = try await phoneClient.devices()
+
+        XCTAssertEqual(devices.map(\.deviceId), [phone.deviceId, laptop.deviceId])
+        XCTAssertEqual(phoneClient.authState, .authenticated)
+        let session = await phoneClient.session
+        XCTAssertEqual(session?.token, fresh)
+        XCTAssertEqual(session?.refreshToken, "rotated")
+    }
+
     func testADeviceUnlinkedElsewhereIsSignedOutWhenItsTokenIsRejected() async throws {
         server.remove(laptop)
 
