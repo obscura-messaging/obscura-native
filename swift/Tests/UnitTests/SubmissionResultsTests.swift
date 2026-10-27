@@ -71,9 +71,9 @@ final class SubmissionResultsTests: XCTestCase {
         let api = try APIClient(baseURL: "https://submission-unit.invalid")
         let messenger = Messenger(api: api, store: try signalStoreWithIdentity())
         let a = submission(1)
-        let rejected = await messenger.submit(userId: "user", submissions: [a]).submitted.map(\.result)
+        let rejected = await messenger.submit(userId: "05050505-0505-0505-0505-050505050505", submissions: [a]).submitted.map(\.result)
         XCTAssertEqual(rejected.map(\.status), [.rejected])
-        let malformed = await messenger.submit(userId: "user", submissions: [submission(2)]).submitted.map(\.result)
+        let malformed = await messenger.submit(userId: "05050505-0505-0505-0505-050505050505", submissions: [submission(2)]).submitted.map(\.result)
         XCTAssertEqual(malformed.map(\.status), [.unknown])
         XCTAssertNotNil(malformed.first?.error)
     }
@@ -85,13 +85,13 @@ final class SubmissionResultsTests: XCTestCase {
                                   store: try signalStoreWithIdentity())
         for status in [400, 401, 403, 413, 500] {
             SubmissionFailureProtocol.status.withLock { $0 = status }
-            let results = await messenger.submit(userId: "user", submissions: [submission(1), submission(2)]).submitted.map(\.result)
+            let results = await messenger.submit(userId: "05050505-0505-0505-0505-050505050505", submissions: [submission(1), submission(2)]).submitted.map(\.result)
             XCTAssertEqual(results.map(\.status), Array(repeating: [400, 413].contains(status) ? .rejected : .unknown,
                                                          count: 2), "HTTP \(status)")
             XCTAssertTrue(results.allSatisfy { $0.error?.contains("\(status)") == true })
         }
         SubmissionFailureProtocol.status.withLock { $0 = nil }
-        let transport = await messenger.submit(userId: "user", submissions: [submission(1)]).submitted.map(\.result)
+        let transport = await messenger.submit(userId: "05050505-0505-0505-0505-050505050505", submissions: [submission(1)]).submitted.map(\.result)
         XCTAssertEqual(transport.map(\.status), [.unknown], "a lost response does not prove non-acceptance")
     }
 }

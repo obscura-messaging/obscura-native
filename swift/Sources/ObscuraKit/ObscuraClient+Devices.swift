@@ -96,7 +96,8 @@ extension ObscuraClient {
         }
     }
 
-    /// Decrypts and checks the primary's `LinkEnvelope`.
+    /// Decrypts and checks the primary's `LinkEnvelope`: `LINK_FAILED` if it does not decrypt,
+    /// `PROTOCOL_VIOLATION` if what decrypts is malformed or names another account.
     static func open(_ body: Data, privateKey: Data, userId: String) throws -> LinkContents {
         let envelope: Obscura_Client_V1_LinkEnvelope
         do {
@@ -107,13 +108,15 @@ extension ObscuraClient {
         let plaintext = try LinkCrypto.open(envelope, with: try PrivateKey(privateKey))
         do {
             let bundle = try Obscura_Client_V1_LinkBundle(serializedBytes: plaintext)
-            guard bundle.userID == userId else { throw ObscuraError.protocolViolation("bundle is for user \(bundle.userID)") }
+            guard bundle.userID == userId else { throw ObscuraError.protocolViolation("link bundle is for user \(bundle.userID)") }
             return LinkContents(identity: try IdentityKeyPair(bytes: bundle.identityKeyPair),
                                 friends: try WireCodec.friends(bundle.friends),
                                 friendListVersion: bundle.friendListVersion,
                                 history: bundle.hasHistory ? bundle.history : nil)
+        } catch let error as ObscuraError {
+            throw error
         } catch {
-            throw ObscuraError.linkFailed("unusable link bundle: \(error)")
+            throw ObscuraError.protocolViolation("malformed link bundle: \(error)")
         }
     }
 
@@ -150,7 +153,7 @@ extension ObscuraClient {
 
     public func devices() async throws -> [DeviceInfo] {
         let session = try await requireFreshSession()
-        return try await refreshOwnDevices().map {
+        return try await listOwnDevices().map {
             DeviceInfo(deviceId: $0.deviceId, name: $0.name, isPrimary: $0.isPrimary, isThisDevice: $0.deviceId == session.deviceId)
         }
     }
@@ -173,18 +176,17 @@ extension ObscuraClient {
         }
     }
 
-    /// Every server device list replaces the account's own devices in the directory and confirms the
-    /// primary.
+    /// The account's devices from the server, confirming which one is the primary.
     @discardableResult
-    func refreshOwnDevices() async throws -> [DeviceResponse] {
-        let session = try requireSession()
+    func listOwnDevices() async throws -> [DeviceResponse] {
+        _ = try requireSession()
         let generation = sessionGeneration
         let list = try await api.listDevices()
         guard generation == sessionGeneration else { throw CancellationError() }
         guard let primary = list.first(where: \.isPrimary) else {
             throw ObscuraError.protocolViolation("the account has no primary device")
         }
-        try await directory.replaceOwn(userId: session.userId, deviceIds: list.map(\.deviceId), primaryDeviceId: primary.deviceId)
+        try await directory.setPrimaryDeviceId(primary.deviceId)
         return list
     }
 }

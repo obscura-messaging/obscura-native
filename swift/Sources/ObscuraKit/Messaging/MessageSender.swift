@@ -5,8 +5,8 @@ import Foundation
 /// Targets are the user's devices in the `DeviceStore` directory, never this device. A user with no
 /// listed device is fetched whole; otherwise a bundle is fetched only for a target without a session,
 /// one device at a time, because every bundle fetch consumes a one-time prekey. The server requires
-/// each request to cover the user's devices exactly: a mismatch names the missing devices, which are
-/// added and reached in the next round, and a device the server does not know is dropped.
+/// each request to cover the named user's devices exactly: a mismatch names the missing devices, which
+/// are added and reached in the next round, and a device the server does not know is dropped.
 actor MessageSender {
     static let maxRounds = 3
 
@@ -74,15 +74,17 @@ actor MessageSender {
         }
     }
 
+    /// Every request names `userId`, so the server reports its devices this one does not target, even
+    /// when it targets none of them.
     private func round(_ userId: String, _ data: Data, _ accepted: Set<String>) async throws -> Round {
         var listed = try await devices.deviceIds(of: userId)
         if listed.isEmpty {
             try await establish(userId, try fetchAll(userId))
             listed = try await devices.deviceIds(of: userId)
         }
+        let isSelf = listed.contains(selfDeviceId)
         let targets = listed.filter { $0 != selfDeviceId }
-        if targets.isEmpty { return Round(results: listed.isEmpty ? [noDevices(userId)] : [], settled: true) }
-        if targets.allSatisfy(accepted.contains) {
+        if !targets.isEmpty, targets.allSatisfy(accepted.contains) {
             return Round(results: targets.map { SubmissionResult(userId: userId, deviceId: $0, status: .accepted) },
                          settled: true)
         }
@@ -97,11 +99,9 @@ actor MessageSender {
             }
         }
         try await devices.remove(userId: userId, deviceIds: gone)
-        let live = targets.filter { !gone.contains($0) }
-        if live.isEmpty { return Round(results: [noDevices(userId)], settled: false) }
 
         var submissions: [Obscura_V1_SendMessageRequest.Submission] = []
-        for deviceId in live {
+        for deviceId in targets where !gone.contains(deviceId) {
             submissions.append(try await messenger.prepareSubmission(deviceId: deviceId, clientMessage: data))
         }
         let outcome = await messenger.submit(userId: userId, submissions: submissions)
@@ -110,9 +110,11 @@ actor MessageSender {
         let kept = outcome.submitted.filter { $0.failure != .invalidDevice }.map(\.result)
         if !outcome.missingDeviceIds.isEmpty {
             try await devices.add(userId: userId, deviceIds: outcome.missingDeviceIds)
-            return Round(results: kept, settled: false)
+            let mismatch = rejected(userId, nil, "devices not covered: \(outcome.missingDeviceIds.joined(separator: ", "))")
+            return Round(results: kept.isEmpty ? [mismatch] : kept, settled: false)
         }
-        return kept.isEmpty ? Round(results: [noDevices(userId)], settled: false) : Round(results: kept, settled: true)
+        if kept.isEmpty { return Round(results: isSelf ? [] : [noDevices(userId)], settled: true) }
+        return Round(results: kept, settled: true)
     }
 
     /// Consumes one one-time prekey on every device of `userId`. 404 means the user has no devices.

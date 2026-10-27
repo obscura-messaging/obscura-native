@@ -50,19 +50,18 @@ final class DeviceStoreTests: XCTestCase {
         XCTAssertFalse(linked)
     }
 
-    func testReplaceOwnSwapsTheAccountsDevicesAndPrimaryAndLeavesOthersAlone() async throws {
+    func testThePrimaryIsReplacedWithoutTouchingTheDirectory() async throws {
         try await db.write { try DeviceStore.setLocalDevice("me-1", primaryDeviceId: "old-primary", in: $0) }
-        try await devices.add(userId: "me", deviceIds: ["me-1", "gone"])
-        try await devices.add(userId: "peer", deviceIds: ["p1"])
+        try await devices.add(userId: "me", deviceIds: ["me-1"])
 
-        try await devices.replaceOwn(userId: "me", deviceIds: ["me-1", "me-2"], primaryDeviceId: "me-2")
+        try await devices.setPrimaryDeviceId("me-1")
 
-        let mine = try await devices.deviceIds(of: "me")
-        let theirs = try await devices.deviceIds(of: "peer")
         let primary = try await devices.primaryDeviceId()
-        XCTAssertEqual(mine, ["me-1", "me-2"])
-        XCTAssertEqual(theirs, ["p1"])
-        XCTAssertEqual(primary, "me-2")
+        let isPrimary = try await devices.isPrimary()
+        let mine = try await devices.deviceIds(of: "me")
+        XCTAssertEqual(primary, "me-1")
+        XCTAssertTrue(isPrimary)
+        XCTAssertEqual(mine, ["me-1"])
     }
 
     func testRemovingAFriendForgetsTheirDevices() async throws {

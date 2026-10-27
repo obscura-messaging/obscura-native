@@ -59,11 +59,8 @@ actor DeviceStore {
         }
     }
 
-    /// Replaces the account's own device list and primary with the server's.
-    func replaceOwn(userId: String, deviceIds: [String], primaryDeviceId: String) async throws {
+    func setPrimaryDeviceId(_ primaryDeviceId: String) async throws {
         try await db.write { db in
-            try db.execute(sql: "DELETE FROM devices WHERE user_id = ?", arguments: [userId])
-            for deviceId in deviceIds { try Self.add(userId: userId, deviceId: deviceId, in: db) }
             try db.execute(sql: "UPDATE device_identity SET primary_device_id = ? WHERE id = 1", arguments: [primaryDeviceId])
             guard db.changesCount == 1 else { throw DatabaseError(message: "no local device to update") }
         }

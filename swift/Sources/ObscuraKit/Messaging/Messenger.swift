@@ -101,9 +101,17 @@ actor Messenger {
 
     /// Uploads `submissions` to one user's devices as one request. Pre-processing HTTP rejections are
     /// definitive; transport, server or decoding failures leave acceptance unknown.
+    /// The request names `userId`, so it is checked for complete delivery even without submissions.
     func submit(userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]) async -> SubmitOutcome {
+        guard let user = uuidBytes(userId) else {
+            return SubmitOutcome(submitted: submissions.map {
+                Submitted(SubmissionResult(userId: userId, deviceId: uuidString($0.deviceID), status: .rejected,
+                                           error: "user id \(userId) is not a UUID"))
+            }, missingDeviceIds: [])
+        }
         var request = Obscura_V1_SendMessageRequest()
         request.messages = submissions
+        request.recipientUserIds = [user]
         do {
             let response = try Obscura_V1_SendMessageResponse(serializedBytes: try await api.sendMessage(request.serializedData()))
             return try submitOutcome(userId: userId, submissions: submissions, response: response)

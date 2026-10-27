@@ -54,7 +54,7 @@ extension ObscuraClient {
             guard try await freshToken() != .rejected else { throw ObscuraError.notAuthenticated }
             guard generation == connectionGeneration else { throw CancellationError() }
             do {
-                try await refreshOwnDevices()
+                try await listOwnDevices()
             } catch ObscuraError.http(status: 401, body: let body) {
                 // A device deleted on the server (unlinked or reset) also has its refresh token
                 // rejected, which signs it out.

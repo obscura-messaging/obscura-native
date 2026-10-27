@@ -21,7 +21,6 @@ final class MultiDeviceTests: XCTestCase {
         bob = try await server.register(UUID().uuidString.lowercased())
         phoneClient = try await authenticatedClient(phone, username: "alice")
         laptopClient = try await authenticatedClient(laptop, username: "alice")
-        _ = try await phoneClient.devices()
     }
 
     override func tearDown() async throws {
@@ -106,7 +105,6 @@ final class MultiDeviceTests: XCTestCase {
 
     func testALinkedDeviceTakesOnlyANewerWellFormedListFromItsOwnPrimary() async throws {
         let tablet = try await server.register(phone.userId)
-        try await tablet.directory.add(userId: phone.userId, deviceIds: [phone.deviceId, laptop.deviceId])
         try await send(sync(version: 5, [(bob.userId, "bob", .accepted)]), from: phone, to: phone.userId)
         await deliver(laptop, to: laptopClient)
         _ = tablet.envelopes()
@@ -133,7 +131,6 @@ final class MultiDeviceTests: XCTestCase {
     }
 
     func testThePrimaryIgnoresAFriendListSync() async throws {
-        try await laptop.directory.add(userId: phone.userId, deviceIds: [phone.deviceId])
         try await send(sync(version: 7, [(bob.userId, "bob", .accepted)]), from: laptop, to: phone.userId)
 
         let acks = await deliver(phone, to: phoneClient)

@@ -139,17 +139,16 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(server.deviceBundleFetches(phantom), 2, "each retry fetches the missing device, which does not exist")
     }
 
-    func testSelfSyncNeverTargetsThisDeviceAndASingleDeviceFetchesNothing() async throws {
+    func testSelfSyncNeverTargetsThisDeviceAndASingleDeviceOnlyAsksTheServer() async throws {
         let results = await send(alice, to: alice, "note")
         XCTAssertEqual(results, [])
         XCTAssertEqual(server.bundleFetches(alice.userId), 0)
-        XCTAssertEqual(server.messageRequests(), 0)
+        XCTAssertEqual(server.messageRequests(), 1, "a request naming the user and targeting nothing")
     }
 
-    func testSelfSyncReachesListedOwnDevicesAndDiscoversTheRestByMismatch() async throws {
+    func testSelfSyncDiscoversOwnDevicesItHasNeverSeenThroughTheMismatch() async throws {
         let phone = try await server.register(alice.userId)
         let tablet = try await server.register(alice.userId)
-        try await alice.directory.add(userId: alice.userId, deviceIds: [phone.deviceId])
 
         let results = await send(alice, to: alice, "note")
 

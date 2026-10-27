@@ -7,8 +7,9 @@ import LibSignalClient
 /// semantics. All devices of a user share the account identity; the first one registered is the
 /// primary. `GET /v1/users/{id}` returns one bundle per device and consumes a one-time prekey from each
 /// (404 when the user has none), `GET /v1/users/{id}/devices/{device}` consumes one from that device
-/// only, and `POST /v1/messages` enforces complete delivery: a user's submissions are all rejected
-/// with `ERROR_CODE_DEVICE_MISMATCH` unless they cover the user's devices other than the sender, and
+/// only, and `POST /v1/messages` enforces complete delivery for every named or targeted user: a user's
+/// submissions are all rejected with `ERROR_CODE_DEVICE_MISMATCH` unless they cover the user's devices
+/// other than the sender, and
 /// a submission for an unknown device or the sender fails with `ERROR_CODE_INVALID_DEVICE`. Refresh
 /// tokens are always rejected.
 ///
@@ -217,7 +218,7 @@ final class FakeObscuraServer: @unchecked Sendable {
                 valid.append((target, submission))
             }
             var mismatched: Set<String> = []
-            for userId in Set(valid.map(\.0.userId)) {
+            for userId in Set(valid.map(\.0.userId) + request.recipientUserIds.compactMap(uuidString)) {
                 let current = Set(owned(userId).map(\.deviceId)).subtracting([senderDeviceId])
                 let targeted = Set(valid.filter { $0.0.userId == userId }.map(\.0.deviceId))
                 guard targeted != current else { continue }

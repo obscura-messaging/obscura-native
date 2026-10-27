@@ -125,7 +125,7 @@ final class LinkingTests: XCTestCase {
 
     // MARK: - New device
 
-    func testAnEnvelopeOpensOnlyWithTheCodesKeyAndOnlyForTheAccount() throws {
+    func testAnEnvelopeThatDoesNotDecryptFailsTheLinkAndAMalformedOrForeignBundleIsAViolation() throws {
         let newDevice = PrivateKey.generate()
         var bundle = Obscura_Client_V1_LinkBundle()
         bundle.identityKeyPair = Data(IdentityKeyPair.generate().serialize())
@@ -133,13 +133,15 @@ final class LinkingTests: XCTestCase {
         let body = try LinkCrypto.seal(bundle.serializedData(), to: newDevice.publicKey).serializedData()
         XCTAssertNoThrow(try ObscuraClient.open(body, privateKey: Data(newDevice.serialize()), userId: "alice-id"))
 
-        for (body, key, userId) in [
-            (body, PrivateKey.generate(), "alice-id"),
-            (body, newDevice, "mallory-id"),
-            (Data([0xff, 0x01]), newDevice, "alice-id"),
+        for (body, key, userId, code) in [
+            (body, PrivateKey.generate(), "alice-id", "LINK_FAILED"),
+            (Data([0xff, 0x01]), newDevice, "alice-id", "LINK_FAILED"),
+            (body, newDevice, "mallory-id", "PROTOCOL_VIOLATION"),
+            (try LinkCrypto.seal(Data([0xff, 0x01]), to: newDevice.publicKey).serializedData(), newDevice, "alice-id",
+             "PROTOCOL_VIOLATION"),
         ] {
             XCTAssertThrowsError(try ObscuraClient.open(body, privateKey: Data(key.serialize()), userId: userId)) {
-                XCTAssertEqual(($0 as? ObscuraError)?.code, "LINK_FAILED")
+                XCTAssertEqual(($0 as? ObscuraError)?.code, code)
             }
         }
         var badStatus = bundle
@@ -148,7 +150,7 @@ final class LinkingTests: XCTestCase {
         badStatus.friends = [record]
         let unusable = try LinkCrypto.seal(badStatus.serializedData(), to: newDevice.publicKey).serializedData()
         XCTAssertThrowsError(try ObscuraClient.open(unusable, privateKey: Data(newDevice.serialize()), userId: "alice-id")) {
-            XCTAssertEqual(($0 as? ObscuraError)?.code, "LINK_FAILED")
+            XCTAssertEqual(($0 as? ObscuraError)?.code, "PROTOCOL_VIOLATION")
         }
     }
 
