@@ -36,7 +36,8 @@ public actor EntryStore {
             INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_device_id, local_metadata)
             VALUES (?, ?, ?, ?, ?, ?)
         """, arguments: [
-            model, entry.id, entry.data, Int64(clamping: entry.sentAt), entry.authorDeviceId, entry.localMetadata,
+            model.storedText, entry.id.storedText, entry.data.storedText, Int64(clamping: entry.sentAt),
+            entry.authorDeviceId.storedText, entry.localMetadata?.storedText,
         ])
     }
 
@@ -45,13 +46,13 @@ public actor EntryStore {
         return try await db.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT * FROM model_entries WHERE model_name = ? AND id IN (\(questionMarks(ids.count)))
-            """, arguments: StatementArguments([model] + ids)).map(Self.entry)
+            """, arguments: StatementArguments(([model] + ids).map(\.storedText))).map(Self.entry)
         }
     }
 
     public func all(model: String) async throws -> [StoredEntry] {
         try await db.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM model_entries WHERE model_name = ?", arguments: [model]).map(Self.entry)
+            try Row.fetchAll(db, sql: "SELECT * FROM model_entries WHERE model_name = ?", arguments: [model.storedText]).map(Self.entry)
         }
     }
 
@@ -63,7 +64,7 @@ public actor EntryStore {
             for offset in stride(from: 0, to: ids.count, by: 500) {
                 let chunk = Array(ids[offset..<min(offset + 500, ids.count)])
                 try db.execute(sql: "DELETE FROM model_entries WHERE model_name = ? AND id IN (\(questionMarks(chunk.count)))",
-                               arguments: StatementArguments([model] + chunk))
+                               arguments: StatementArguments(([model] + chunk).map(\.storedText)))
             }
         }
         try await ObscuraDatabase.truncateWAL(db)
@@ -74,9 +75,9 @@ public actor EntryStore {
         try await db.read { db in
             var snapshot = Obscura_Client_V1_EntrySnapshot()
             snapshot.entries = try Row.fetchAll(db, sql: "SELECT * FROM model_entries ORDER BY model_name, id").map { row in
-                let entry = Self.entry(row)
+                let entry = try Self.entry(row)
                 var exported = Obscura_Client_V1_SnapshotEntry()
-                exported.model = row["model_name"]
+                exported.model = try row.text("model_name")
                 exported.id = entry.id
                 exported.data = Data(entry.data.utf8)
                 exported.sentAt = entry.sentAt
@@ -100,13 +101,13 @@ public actor EntryStore {
         }
     }
 
-    private static func entry(_ row: Row) -> StoredEntry {
+    private static func entry(_ row: Row) throws -> StoredEntry {
         StoredEntry(
-            id: row["id"],
-            data: row["data"],
+            id: try row.text("id"),
+            data: try row.text("data"),
             sentAt: UInt64(max(0, row["timestamp"] as Int64)),
-            authorDeviceId: row["author_device_id"],
-            localMetadata: row["local_metadata"]
+            authorDeviceId: try row.text("author_device_id"),
+            localMetadata: try row.optionalText("local_metadata")
         )
     }
 }

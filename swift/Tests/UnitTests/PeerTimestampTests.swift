@@ -32,7 +32,7 @@ final class PeerTimestampTests: XCTestCase {
 
         // A peer kit, where proto3 uint64 is a signed Long, can store a negative.
         try await db.write { db in
-            try db.execute(sql: "UPDATE model_entries SET timestamp = ? WHERE id = ?", arguments: [Int64(-1), "s1"])
+            try db.execute(sql: "UPDATE model_entries SET timestamp = ? WHERE id = ?", arguments: [Int64(-1), "s1".storedText])
         }
 
         let read = try await entries.all(model: "story")

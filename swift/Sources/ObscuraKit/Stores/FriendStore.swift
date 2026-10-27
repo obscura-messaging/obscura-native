@@ -47,7 +47,7 @@ actor FriendStore {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         try db.execute(sql: """
             INSERT OR REPLACE INTO friends (user_id, username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-        """, arguments: [userId, username, status.rawValue, now, now])
+        """, arguments: [userId.storedText, username.storedText, status.rawValue, now, now])
         try bumpVersion(in: db)
     }
 
@@ -58,7 +58,7 @@ actor FriendStore {
     }
 
     static func friend(_ userId: String, in db: Database) throws -> Friend? {
-        try Row.fetchOne(db, sql: "SELECT * FROM friends WHERE user_id = ?", arguments: [userId]).map(Self.friend)
+        try Row.fetchOne(db, sql: "SELECT * FROM friends WHERE user_id = ?", arguments: [userId.storedText]).map(Self.friend)
     }
 
     func all() async throws -> [Friend] {
@@ -78,7 +78,7 @@ actor FriendStore {
     static func updateStatus(_ userId: String, _ status: FriendStatus, in db: Database) throws {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         try db.execute(sql: "UPDATE friends SET status = ?, updated_at = ? WHERE user_id = ?",
-                       arguments: [status.rawValue, now, userId])
+                       arguments: [status.rawValue, now, userId.storedText])
         guard db.changesCount == 1 else {
             throw DatabaseError(message: "friend \(userId) is missing; status was not updated")
         }
@@ -89,7 +89,7 @@ actor FriendStore {
     func removePendingSent(_ userId: String) async throws -> Bool {
         try await db.write { db in
             try db.execute(sql: "DELETE FROM friends WHERE user_id = ? AND status = ?",
-                           arguments: [userId, FriendStatus.pendingSent.rawValue])
+                           arguments: [userId.storedText, FriendStatus.pendingSent.rawValue])
             guard db.changesCount == 1 else { return false }
             try Self.bumpVersion(in: db)
             return true
@@ -99,7 +99,7 @@ actor FriendStore {
     /// Forgets the friendship and the friend's devices.
     func remove(_ userId: String) async throws {
         try await db.write { db in
-            try db.execute(sql: "DELETE FROM friends WHERE user_id = ?", arguments: [userId])
+            try db.execute(sql: "DELETE FROM friends WHERE user_id = ?", arguments: [userId.storedText])
             let removed = db.changesCount == 1
             try db.execute(sql: "DELETE FROM devices WHERE user_id = ?", arguments: [userId])
             if removed { try Self.bumpVersion(in: db) }
@@ -136,16 +136,17 @@ actor FriendStore {
         for friend in friends {
             try db.execute(sql: """
                 INSERT INTO friends (user_id, username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-            """, arguments: [friend.userId, friend.username, friend.status.rawValue, now, now])
+            """, arguments: [friend.userId.storedText, friend.username.storedText, friend.status.rawValue, now, now])
         }
         try db.execute(sql: "INSERT OR REPLACE INTO friend_list_version (id, version) VALUES (1, ?)", arguments: [stored])
     }
 
     private static func friend(_ row: Row) throws -> Friend {
+        let userId = try row.text("user_id")
         guard let status = FriendStatus(rawValue: row["status"]) else {
-            throw DatabaseError(message: "friend \(row["user_id"] as String) has unknown status \(row["status"] as String)")
+            throw DatabaseError(message: "friend \(userId) has unknown status \(row["status"] as String)")
         }
-        return Friend(userId: row["user_id"], username: row["username"], status: status,
+        return Friend(userId: userId, username: try row.text("username"), status: status,
                       createdAt: UInt64(row["created_at"] as Int64), updatedAt: UInt64(row["updated_at"] as Int64))
     }
 }

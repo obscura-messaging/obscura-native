@@ -79,6 +79,19 @@ final class DeviceStoreTests: XCTestCase {
         XCTAssertEqual(otherDevices, ["dev-b"])
     }
 
+    func testFriendTextWithEmbeddedNULRoundTripsAndDoesNotCollide() async throws {
+        try await friends.add("victim\0junk", username: "Mum\0🙂", status: .pendingSent)
+        try await friends.add("victim", username: "victim", status: .accepted)
+
+        let all = try await friends.all()
+        XCTAssertEqual(all.map(\.userId), ["victim", "victim\0junk"])
+        XCTAssertEqual(all.map(\.username), ["victim", "Mum\0🙂"])
+        let removed = try await friends.removePendingSent("victim\0junk")
+        XCTAssertTrue(removed)
+        let left = try await friends.all()
+        XCTAssertEqual(left.map(\.status), [.accepted])
+    }
+
     func testEveryFriendChangeBumpsTheVersionAndANoOpDoesNot() async throws {
         func version() async throws -> UInt64 { try await db.read { try FriendStore.version(in: $0) } }
         let initial = try await version()

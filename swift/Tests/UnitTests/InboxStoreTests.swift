@@ -36,6 +36,17 @@ final class InboxStoreTests: XCTestCase {
         )
     }
 
+    func testPeerSuppliedTextWithEmbeddedNULRoundTripsExactly() async throws {
+        let inbox = try makeInbox()
+        _ = try await inbox.put(InboxInsert(
+            envelopeId: "e", kind: "APP_ENTRY", senderUserId: "user_peer", senderDeviceId: "device_peer",
+            modelKey: "model\0suffix", entryId: "entry\0\u{1}👩‍👩‍👧", sentAt: 1, payload: Data([0])))
+
+        let row = try await inbox.peek(limit: 1).first
+        XCTAssertEqual(row?.modelKey, "model\0suffix")
+        XCTAssertEqual(row?.entryId, "entry\0\u{1}👩‍👩‍👧")
+    }
+
     // MARK: - Idempotence
 
     /// A failed ack means the envelope is redelivered on the next connection. `envelope_id UNIQUE`

@@ -14,13 +14,13 @@ final class ReceiveTests: XCTestCase {
                 callback = { _ in
                     do {
                         let status = try client.db.read {
-                            try String.fetchOne($0, sql: "SELECT status FROM friends WHERE user_id = ?", arguments: [peer.userId])
+                            try String.fetchOne($0, sql: "SELECT status FROM friends WHERE user_id = ?", arguments: [peer.userId.storedText])
                         }
                         XCTAssertEqual(status, FriendStatus.pendingSent.rawValue, "request must be durable before submission")
                         if acceptedBeforeFailure {
                             try client.db.write {
                                 try $0.execute(sql: "UPDATE friends SET status = ? WHERE user_id = ?",
-                                               arguments: [FriendStatus.accepted.rawValue, peer.userId])
+                                               arguments: [FriendStatus.accepted.rawValue, peer.userId.storedText])
                             }
                         }
                     } catch { XCTFail("friend persistence failed: \(error)") }

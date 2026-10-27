@@ -52,7 +52,7 @@ final class ServerContractTests: XCTestCase {
         try await bob.client.db.write { db in
             try db.execute(sql: """
                 CREATE TRIGGER contract_inbox_fault BEFORE INSERT ON inbox_rows
-                WHEN NEW.entry_id = 'recover-after-decrypt'
+                WHEN NEW.entry_id = CAST('recover-after-decrypt' AS BLOB)
                 BEGIN SELECT RAISE(ABORT, 'contract inbox persistence fault'); END
                 """)
         }
