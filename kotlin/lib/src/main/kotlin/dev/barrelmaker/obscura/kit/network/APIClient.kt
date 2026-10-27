@@ -2,20 +2,25 @@ package dev.barrelmaker.obscura.kit.network
 
 import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.managers.TokenStatus
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.ConnectionSpec
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * The REST API. Calls on this device's session use [token]; a missing token is
@@ -192,9 +197,7 @@ internal class APIClient(
                 if (bearer != null) header("Authorization", "Bearer $bearer")
                 headers.forEach { (name, value) -> header(name, value) }
             }.build()
-            val (status, bytes, retryAfter) = withContext(Dispatchers.IO) {
-                client.newCall(request).execute().use { Triple(it.code, it.body.bytes(), it.header("Retry-After")) }
-            }
+            val (status, bytes, retryAfter) = execute(client, request)
             if (status in 200..299) return status to bytes
             if (status == 401 && auth == Auth.Session && !refreshed) {
                 refreshed = true
@@ -209,6 +212,25 @@ internal class APIClient(
             delay(retryAfterMs(retryAfter))
         }
     }
+
+    /** Cancelling the calling coroutine cancels the call, which closes its connection. */
+    private suspend fun execute(client: OkHttpClient, request: Request): Triple<Int, ByteArray, String?> =
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) = continuation.resumeWithException(e)
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = try {
+                        response.use { Triple(it.code, it.body.bytes(), it.header("Retry-After")) }
+                    } catch (e: IOException) {
+                        return continuation.resumeWithException(e)
+                    }
+                    continuation.resume(result)
+                }
+            })
+        }
 
     private fun JSONObject.body() = toString().toRequestBody(JSON)
 

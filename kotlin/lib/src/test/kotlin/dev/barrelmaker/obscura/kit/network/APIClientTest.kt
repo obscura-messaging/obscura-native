@@ -1,6 +1,7 @@
 package dev.barrelmaker.obscura.kit.network
 
 import dev.barrelmaker.obscura.kit.ObscuraError
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -112,6 +113,36 @@ class APIClientTest {
         assertEquals(401, (runCatching { api.fetchOwnDevices(userToken = "user") }.exceptionOrNull() as ObscuraError.Http).status)
         assertEquals(401, (runCatching { api.login("u", "p", null) }.exceptionOrNull() as ObscuraError.Http).status)
         assertEquals(0, refreshes())
+    }
+
+    @Test
+    fun `cancelling a request returns promptly and closes its connection`() = runBlocking {
+        java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { listener ->
+            val closed = java.util.concurrent.CountDownLatch(1)
+            val requestRead = java.util.concurrent.CountDownLatch(1)
+            val serverThread = Thread {
+                listener.accept().use { socket ->
+                    val input = socket.getInputStream()
+                    val head = StringBuilder()
+                    while (!head.endsWith("\r\n\r\n")) head.append(input.read().toChar())
+                    requestRead.countDown()
+                    // Never answer; a read returns -1 once the client closes the connection.
+                    if (input.read() == -1) closed.countDown()
+                }
+            }.apply { start() }
+            val slow = APIClient("http://127.0.0.1:${listener.localPort}") { "token" }
+
+            val call = async(kotlinx.coroutines.Dispatchers.Default) { slow.awaitLinkSession("user", "ls", waitSeconds = 25) }
+            assertTrue(requestRead.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val started = System.currentTimeMillis()
+            call.cancel()
+            val error = runCatching { call.await() }.exceptionOrNull()
+
+            assertTrue(error is kotlinx.coroutines.CancellationException, "got $error")
+            assertTrue(System.currentTimeMillis() - started < 2_000, "cancellation must not wait for the response")
+            assertTrue(closed.await(5, java.util.concurrent.TimeUnit.SECONDS), "the server must see the connection closed")
+            serverThread.join(5_000)
+        }
     }
 
     @Test
