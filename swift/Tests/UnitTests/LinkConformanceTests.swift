@@ -90,8 +90,18 @@ final class LinkConformanceTests: XCTestCase {
             fields.deviceName = try XCTUnwrap(vector["deviceName"] as? String)
 
             XCTAssertEqual(try LinkCrypto.decode(try XCTUnwrap(vector["code"] as? String)), fields, name)
+            XCTAssertEqual(try ObscuraClient.linkCodeDeviceName(try XCTUnwrap(vector["code"] as? String)),
+                           fields.deviceName, name)
             XCTAssertEqual(try LinkCrypto.decode(LinkCrypto.encode(fields)), fields, name)
             XCTAssertFalse(try LinkCrypto.encode(fields).contains { "+/=".contains($0) }, name)
+        }
+    }
+
+    func testAMalformedCodeHasNoDeviceName() {
+        for code in ["", "not base64!", "AAAA", "CiBacTN2WDltVDJwTDhzUjR3SzduQjFjWTZoSjBkRjVnQRIhBbGz8h9-ZjC0Epfni2lrc0xex1WnDesXsVLueIf58qQrGg5BbGljZSdzIGlQaG9uZQ=="] {
+            XCTAssertThrowsError(try ObscuraClient.linkCodeDeviceName(code), code) {
+                XCTAssertEqual($0 as? ObscuraError, .invalidArgument("link code"))
+            }
         }
     }
 

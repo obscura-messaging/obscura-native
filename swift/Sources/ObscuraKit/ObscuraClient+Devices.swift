@@ -122,6 +122,11 @@ extension ObscuraClient {
 
     // MARK: - Linking, primary
 
+    /// The name the new device gave itself, for the app to show before `approveLink`.
+    public static func linkCodeDeviceName(_ code: String) throws -> String {
+        try LinkCrypto.decode(code).deviceName
+    }
+
     /// Primary only. Sends the account identity, friend list and history to the device showing `code`.
     public func approveLink(_ code: String) async throws {
         let session = try await requireFreshSession()
