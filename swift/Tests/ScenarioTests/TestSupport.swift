@@ -26,7 +26,7 @@ final class SilentLogger: ObscuraLogger {
     func ackFailed(envelopeId: String, reason: String) {}
     func tokenRefreshFailed(attempt: Int, reason: String) {}
     func preKeyReplenishFailed(reason: String) {}
-    func identityChanged(address: String) {}
+    func identityChanged(userId: String) {}
     func sessionEstablishFailed(userId: String, reason: String) {}
     func databaseError(store: String, operation: String, reason: String) {}
 }
@@ -86,11 +86,17 @@ final class TestUser: @unchecked Sendable {
         return try await TestUser(client: client, username: username)
     }
 
-    /// Another device of `user`'s account.
-    static func newDevice(of user: TestUser, name: String = "second-device") async throws -> TestUser {
-        let client = try makeClient(deviceName: name)
-        try await client.loginAndProvision(user.username, TestServer.password)
-        return try await TestUser(client: client, username: user.username)
+    /// A device linked to `primary`'s account the way an app does it: the new device shows its code,
+    /// the primary approves it. The linked device is connected.
+    static func link(to primary: TestUser, name: String = "linked-device", _ client: ObscuraClient? = nil) async throws -> TestUser {
+        let client = try client ?? makeClient(deviceName: name)
+        let scenario = try await client.login(primary.username, TestServer.password)
+        XCTAssertEqual(scenario, .linkRequired)
+        let request = try await client.beginLink(primary.username, TestServer.password, deviceName: name)
+        async let completed: Void = client.completeLink(request)
+        try await primary.client.approveLink(request.code)
+        try await completed
+        return try await TestUser(client: client, username: primary.username)
     }
 
     /// Two connected users who are friends.

@@ -2,39 +2,6 @@ import XCTest
 @testable import ObscuraKit
 
 final class FriendTests: XCTestCase {
-    func testANewIndependentDeviceCanExplicitlyReAddAnAlreadyAcceptedPeer() async throws {
-        let (alice, bob) = try await TestUser.friends()
-        let previousBobRecord = try await bob.client.friends.friend(alice.userId)
-        let previousAliceRecord = try await alice.client.friends.friend(bob.userId)
-        let freshAlice = try await TestUser.newDevice(of: alice)
-        let freshFriends = try await freshAlice.client.getFriends()
-        XCTAssertTrue(freshFriends.isEmpty)
-        try await freshAlice.client.connect()
-
-        try await freshAlice.client.addFriendByCode(bob.client.friendCode())
-
-        try await freshAlice.waitForFriend(bob, .accepted)
-        let added = try await freshAlice.client.friends.friend(bob.userId)
-        let existingBobRecord = try await bob.client.friends.friend(alice.userId)
-        let existingAliceRecord = try await alice.client.friends.friend(bob.userId)
-        XCTAssertEqual(added?.username, bob.username)
-        XCTAssertEqual(existingBobRecord, previousBobRecord)
-        XCTAssertEqual(existingAliceRecord, previousAliceRecord)
-        let learned = try await bob.client.devices.deviceIds(of: alice.userId)
-        XCTAssertTrue(learned.contains(freshAlice.deviceId))
-
-        var request = Obscura_Client_V1_ClientMessage()
-        request.friendRequest.username = "replacement label"
-        try await freshAlice.sendRaw(request, to: bob)
-        try await freshAlice.send("readd-marker", to: [bob])
-        _ = try await bob.waitForEntry("readd-marker")
-        let afterRepeatedRequest = try await bob.client.friends.friend(alice.userId)
-        XCTAssertEqual(afterRepeatedRequest, previousBobRecord)
-        await freshAlice.client.disconnect()
-        await alice.client.disconnect()
-        await bob.client.disconnect()
-    }
-
     func testAFriendCodeHandshakeAcceptsBothSidesWithTheirUsernames() async throws {
         let alice = try await TestUser.register()
         let bob = try await TestUser.register()
@@ -119,7 +86,7 @@ final class FriendTests: XCTestCase {
         try await alice.client.removeFriend(bob.userId)
 
         let friends = try await alice.client.getFriends()
-        let devices = try await alice.client.devices.deviceIds(of: bob.userId)
+        let devices = try await alice.client.directory.deviceIds(of: bob.userId)
         XCTAssertEqual(friends, [])
         XCTAssertEqual(devices, [])
     }

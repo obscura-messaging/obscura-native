@@ -93,7 +93,7 @@ final class ServerContractTests: XCTestCase {
         addTeardownBlock { try await alice.client.logout(); try await bob.client.logout() }
         let original = try await bundle(for: bob, fetchedBy: alice)
         XCTAssertEqual(original.signedPreKey.keyId, 1)
-        try await alice.client.messenger.establishSession(original)
+        try await alice.client.messenger.establishSessions(userId: bob.userId, [original])
         var delayed = Obscura_Client_V1_ClientMessage()
         delayed.appEntry.model = "contract"
         delayed.appEntry.id = "delayed-original-signed-key"
@@ -122,7 +122,7 @@ final class ServerContractTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(second.oneTimePreKey).keyId, 150)
         try await assertRotatedSession(bob, storage: storage, previous: before)
 
-        let delayedResult = await alice.client.messenger.submit(userId: bob.userId, submissions: [pending])
+        let delayedResult = await alice.client.messenger.submit(userId: bob.userId, submissions: [pending]).submitted
         XCTAssertEqual(delayedResult.map(\.result.status), [.accepted])
         let oldEntry = try await bob.waitForEntry(delayed.appEntry.id)
         XCTAssertEqual(oldEntry.payload, delayed.appEntry.data, "private signed key 1 must survive both rotations")
@@ -140,13 +140,12 @@ final class ServerContractTests: XCTestCase {
 
     func testDeletingTheFinalWarmPeerDeviceReturnsAUserLevelRejection() async throws {
         let (alice, bob) = try await TestUser.friends()
-        addTeardownBlock { try await alice.client.logout(); try await bob.client.logout() }
+        addTeardownBlock { try await alice.client.logout() }
         let warm = try await alice.send("warm", to: [bob])
         XCTAssertEqual(warm.recipients.map(\.status), [.accepted])
         _ = try await bob.waitForEntry("warm")
-        let current = try await bob.client.requireSession()
-        _ = try await serverRequest("v1/devices/\(bob.deviceId)", method: "DELETE", token: current.token)
-        await bob.client.disconnect()
+        // The primary cannot be deleted on its own; a reset deletes every device of the account.
+        try await bob.client.resetAccount(bob.username, TestServer.password)
 
         let report = try await alice.send("after-final-device-deletion", to: [bob])
         XCTAssertEqual(report.recipients.count, 1, "removed targets must not turn a rejected user into an empty report")
@@ -154,7 +153,7 @@ final class ServerContractTests: XCTestCase {
         XCTAssertNil(report.recipients.first?.deviceId)
         XCTAssertEqual(report.recipients.first?.status, .rejected)
         XCTAssertNotNil(report.recipients.first?.error)
-        let listed = try await alice.client.devices.deviceIds(of: bob.userId)
+        let listed = try await alice.client.directory.deviceIds(of: bob.userId)
         XCTAssertEqual(listed, [])
         await alice.client.disconnect()
     }
@@ -194,7 +193,7 @@ final class ServerContractTests: XCTestCase {
         let alice = try await TestUser.register()
         let bob = try await TestUser.register()
         addTeardownBlock { try await alice.client.logout(); try await bob.client.logout() }
-        try await alice.client.messenger.establishSession(bundle(for: bob, fetchedBy: alice))
+        try await alice.client.messenger.establishSessions(userId: bob.userId, [bundle(for: bob, fetchedBy: alice)])
         var message = Obscura_Client_V1_ClientMessage()
         message.appEntry.model = "contract"
         message.appEntry.id = "oversized"
@@ -203,7 +202,7 @@ final class ServerContractTests: XCTestCase {
         for _ in 0..<101 {
             submissions.append(try await alice.client.messenger.prepareSubmission(deviceId: bob.deviceId, clientMessage: plaintext))
         }
-        let results = await alice.client.messenger.submit(userId: bob.userId, submissions: submissions).map(\.result)
+        let results = await alice.client.messenger.submit(userId: bob.userId, submissions: submissions).submitted.map(\.result)
         XCTAssertEqual(results.count, 101)
         XCTAssertTrue(results.allSatisfy { $0.status == .rejected }, "HTTP 413 is a definitive pre-processing rejection")
         XCTAssertTrue(results.allSatisfy { $0.error?.contains("413") == true })
@@ -216,20 +215,21 @@ final class ServerContractTests: XCTestCase {
         await bob.client.disconnect()
     }
 
-    func testOwnMetadataAndWarmSessionSendsDoNotConsumePreKeys() async throws {
+    func testListingOwnDevicesAndWarmSessionSendsDoNotConsumePreKeys() async throws {
         let alice = try await TestUser.register()
-        let laptop = try await TestUser.newDevice(of: alice)
+        let laptop = try await TestUser.link(to: alice)
+        await laptop.client.disconnect()
         let bob = try await TestUser.register()
         addTeardownBlock { try await alice.client.logout(); try await laptop.client.logout(); try await bob.client.logout() }
         _ = try await bundle(for: alice, fetchedBy: bob)
         for _ in 0..<3 {
-            let ids = try await alice.client.api.fetchOwnDeviceIds()
+            let ids = try await alice.client.devices().map(\.deviceId)
             XCTAssertEqual(Set(ids), [alice.deviceId, laptop.deviceId])
         }
         let ownRemaining = try await exhaustPreKeys(of: alice, fetchedBy: bob)
-        XCTAssertEqual(ownRemaining, 99, "metadata must not consume either device's OPKs")
+        XCTAssertEqual(ownRemaining, 99, "listing devices must not consume either device's OPKs")
         let laptopEmpty = try await bundle(for: laptop, fetchedBy: bob)
-        XCTAssertNil(laptopEmpty.oneTimePreKey, "bundle fetching consumes one OPK on every account device")
+        XCTAssertNil(laptopEmpty.oneTimePreKey, "a whole-user bundle fetch consumes one OPK on every account device")
 
         for i in 0..<3 {
             let report = try await alice.send("session-reuse-\(i)", to: [bob])
@@ -272,18 +272,6 @@ final class ServerContractTests: XCTestCase {
             XCTAssertEqual(status, 401)
         }
     }
-}
-
-private func serverRequest(_ path: String, method: String, token: String) async throws -> Data {
-    var request = URLRequest(url: try XCTUnwrap(URL(string: TestServer.apiURL)).appendingPathComponent(path))
-    request.httpMethod = method
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    let (data, response) = try await URLSession.shared.data(for: request)
-    let status = try XCTUnwrap(response as? HTTPURLResponse).statusCode
-    guard (200..<300).contains(status) else {
-        throw ObscuraError.http(status: status, body: String(decoding: data, as: UTF8.self))
-    }
-    return data
 }
 
 private extension ObscuraClient {

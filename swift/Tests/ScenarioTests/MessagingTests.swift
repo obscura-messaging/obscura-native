@@ -48,13 +48,12 @@ final class MessagingTests: XCTestCase {
 
     func testEveryDeviceOfARecipientReceives() async throws {
         let bob = try await TestUser.register()
-        let bobLaptop = try await TestUser.newDevice(of: bob)
+        let bobLaptop = try await TestUser.link(to: bob)
         let alice = try await TestUser.register()
         try await bob.client.connect()
-        try await bobLaptop.client.connect()
         try await alice.client.connect()
         try await TestUser.befriend(alice, bob)
-        try await bobLaptop.waitForFriend(alice, .pendingReceived)
+        try await bobLaptop.waitForFriend(alice, .accepted)
 
         try await alice.send("both-bobs", to: [bob])
         _ = try await bob.waitForEntry("both-bobs")
@@ -69,8 +68,8 @@ final class MessagingTests: XCTestCase {
 
     func testAnEmptyRecipientListSyncsToTheUsersOtherDevices() async throws {
         let alice = try await TestUser.register()
-        let laptop = try await TestUser.newDevice(of: alice)
-        try await laptop.client.connect()
+        let laptop = try await TestUser.link(to: alice)
+        try await alice.client.connect()
 
         let report = try await alice.send("profile_1", to: [], model: "profile")
 
