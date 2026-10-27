@@ -32,6 +32,9 @@ nonisolated struct Obscura_V1_SendMessageRequest: Sendable {
 
   var messages: [Obscura_V1_SendMessageRequest.Submission] = []
 
+  /// Users whose current devices this request intends to cover, even with no submission for them (16 bytes each).
+  var recipientUserIds: [Data] = []
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated struct Submission: Sendable {
@@ -300,7 +303,7 @@ fileprivate nonisolated let _protobuf_package = "obscura.v1"
 
 nonisolated extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SendMessageRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}messages\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}messages\0\u{3}recipient_user_ids\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -309,6 +312,7 @@ nonisolated extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, Swif
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeRepeatedMessageField(value: &self.messages) }()
+      case 2: try { try decoder.decodeRepeatedBytesField(value: &self.recipientUserIds) }()
       default: break
       }
     }
@@ -318,11 +322,15 @@ nonisolated extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, Swif
     if !self.messages.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.messages, fieldNumber: 1)
     }
+    if !self.recipientUserIds.isEmpty {
+      try visitor.visitRepeatedBytesField(value: self.recipientUserIds, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Obscura_V1_SendMessageRequest, rhs: Obscura_V1_SendMessageRequest) -> Bool {
     if lhs.messages != rhs.messages {return false}
+    if lhs.recipientUserIds != rhs.recipientUserIds {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
