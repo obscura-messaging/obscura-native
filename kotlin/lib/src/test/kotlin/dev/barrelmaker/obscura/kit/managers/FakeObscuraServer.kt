@@ -29,10 +29,10 @@ import java.util.UUID
  * An in-process stand-in for the bundle and message endpoints, with the real server's semantics.
  * An account's devices share its identity. `GET /v1/users/{id}` returns one bundle per device and
  * consumes a one-time prekey from each (404 when the user has none); `GET /v1/users/{id}/devices/{d}`
- * consumes one from that device only. `POST /v1/messages` requires complete delivery: a user's
- * submissions are queued only when they target exactly the user's current devices (the sender's
- * own device excluded), otherwise all fail with `ERROR_CODE_DEVICE_MISMATCH` and the untargeted
- * devices are listed. An unknown device or the sender itself fails with `ERROR_CODE_INVALID_DEVICE`.
+ * consumes one from that device only. `POST /v1/messages` requires complete delivery: for each
+ * user in `recipient_user_ids` or owning a target, submissions are queued only when they target
+ * exactly the user's current devices (the sender's own device excluded), otherwise all fail with
+ * `ERROR_CODE_DEVICE_MISMATCH` and the untargeted devices are listed, even with no submission. An unknown device or the sender itself fails with `ERROR_CODE_INVALID_DEVICE`.
  */
 class FakeObscuraServer : AutoCloseable {
     private val devices = Collections.synchronizedMap(linkedMapOf<String, FakeDevice>())
@@ -94,7 +94,10 @@ class FakeObscuraServer : AutoCloseable {
             val target = devices[UuidCodec.uuidString(submission.deviceId)]
             (target != null && target !== sender).also { if (!it) fail(submission, ErrorCode.ERROR_CODE_INVALID_DEVICE) }
         }
-        for ((userId, submissions) in valid.groupBy { devices.getValue(UuidCodec.uuidString(it.deviceId)!!).userId }) {
+        val byUser = valid.groupBy { devices.getValue(UuidCodec.uuidString(it.deviceId)!!).userId }
+        val checked = request.recipientUserIdsList.map { UuidCodec.uuidString(it)!! } + byUser.keys
+        for (userId in checked.distinct()) {
+            val submissions = byUser[userId].orEmpty()
             val current = devices.values.filter { it.userId == userId && it !== sender }.map { it.deviceId }.toSet()
             val targeted = submissions.map { UuidCodec.uuidString(it.deviceId)!! }.toSet()
             if (targeted != current) {

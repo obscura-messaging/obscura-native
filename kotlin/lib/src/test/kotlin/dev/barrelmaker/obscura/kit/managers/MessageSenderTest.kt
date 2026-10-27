@@ -102,18 +102,24 @@ class MessageSenderTest {
     }
 
     @Test
-    fun `when every device is invalid the user is rejected and the next send fetches it whole`() = runBlocking {
+    fun `a peer whose every device was replaced is reached in the same send`() = runBlocking {
         alice.send(bob, "first")
         server.remove(bob)
         val bobNew = server.register(bob.userId)
 
-        val result = alice.send(bob, "lost").single()
-        assertEquals(REJECTED, result.status)
-        assertEquals(bob.deviceId, result.deviceId)
-        assertEquals(emptyList<String>(), alice.directory.devicesOf(bob.userId))
-
         assertEquals(listOf(accepted(bobNew)), alice.send(bob, "found"))
         assertEquals("found", bobNew.receive().single().message.appEntry.id)
+        assertEquals(listOf(bobNew.deviceId), alice.directory.devicesOf(bob.userId))
+    }
+
+    @Test
+    fun `every request names its recipient user`() = runBlocking {
+        alice.directory.replace(alice.userId, listOf(alice.deviceId))
+        alice.send(bob, "first")
+        alice.send(alice, "note")
+
+        assertEquals(listOf(listOf(bob.userId), listOf(alice.userId)),
+            server.requests.map { (_, request) -> request.recipientUserIdsList.map { UuidCodec.uuidString(it) } })
     }
 
     @Test
@@ -131,12 +137,22 @@ class MessageSenderTest {
     }
 
     @Test
-    fun `self sync never targets this device and a lone device sends nothing`() = runBlocking {
+    fun `self sync on a lone device sends one request with no submission and fetches nothing`() = runBlocking {
         alice.directory.replace(alice.userId, listOf(alice.deviceId))
 
         assertEquals(emptyList<SubmissionResult>(), alice.send(alice, "note"))
         assertEquals(0, server.prekeysConsumed(alice.userId))
-        assertEquals(0, server.requests.size)
+        assertEquals(0, server.requests.single().second.messagesCount)
+    }
+
+    @Test
+    fun `a device linked after this one is reached on the next self sync without any device listing`() = runBlocking {
+        alice.directory.replace(alice.userId, listOf(alice.deviceId))
+        val alicePhone = server.register(alice.userId)
+
+        assertEquals(listOf(accepted(alicePhone)), alice.send(alice, "note"))
+        assertEquals("note", alicePhone.receive().single().message.appEntry.id)
+        assertEquals(setOf(alice.deviceId, alicePhone.deviceId), alice.directory.devicesOf(alice.userId).toSet())
     }
 
     @Test
@@ -224,7 +240,6 @@ class MessageSenderTest {
         server.reset(bob.userId)
         val bobNew = server.register(bob.userId)
 
-        assertEquals(REJECTED, alice.send(bob, "to-deleted").single().status)
         assertEquals(listOf(accepted(bobNew)), alice.send(bob, "after"))
 
         assertEquals("after", bobNew.receive().single().message.appEntry.id)

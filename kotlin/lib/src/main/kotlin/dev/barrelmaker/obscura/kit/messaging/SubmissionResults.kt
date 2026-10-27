@@ -12,8 +12,8 @@ import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse.ErrorCod
 internal data class Submitted(val result: SubmissionResult, val errorCode: ErrorCode? = null)
 
 /**
- * One request to one user's devices. [missingDeviceIds] is non-null when the server refused the
- * request for not covering the user's current devices; none of its submissions were then queued.
+ * One request covering one user. [missingDeviceIds] is non-null when the server refused the request
+ * for not covering the user's current devices; none of its submissions were then queued.
  */
 internal data class SubmitOutcome(val submitted: List<Submitted>, val missingDeviceIds: List<String>? = null)
 
@@ -28,8 +28,9 @@ internal fun decodeSubmissionResults(
         failures.map { it.submissionId }.toSet().size != failures.size
     ) throw ObscuraError.ProtocolViolation("Response contains unknown or duplicate submission IDs")
     val mismatches = response.deviceMismatchesList
+    // A mismatch with no failed submission is how the server names devices of a user the request targeted none of.
     val mismatched = failures.any { it.errorCode == ErrorCode.ERROR_CODE_DEVICE_MISMATCH }
-    if (mismatches.size > 1 || mismatches.any { UuidCodec.uuidString(it.userId) != userId } || mismatches.isNotEmpty() != mismatched
+    if (mismatches.size > 1 || mismatches.any { UuidCodec.uuidString(it.userId) != userId } || (mismatched && mismatches.isEmpty())
     ) throw ObscuraError.ProtocolViolation("Response contains an inconsistent device mismatch")
     val missing = mismatches.singleOrNull()?.missingDeviceIdsList?.map {
         UuidCodec.uuidString(it) ?: throw ObscuraError.ProtocolViolation("Response contains an invalid device ID")

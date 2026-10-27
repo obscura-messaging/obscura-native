@@ -38,6 +38,10 @@ class FriendHandshakeTest {
                         if (request.url.encodedPath != "/v1/messages") {
                             return MockResponse.Builder().body(JSONArray().put(remote.consumeBundle()).toString()).build()
                         }
+                        // The self sync after the acceptance covers only this account and has no submission.
+                        if (SendMessageRequest.parseFrom(request.body!!.toByteArray()).messagesCount == 0) {
+                            return MockResponse.Builder().body("").build()
+                        }
                         runBlocking {
                             stateBeforeAcceptance.set(client.getFriends().singleOrNull()?.status)
                             val sent = SendMessageRequest.parseFrom(request.body!!.toByteArray()).messagesList.single()

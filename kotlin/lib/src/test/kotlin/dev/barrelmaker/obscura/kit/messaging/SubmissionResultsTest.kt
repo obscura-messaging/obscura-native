@@ -62,12 +62,19 @@ class SubmissionResultsTest {
     }
 
     @Test
+    fun `a mismatch without a failed submission names devices of a user with no target`() {
+        val missing = UUID.randomUUID()
+        val decoded = decodeSubmissionResults(userId, emptyList(), mismatch(submission(), userId, missing).clearFailedSubmissions().build())
+        assertEquals(listOf(missing.toString()), decoded.missingDeviceIds)
+        assertTrue(decoded.submitted.isEmpty())
+    }
+
+    @Test
     fun `an inconsistent or foreign device mismatch is a protocol violation`() {
         val a = submission()
         for (response in listOf(
             mismatch(a, user = "019f025a-0000-7de6-84b6-000000000003").build(),
             mismatch(a).clearDeviceMismatches().build(),
-            mismatch(a).clearFailedSubmissions().build(),
             mismatch(a).addDeviceMismatches(mismatch(a).build().getDeviceMismatches(0)).build(),
         )) assertThrows(dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation::class.java) {
             decodeSubmissionResults(userId, listOf(a), response)
@@ -109,12 +116,12 @@ class SubmissionResultsTest {
                 401 to SubmissionStatus.UNKNOWN, 403 to SubmissionStatus.UNKNOWN,
             )) {
                 status = code
-                val result = messenger.submit("user", listOf(submission())).submitted.single().result
+                val result = messenger.submit(userId, listOf(submission())).submitted.single().result
                 assertEquals(expected, result.status, "HTTP $code")
                 assertTrue(result.error!!.contains(code.toString()))
             }
         } finally { server.stop(0) }
-        assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("user", listOf(submission())).submitted.single().result.status)
+        assertEquals(SubmissionStatus.UNKNOWN, messenger.submit(userId, listOf(submission())).submitted.single().result.status)
     }
 
     @Test
@@ -136,14 +143,14 @@ class SubmissionResultsTest {
         try {
             val messenger = Messenger(SignalStore(newInMemoryDatabase()),
                 APIClient("http://127.0.0.1:${server.address.port}") { "unit-test" })
-            assertEquals(SubmissionStatus.REJECTED, messenger.submit("user", listOf(a)).submitted.single().result.status)
+            assertEquals(SubmissionStatus.REJECTED, messenger.submit(userId, listOf(a)).submitted.single().result.status)
             val b = submission()
             response = byteArrayOf()
-            assertEquals(SubmissionStatus.ACCEPTED, messenger.submit("other", listOf(b)).submitted.single().result.status)
+            assertEquals(SubmissionStatus.ACCEPTED, messenger.submit(userId, listOf(b)).submitted.single().result.status)
             assertEquals(listOf(listOf(a), listOf(b)), received.map { it.messagesList })
             status = 503
             response = "unavailable".toByteArray()
-            assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("other", listOf(b)).submitted.single().result.status)
+            assertEquals(SubmissionStatus.UNKNOWN, messenger.submit(userId, listOf(b)).submitted.single().result.status)
         } finally {
             server.stop(0)
         }

@@ -57,21 +57,25 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
                 .build()
         }
 
-    /** Preprocessing rejections are definitive; transport failures leave every result unknown. */
-    suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): SubmitOutcome {
-        if (submissions.isEmpty()) return SubmitOutcome(emptyList())
-        return try {
-            val request = SendMessageRequest.newBuilder().addAllMessages(submissions).build()
-            decodeSubmissionResults(userId, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val definitive = e is ObscuraError.Http && e.status in setOf(400, 413)
-            SubmitOutcome(submissions.map {
-                val failure = unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName)
-                if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure
-            })
-        }
+    /**
+     * One request covering [userId]: the server checks the user's whole device set even when
+     * [submissions] is empty. Preprocessing rejections are definitive; transport failures leave
+     * every result unknown.
+     */
+    suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): SubmitOutcome = try {
+        val request = SendMessageRequest.newBuilder()
+            .addAllMessages(submissions)
+            .addRecipientUserIds(UuidCodec.uuidToBytes(UUID.fromString(userId)))
+            .build()
+        decodeSubmissionResults(userId, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        val definitive = e is ObscuraError.Http && e.status in setOf(400, 413)
+        SubmitOutcome(submissions.map {
+            val failure = unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName)
+            if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure
+        })
     }
 
     /**

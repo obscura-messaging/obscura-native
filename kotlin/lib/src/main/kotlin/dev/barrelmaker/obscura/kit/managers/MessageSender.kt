@@ -19,10 +19,11 @@ import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse.ErrorCod
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The one path every outgoing message takes to a user's devices. The server queues a message for
- * a user only when the request covers all of the user's current devices, so its response, not
+ * The one path every outgoing message takes to a user's devices. Each request names the user, and
+ * the server queues it only when it covers all of the user's current devices, so its response, not
  * discovery, decides the targets: they start as the user's devices in [DeviceStore] (this device
- * excluded), a mismatch adds the devices the server names, and an invalid device is removed.
+ * excluded), a mismatch adds the devices the server names, and an invalid device is removed. A
+ * request with no target is still sent: it is how this device learns of the account's new devices.
  *
  * Fetching a bundle consumes a one-time prekey, so bundles are fetched only for a target without a
  * session, one device at a time; a user absent from the directory is fetched whole. A bundle is
@@ -54,9 +55,7 @@ internal class MessageSender(
             }
             val targets = catching { sessionTargets(userId) }.getOrElse { return@withLock listOf(rejected(userId, it)) }
                 ?: return@repeat
-            if (targets.isEmpty()) {
-                return@withLock if (devices.devicesOf(userId).isEmpty()) listOf(rejected(userId, "No devices found")) else emptyList()
-            }
+            if (devices.devicesOf(userId).isEmpty()) return@withLock listOf(rejected(userId, "No devices found"))
             val submissions = catching { targets.map { messenger.prepareSubmission(it, message) } }
                 .getOrElse { return@withLock listOf(rejected(userId, it)) }
             val outcome = messenger.submit(userId, submissions)
@@ -65,12 +64,10 @@ internal class MessageSender(
             devices.add(userId, missing)
             mismatched = outcome
         }
-        mismatched?.let { outcome ->
-            outcome.submitted.map {
-                if (it.errorCode != ErrorCode.ERROR_CODE_DEVICE_MISMATCH) it.result
-                else it.result.copy(error = "Device mismatch after $MAX_ROUNDS rounds; missing ${outcome.missingDeviceIds}")
-            }
-        } ?: listOf(rejected(userId, "Sessions could not be established"))
+        val outcome = mismatched ?: return@withLock listOf(rejected(userId, "Sessions could not be established"))
+        val error = "Device mismatch after $MAX_ROUNDS rounds; missing ${outcome.missingDeviceIds}"
+        outcome.submitted.map { if (it.errorCode == ErrorCode.ERROR_CODE_DEVICE_MISMATCH) it.result.copy(error = error) else it.result }
+            .ifEmpty { listOf(rejected(userId, error)) }
     }
 
     /** [send], failing when no device accepted. For control messages that must reach the user. */
