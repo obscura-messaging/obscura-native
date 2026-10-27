@@ -298,7 +298,10 @@ class ObscuraClient(
                 wipeDevice()
             }
             !primary -> throw ObscuraError.NotPrimary()
-            else -> api.deleteDevice(deviceId)
+            else -> {
+                api.deleteDevice(deviceId)
+                devices.remove(self.userId, listOf(deviceId))
+            }
         }
     }
 

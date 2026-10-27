@@ -70,19 +70,24 @@ class OwnDevicesTest {
         Unit
     }
 
-    @Test fun `a send makes no device-list request and self sync with no other device sends nothing`() = runBlocking {
+    @Test fun `a send makes no device-list request and self sync names this account with no submission`() = runBlocking {
         FakeObscuraServer().use { peers ->
             val peer = peers.register("019f025a-0000-7de6-84b6-000000000002")
             val c = sessionClient(url, storedSession())
             assertTrue(c.auth.restore())
             server.enqueue(MockResponse.Builder().body("[${peer.consumeBundle()}]").build())
             server.enqueue(MockResponse.Builder().body("").build())
+            server.enqueue(MockResponse.Builder().body("").build())
 
             val report = c.send(listOf(peer.userId), "m", "e", 1, byteArrayOf(1), emptySet())
 
             assertEquals(SubmissionStatus.ACCEPTED, report.recipients.single().status)
             assertEquals(emptyList<SubmissionResult>(), report.selfSync)
-            assertEquals(listOf("/v1/users/${peer.userId}", "/v1/messages"), paths())
+            val requests = List(server.requestCount) { server.takeRequest() }
+            assertEquals(listOf("/v1/users/${peer.userId}", "/v1/messages", "/v1/messages"), requests.map { it.url.encodedPath })
+            val selfSync = xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest.parseFrom(requests[2].body!!.toByteArray())
+            assertEquals(0, selfSync.messagesCount)
+            assertEquals(listOf(SELF_USER_ID), selfSync.recipientUserIdsList.map { dev.barrelmaker.obscura.kit.crypto.UuidCodec.uuidString(it) })
             c.auth.end()
             Unit
         }
@@ -112,9 +117,10 @@ class OwnDevicesTest {
         Unit
     }
 
-    @Test fun `the primary unlinks another device`() = runBlocking {
+    @Test fun `the primary unlinks another device and forgets it at once`() = runBlocking {
         val c = sessionClient(url, storedSession())
         assertTrue(c.auth.restore())
+        c.devices.add(SELF_USER_ID, listOf(other))
         server.enqueue(MockResponse.Builder().build())
 
         c.unlinkDevice(other)
@@ -122,6 +128,7 @@ class OwnDevicesTest {
         val request = server.takeRequest()
         assertEquals("DELETE", request.method)
         assertEquals("/v1/devices/$other", request.url.encodedPath)
+        assertEquals(listOf(SELF_DEVICE_ID), c.devices.devicesOf(SELF_USER_ID))
         assertEquals(AuthState.AUTHENTICATED, c.authState.value)
         c.auth.end()
         Unit

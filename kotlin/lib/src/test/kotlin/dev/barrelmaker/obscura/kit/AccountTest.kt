@@ -70,8 +70,8 @@ class AccountTest {
                         account.attachments[id] = request.body!!.toByteArray()
                         json(JSONObject().put("id", id))
                     }
-                    path.startsWith("/v1/attachments/") ->
-                        MockResponse.Builder().body(okio.Buffer().write(account.attachments.getValue(path.removePrefix("/v1/attachments/")))).build()
+                    path.startsWith("/v1/attachments/") -> account.attachments[path.removePrefix("/v1/attachments/")]
+                        ?.let { MockResponse.Builder().body(okio.Buffer().write(it)).build() } ?: MockResponse.Builder().code(404).build()
                     path == "/v1/gateway/ticket" -> json(JSONObject().put("ticket", "t"))
                     path == "/v1/gateway" -> MockResponse.Builder().webSocketUpgrade(object : WebSocketListener() {
                         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(1000, null) }
@@ -189,6 +189,41 @@ class AccountTest {
         primary.auth.end()
         tablet.auth.end()
         Unit
+    }
+
+    @Test fun `a history that cannot be imported throws but leaves the device linked and authenticated`() = runBlocking {
+        val primary = sessionClient(url, storedSession())
+        assertTrue(primary.auth.restore())
+        primary.entries.put("chat", StoredEntry("e1", "{}", 1, SELF_DEVICE_ID))
+        val storage = MemoryStorage()
+        val tablet = newClient(url, storage)
+        val request = tablet.beginLink("self", "password", "Tablet")
+        primary.approveLink(request.code)
+        account.attachments.clear()
+
+        val error = runCatching { tablet.completeLink(request) }.exceptionOrNull()
+
+        assertTrue(error is ObscuraError.Http && error.status == 404, "got $error")
+        assertEquals(AuthState.AUTHENTICATED, tablet.authState.value)
+        assertEquals(newDeviceId, storage.data!!["deviceId"])
+        assertArrayEquals(primary.signalStore.identityKeyPair.serialize(), tablet.signalStore.identityKeyPair.serialize())
+        assertTrue(tablet.entries.all("chat").isEmpty())
+        primary.auth.end()
+        tablet.auth.end()
+        Unit
+    }
+
+    @Test fun `a bundle that decrypts but names another account is a protocol violation and stores nothing`() = runBlocking {
+        val tablet = newClient(url, MemoryStorage())
+        val request = tablet.beginLink("self", "password", "Tablet")
+        val bundle = obscura.client.v1.Client.LinkBundle.newBuilder()
+            .setIdentityKeyPair(com.google.protobuf.ByteString.copyFrom(org.signal.libsignal.protocol.IdentityKeyPair.generate().serialize()))
+            .setUserId("019f025a-0000-7de6-84b6-000000000777").setUsername("self").build()
+        account.linkBody = LinkCrypto.seal(bundle.toByteArray(), Curve.decodePoint(LinkCrypto.decodeCode(request.code).ephemeralPublicKey.toByteArray(), 0)).toByteArray()
+
+        assertTrue(runCatching { tablet.completeLink(request) }.exceptionOrNull() is ObscuraError.ProtocolViolation)
+        assertFalse(tablet.signalStore.hasIdentity())
+        assertTrue(requestsTo("/v1/devices").isEmpty())
     }
 
     @Test fun `an empty entry store links without a history snapshot`() = runBlocking {
