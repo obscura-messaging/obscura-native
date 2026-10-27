@@ -198,13 +198,34 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(listed, [])
     }
 
-    func testWhenEveryDeviceHasAcceptedEvidenceNothingIsSentOrFetched() async throws {
+    func testWhenEveryDeviceHasAcceptedEvidenceOnlyAnEmptyRequestAsksForNewDevices() async throws {
         try await alice.directory.add(userId: bob.userId, deviceIds: [bob.deviceId])
 
         let results = await send(alice, to: bob, "retry", accepted: [bob.deviceId])
+
         XCTAssertEqual(results, [accepted(bob)])
         XCTAssertEqual(server.bundleFetches(bob.userId), 0)
-        XCTAssertEqual(server.messageRequests(), 0)
+        XCTAssertEqual(server.deviceBundleFetches(bob.deviceId), 0)
+        XCTAssertEqual(server.messageRequests(), 1)
+        let resent = try await bob.receive().count
+        XCTAssertEqual(resent, 0, "evidence devices are not sent again")
+    }
+
+    func testADeviceAddedSinceTheEvidenceIsReachedTogetherWithTheEvidenceDevices() async throws {
+        _ = await send(alice, to: bob, "first")
+        _ = try await bob.receive()
+        let tablet = try await server.register(bob.userId)
+
+        let results = await send(alice, to: bob, "first", accepted: [bob.deviceId])
+
+        XCTAssertEqual(byDevice(results), byDevice([accepted(bob), accepted(tablet)]))
+        let tabletGot = try await tablet.receive()
+        XCTAssertEqual(ids(tabletGot), ["first"])
+        let bobGot = try await bob.receive()
+        XCTAssertEqual(ids(bobGot), ["first"], "completeness requires the evidence device with the new one")
+        XCTAssertEqual(server.deviceBundleFetches(tablet.deviceId), 1)
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(Set(listed), [bob.deviceId, tablet.deviceId])
     }
 
     func testAcceptedEvidenceIsResentWithADeviceThatNeedsTheMessageAndStillReportedAccepted() async throws {

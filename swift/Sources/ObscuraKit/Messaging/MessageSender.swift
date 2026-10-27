@@ -28,8 +28,10 @@ actor MessageSender {
     }
 
     /// Encrypts serialized `ClientMessage` bytes to `userId`'s devices and reports each one. Devices
-    /// in `acceptedDeviceIds` are reported accepted; they are sent again only when another device of
-    /// the user needs the message, because the server takes a user's devices all or none.
+    /// in `acceptedDeviceIds` are reported accepted. When every known device has that evidence, a request
+    /// without submissions asks the server for devices added since; the evidence devices are sent again
+    /// only with such a device, or with any device lacking evidence, because the server takes a user's
+    /// devices all or none.
     func send(to userId: String, _ clientMessage: Data, acceptedDeviceIds: Set<String>) async -> [SubmissionResult] {
         let previous = tails[userId]
         let task = Task {
@@ -85,6 +87,12 @@ actor MessageSender {
         let isSelf = listed.contains(selfDeviceId)
         let targets = listed.filter { $0 != selfDeviceId }
         if !targets.isEmpty, targets.allSatisfy(accepted.contains) {
+            // Only a device added since the evidence needs the message; then completeness needs all of them.
+            let missing = await messenger.submit(userId: userId, submissions: []).missingDeviceIds
+            guard missing.allSatisfy(accepted.contains) else {
+                try await devices.add(userId: userId, deviceIds: missing)
+                return Round(results: [], settled: false)
+            }
             return Round(results: targets.map { SubmissionResult(userId: userId, deviceId: $0, status: .accepted) },
                          settled: true)
         }
