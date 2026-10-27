@@ -13,10 +13,26 @@ actor DeviceStore {
         try await db.read { db in try String.fetchOne(db, sql: "SELECT device_id FROM device_identity WHERE id = 1") }
     }
 
-    func setLocalDeviceId(_ deviceId: String) async throws {
-        try await db.write { db in
-            try db.execute(sql: "INSERT OR REPLACE INTO device_identity (id, device_id) VALUES (1, ?)", arguments: [deviceId])
-        }
+    /// The account's primary device as last confirmed by the server; nil before provisioning.
+    func primaryDeviceId() async throws -> String? {
+        try await db.read { db in try Self.primaryDeviceId(in: db) }
+    }
+
+    static func primaryDeviceId(in db: Database) throws -> String? {
+        try String.fetchOne(db, sql: "SELECT primary_device_id FROM device_identity WHERE id = 1")
+    }
+
+    func isPrimary() async throws -> Bool {
+        try await db.read { db in try Self.isPrimary(in: db) }
+    }
+
+    static func isPrimary(in db: Database) throws -> Bool {
+        try Bool.fetchOne(db, sql: "SELECT device_id = primary_device_id FROM device_identity WHERE id = 1") ?? false
+    }
+
+    static func setLocalDevice(_ deviceId: String, primaryDeviceId: String, in db: Database) throws {
+        try db.execute(sql: "INSERT OR REPLACE INTO device_identity (id, device_id, primary_device_id) VALUES (1, ?, ?)",
+                       arguments: [deviceId, primaryDeviceId])
     }
 
     func deviceIds(of userId: String) async throws -> [String] {
@@ -25,9 +41,9 @@ actor DeviceStore {
         }
     }
 
-    func add(userId: String, deviceId: String) async throws {
+    func add(userId: String, deviceIds: [String]) async throws {
         try await db.write { db in
-            try Self.add(userId: userId, deviceId: deviceId, in: db)
+            for deviceId in deviceIds { try Self.add(userId: userId, deviceId: deviceId, in: db) }
         }
     }
 
@@ -35,12 +51,18 @@ actor DeviceStore {
         try db.execute(sql: "INSERT OR IGNORE INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
     }
 
-    func replace(userId: String, deviceIds: [String]) async throws {
+    func remove(userId: String, deviceIds: [String]) async throws {
         try await db.write { db in
-            try db.execute(sql: "DELETE FROM devices WHERE user_id = ?", arguments: [userId])
-            for deviceId in Set(deviceIds) {
-                try db.execute(sql: "INSERT INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
+            for deviceId in deviceIds {
+                try db.execute(sql: "DELETE FROM devices WHERE user_id = ? AND device_id = ?", arguments: [userId, deviceId])
             }
+        }
+    }
+
+    func setPrimaryDeviceId(_ primaryDeviceId: String) async throws {
+        try await db.write { db in
+            try db.execute(sql: "UPDATE device_identity SET primary_device_id = ? WHERE id = 1", arguments: [primaryDeviceId])
+            guard db.changesCount == 1 else { throw DatabaseError(message: "no local device to update") }
         }
     }
 }

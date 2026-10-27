@@ -1,0 +1,192 @@
+import Foundation
+import LibSignalClient
+
+/// A link in progress on the new device. The app shows `code` as a QR code for the primary to scan.
+/// The ephemeral private key and the short-lived account token live only in this value.
+public struct LinkRequest: Sendable {
+    public let code: String
+    let sessionId: String
+    let expiresAt: Int64
+    let username: String
+    let userId: String
+    let deviceName: String
+    let userToken: String
+    let privateKey: Data
+}
+
+public struct DeviceInfo: Sendable, Equatable {
+    public let deviceId: String
+    public let name: String?
+    public let isPrimary: Bool
+    public let isThisDevice: Bool
+}
+
+/// What a decrypted `LinkBundle` gives the new device.
+struct LinkContents {
+    let identity: IdentityKeyPair
+    let friends: [(userId: String, username: String, status: FriendStatus)]
+    let friendListVersion: UInt64
+    let history: Obscura_Client_V1_HistorySnapshot?
+}
+
+extension ObscuraClient {
+    static let linkWaitSeconds = 25
+
+    // MARK: - Linking, new device
+
+    /// For `.linkRequired`: opens a link session for this device to show to the primary.
+    public func beginLink(_ username: String, _ password: String, deviceName: String) async throws -> LinkRequest {
+        try await requireUnprovisionedDevice()
+        let account = try await api.login(username, password, deviceId: nil)
+        guard let userId = APIClient.userId(account.token) else {
+            throw ObscuraError.protocolViolation("account token lacks a user id")
+        }
+        let session = try await api.createLinkSession(bearer: account.token)
+        let privateKey = PrivateKey.generate()
+        var code = Obscura_Client_V1_LinkCode()
+        code.sessionID = session.id
+        code.ephemeralPublicKey = Data(privateKey.publicKey.serialize())
+        code.deviceName = deviceName
+        return LinkRequest(code: try LinkCrypto.encode(code), sessionId: session.id, expiresAt: session.expiresAt,
+                           username: username, userId: userId, deviceName: deviceName, userToken: account.token,
+                           privateKey: Data(privateKey.serialize()))
+    }
+
+    /// Waits for the primary's approval, then provisions this device with the account identity, its
+    /// friend list and its history, and connects. Nothing is stored unless the server accepts the device.
+    public func completeLink(_ request: LinkRequest) async throws {
+        try await requireUnprovisionedDevice()
+        let contents = try Self.open(try await awaitApproval(request), privateKey: request.privateKey, userId: request.userId)
+        let keys = try SignalKeys.generate(identity: contents.identity)
+        guard let primary = try await api.listDevices(bearer: request.userToken).first(where: \.isPrimary) else {
+            throw ObscuraError.linkFailed("the account has no primary device")
+        }
+        let response = try await api.createDevice(keys.deviceRequest(name: request.deviceName, linkSessionId: request.sessionId),
+                                                  bearer: request.userToken)
+        let session = try session(response, username: request.username)
+        try await db.write { db in
+            try PersistentSignalStore.install(keys, in: db)
+            try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: primary.deviceId, in: db)
+            try DeviceStore.add(userId: session.userId, deviceId: session.deviceId, in: db)
+            try FriendStore.replace(contents.friends, version: contents.friendListVersion, in: db)
+        }
+        try begin(session)
+        if let history = contents.history {
+            let snapshot = try await downloadDecryptedAttachment(id: history.attachmentID, contentKey: history.contentKey,
+                                                                 nonce: history.nonce)
+            try await entries.importSnapshot(Obscura_Client_V1_EntrySnapshot(serializedBytes: snapshot))
+        }
+        try await connect()
+    }
+
+    private func awaitApproval(_ request: LinkRequest) async throws -> Data {
+        while true {
+            try Task.checkCancellation()
+            do {
+                if let body = try await api.awaitLinkSession(request.sessionId, wait: Self.linkWaitSeconds,
+                                                             bearer: request.userToken) {
+                    return body
+                }
+            } catch ObscuraError.http(status: 404, body: _) {
+                throw ObscuraError.linkFailed("link session expired or unknown")
+            }
+            guard Date().timeIntervalSince1970 < TimeInterval(request.expiresAt) else {
+                throw ObscuraError.linkFailed("link session expired")
+            }
+        }
+    }
+
+    /// Decrypts and checks the primary's `LinkEnvelope`: `LINK_FAILED` if it does not decrypt,
+    /// `PROTOCOL_VIOLATION` if what decrypts is malformed or names another account.
+    static func open(_ body: Data, privateKey: Data, userId: String) throws -> LinkContents {
+        let envelope: Obscura_Client_V1_LinkEnvelope
+        do {
+            envelope = try Obscura_Client_V1_LinkEnvelope(serializedBytes: body)
+        } catch {
+            throw ObscuraError.linkFailed("envelope does not parse: \(error)")
+        }
+        let plaintext = try LinkCrypto.open(envelope, with: try PrivateKey(privateKey))
+        do {
+            let bundle = try Obscura_Client_V1_LinkBundle(serializedBytes: plaintext)
+            guard bundle.userID == userId else { throw ObscuraError.protocolViolation("link bundle is for user \(bundle.userID)") }
+            return LinkContents(identity: try IdentityKeyPair(bytes: bundle.identityKeyPair),
+                                friends: try WireCodec.friends(bundle.friends),
+                                friendListVersion: bundle.friendListVersion,
+                                history: bundle.hasHistory ? bundle.history : nil)
+        } catch let error as ObscuraError {
+            throw error
+        } catch {
+            throw ObscuraError.protocolViolation("malformed link bundle: \(error)")
+        }
+    }
+
+    // MARK: - Linking, primary
+
+    /// Primary only. Sends the account identity, friend list and history to the device showing `code`.
+    public func approveLink(_ code: String) async throws {
+        let session = try await requireFreshSession()
+        try await requirePrimary()
+        let linkCode = try LinkCrypto.decode(code)
+        var bundle = Obscura_Client_V1_LinkBundle()
+        bundle.identityKeyPair = Data(try signalStore.identityKeyPair(context: NullContext()).serialize())
+        bundle.userID = session.userId
+        bundle.username = session.username
+        let friendList = try await friends.listSync()
+        bundle.friendListVersion = friendList.version
+        bundle.friends = friendList.friends
+        let snapshot = try await entries.snapshot()
+        if !snapshot.entries.isEmpty {
+            let uploaded = try await uploadAttachment(snapshot.serializedData())
+            bundle.history.attachmentID = uploaded.id
+            bundle.history.contentKey = uploaded.contentKey
+            bundle.history.nonce = uploaded.nonce
+        }
+        let envelope = try LinkCrypto.seal(bundle.serializedData(), to: PublicKey(linkCode.ephemeralPublicKey))
+        do {
+            try await api.approveLinkSession(linkCode.sessionID, envelope: envelope.serializedData())
+        } catch ObscuraError.http(status: 404, body: _) {
+            throw ObscuraError.linkFailed("link session expired or unknown")
+        }
+    }
+
+    // MARK: - Own devices
+
+    public func devices() async throws -> [DeviceInfo] {
+        let session = try await requireFreshSession()
+        return try await listOwnDevices().map {
+            DeviceInfo(deviceId: $0.deviceId, name: $0.name, isPrimary: $0.isPrimary, isThisDevice: $0.deviceId == session.deviceId)
+        }
+    }
+
+    /// On the primary, deletes another device. On a linked device, deletes only this device, then wipes
+    /// local data and signs out. The primary cannot be unlinked; reset the account instead.
+    public func unlinkDevice(_ deviceId: String) async throws {
+        let session = try await requireFreshSession()
+        if try await directory.isPrimary() {
+            guard deviceId != session.deviceId else {
+                throw ObscuraError.invalidArgument("the primary device cannot be unlinked; reset the account instead")
+            }
+            try await api.deleteDevice(deviceId)
+            try await directory.remove(userId: session.userId, deviceIds: [deviceId])
+        } else {
+            guard deviceId == session.deviceId else { throw ObscuraError.notPrimary }
+            try await api.deleteDevice(deviceId)
+            try await signOut(revoking: false)
+            try await ObscuraDatabase.wipe(db)
+        }
+    }
+
+    /// The account's devices from the server, confirming which one is the primary.
+    @discardableResult
+    func listOwnDevices() async throws -> [DeviceResponse] {
+        _ = try requireSession()
+        let generation = sessionGeneration
+        let list = try await api.listDevices()
+        guard generation == sessionGeneration else { throw CancellationError() }
+        guard let primary = list.first(where: \.isPrimary) else {
+            throw ObscuraError.protocolViolation("the account has no primary device")
+        }
+        try await directory.setPrimaryDeviceId(primary.deviceId)
+        return list
+    }
+}

@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import ObscuraKit
 
-/// The send path against real Signal peers on an in-process server. Every bundle fetch consumes a
-/// one-time prekey on each of the user's devices, so the fetch counts here are the prekey cost.
+/// The send path against real Signal peers on an in-process server with complete delivery. Every
+/// bundle fetch consumes a one-time prekey, so the fetch counts here are the prekey cost.
 final class MessageSenderTests: XCTestCase {
     private var server: FakeObscuraServer!
     private var alice: FakeDevice!
@@ -22,10 +22,10 @@ final class MessageSenderTests: XCTestCase {
     private func user() -> String { UUID().uuidString.lowercased() }
 
     private func entry(_ id: String) -> Data {
-        var message = Obscura_Client_V1_ClientMessage()
-        message.appEntry.model = "m"
-        message.appEntry.id = id
-        return try! message.serializedData()
+        try! clientMessage {
+            $0.appEntry.model = "m"
+            $0.appEntry.id = id
+        }.serializedData()
     }
 
     private func send(_ from: FakeDevice, to: FakeDevice, _ id: String, accepted: Set<String> = []) async -> [SubmissionResult] {
@@ -38,7 +38,11 @@ final class MessageSenderTests: XCTestCase {
 
     private func ids(_ received: [Received]) -> [String] { received.map(\.message.appEntry.id) }
 
-    func testRepeatedSendsFetchBundlesOnceAndReuseTheSession() async throws {
+    private func byDevice(_ results: [SubmissionResult]) -> [SubmissionResult] {
+        results.sorted { ($0.deviceId ?? "") < ($1.deviceId ?? "") }
+    }
+
+    func testFirstContactFetchesTheUserOnceAndLaterSendsReuseTheSession() async throws {
         for i in 0..<3 {
             let results = await send(alice, to: bob, "e\(i)")
             XCTAssertEqual(results, [accepted(bob)])
@@ -52,14 +56,14 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(bob.remainingPreKeys, 99)
     }
 
-    func testARefreshNeverRebuildsAnEstablishedSession() async throws {
+    func testAReplyUsesTheSessionTheIncomingMessageBuiltAndFetchesNothing() async throws {
         _ = await send(alice, to: bob, "hello")
         _ = try await bob.receive()
 
-        // Bob has Alice's session from her prekey message but has never listed her devices.
         let reply = await send(bob, to: alice, "reply")
         XCTAssertEqual(reply, [accepted(alice)])
-        XCTAssertEqual(server.bundleFetches(alice.userId), 1)
+        XCTAssertEqual(server.bundleFetches(alice.userId), 0)
+        XCTAssertEqual(server.deviceBundleFetches(alice.deviceId), 0)
         let aliceGot = try await alice.receive().map(\.type)
         XCTAssertEqual(aliceGot, [.encryptedMessage])
 
@@ -69,58 +73,93 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(server.bundleFetches(bob.userId), 1)
     }
 
-    func testANewlyListedDeviceWithoutASessionCostsOneFetchAndKeepsExistingSessions() async throws {
+    func testADeviceMismatchAddsTheMissingDeviceFetchesOnlyItsBundleAndRetriesWithAFreshKey() async throws {
         _ = await send(alice, to: bob, "first")
         let firstKey = try await bob.receive().first?.baseKey
         let bobTablet = try await server.register(bob.userId)
-        try await alice.directory.replace(userId: bob.userId, deviceIds: [bob.deviceId, bobTablet.deviceId])
+        let requestsBefore = server.messageRequests()
 
         let results = await send(alice, to: bob, "second")
+
         XCTAssertEqual(Set(results.map(\.deviceId)), [bob.deviceId, bobTablet.deviceId])
         XCTAssertTrue(results.allSatisfy { $0.status == .accepted })
-
         let secondKey = try await bob.receive().first?.baseKey
-        XCTAssertEqual(secondKey, firstKey)
-        let tabletGot = try await bobTablet.receive().map(\.type)
-        XCTAssertEqual(tabletGot, [.prekeyMessage])
-        XCTAssertEqual(server.bundleFetches(bob.userId), 2)
+        XCTAssertEqual(secondKey, firstKey, "the existing session is kept")
+        let tabletGot = try await bobTablet.receive()
+        XCTAssertEqual(ids(tabletGot), ["second"])
+        XCTAssertEqual(tabletGot.map(\.type), [.prekeyMessage])
+        XCTAssertEqual(server.bundleFetches(bob.userId), 1)
+        XCTAssertEqual(server.deviceBundleFetches(bobTablet.deviceId), 1)
+        XCTAssertEqual(bob.remainingPreKeys, 99, "the mismatch costs only the new device a prekey")
+        XCTAssertEqual(server.messageRequests() - requestsBefore, 2)
+        XCTAssertEqual(Set(server.idempotencyKeys).count, server.idempotencyKeys.count, "every submission has a new key")
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(Set(listed), [bob.deviceId, bobTablet.deviceId])
     }
 
-    func testADeviceTheServerNoLongerHasIsDroppedAndItsReplacementReachedInTheSameSend() async throws {
+    func testADeviceTheServerNoLongerHasIsDroppedFromTheDirectoryAndTheReport() async throws {
+        let bobTablet = try await server.register(bob.userId)
         _ = await send(alice, to: bob, "first")
-        server.remove(bob)
-        let bobNew = try await server.register(bob.userId)
+        server.remove(bobTablet)
 
         let second = await send(alice, to: bob, "second")
-        XCTAssertEqual(second, [accepted(bobNew)])
-        let newDeviceGot = ids(try await bobNew.receive())
-        XCTAssertEqual(newDeviceGot, ["second"])
-        let listed = try await alice.directory.deviceIds(of: bob.userId)
-        XCTAssertEqual(listed, [bobNew.deviceId])
 
-        _ = await send(alice, to: bob, "third")
-        XCTAssertEqual(server.bundleFetches(bob.userId), 2)
+        XCTAssertEqual(second, [accepted(bob)])
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(listed, [bob.deviceId])
+        XCTAssertEqual(server.bundleFetches(bob.userId), 1)
     }
 
-    func testSelfSyncNeverTargetsThisDeviceAndASingleDeviceFetchesNothing() async throws {
-        try await alice.directory.add(userId: alice.userId, deviceId: alice.deviceId)
+    func testMismatchesStopAfterThreeRoundsWithTheRemainingResultsRejected() async throws {
+        _ = await send(alice, to: bob, "warm")
+        let phantom = UUID().uuidString.lowercased()
+        FakeServerProtocol.messageResponse.withLock { respond in
+            respond = { body in
+                let request = try! Obscura_V1_SendMessageRequest(serializedBytes: body)
+                var response = Obscura_V1_SendMessageResponse()
+                response.failedSubmissions = request.messages.map {
+                    var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
+                    failure.submissionID = $0.submissionID
+                    failure.errorCode = .deviceMismatch
+                    return failure
+                }
+                var mismatch = Obscura_V1_SendMessageResponse.DeviceMismatch()
+                mismatch.userID = uuidBytes(self.bob.userId)!
+                mismatch.missingDeviceIds = [uuidBytes(phantom)!]
+                response.deviceMismatches = [mismatch]
+                return (200, try! response.serializedData())
+            }
+        }
 
+        let results = await send(alice, to: bob, "never")
+
+        XCTAssertEqual(results.map(\.deviceId), [bob.deviceId])
+        XCTAssertEqual(results.map(\.status), [.rejected])
+        XCTAssertEqual(results.first?.error, "\(Obscura_V1_SendMessageResponse.ErrorCode.deviceMismatch)")
+        XCTAssertEqual(server.deviceBundleFetches(phantom), 2, "each retry fetches the missing device, which does not exist")
+    }
+
+    func testSelfSyncNeverTargetsThisDeviceAndASingleDeviceOnlyAsksTheServer() async throws {
         let results = await send(alice, to: alice, "note")
         XCTAssertEqual(results, [])
         XCTAssertEqual(server.bundleFetches(alice.userId), 0)
-        let echoed = try await alice.receive().count
-        XCTAssertEqual(echoed, 0)
+        XCTAssertEqual(server.messageRequests(), 1, "a request naming the user and targeting nothing")
     }
 
-    func testSelfSyncReachesTheUsersOtherDevices() async throws {
-        let alicePhone = try await server.register(alice.userId)
+    func testSelfSyncDiscoversOwnDevicesItHasNeverSeenThroughTheMismatch() async throws {
+        let phone = try await server.register(alice.userId)
+        let tablet = try await server.register(alice.userId)
 
         let results = await send(alice, to: alice, "note")
-        XCTAssertEqual(results, [accepted(alicePhone)])
-        let phoneGot = ids(try await alicePhone.receive())
-        XCTAssertEqual(phoneGot, ["note"])
+
+        XCTAssertEqual(byDevice(results), byDevice([accepted(phone), accepted(tablet)]))
+        let phoneGot = try await phone.receive()
+        let tabletGot = try await tablet.receive()
+        XCTAssertEqual(ids(phoneGot), ["note"])
+        XCTAssertEqual(ids(tabletGot), ["note"])
         let echoed = try await alice.receive().count
         XCTAssertEqual(echoed, 0)
+        XCTAssertEqual(server.bundleFetches(alice.userId), 0, "own devices are never fetched whole")
     }
 
     func testConcurrentFirstSendsShareOneFetch() async throws {
@@ -159,58 +198,125 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(listed, [])
     }
 
-    func testDevicesWithAcceptedEvidenceAreNotResentAndNeedNoSession() async throws {
-        try await alice.directory.add(userId: bob.userId, deviceId: bob.deviceId)
+    func testWhenEveryDeviceHasAcceptedEvidenceOnlyAnEmptyRequestAsksForNewDevices() async throws {
+        try await alice.directory.add(userId: bob.userId, deviceIds: [bob.deviceId])
 
         let results = await send(alice, to: bob, "retry", accepted: [bob.deviceId])
+
         XCTAssertEqual(results, [accepted(bob)])
         XCTAssertEqual(server.bundleFetches(bob.userId), 0)
+        XCTAssertEqual(server.deviceBundleFetches(bob.deviceId), 0)
+        XCTAssertEqual(server.messageRequests(), 1)
         let resent = try await bob.receive().count
-        XCTAssertEqual(resent, 0)
+        XCTAssertEqual(resent, 0, "evidence devices are not sent again")
     }
 
-    func testAnUnusableBundleIsRejectedOnceAndDoesNotCauseAFetchOnEverySend() async throws {
-        let broken = try await server.register(bob.userId, corruptBundle: true)
+    func testADeviceAddedSinceTheEvidenceIsReachedTogetherWithTheEvidenceDevices() async throws {
+        _ = await send(alice, to: bob, "first")
+        _ = try await bob.receive()
+        let tablet = try await server.register(bob.userId)
 
-        let first = await send(alice, to: bob, "one")
-        XCTAssertEqual(first.first { $0.deviceId == bob.deviceId }, accepted(bob))
-        XCTAssertEqual(first.first { $0.deviceId == broken.deviceId }?.status, .rejected)
+        let results = await send(alice, to: bob, "first", accepted: [bob.deviceId])
 
-        let second = await send(alice, to: bob, "two")
-        XCTAssertEqual(second, [accepted(bob)])
-        XCTAssertEqual(server.bundleFetches(bob.userId), 1)
+        XCTAssertEqual(byDevice(results), byDevice([accepted(bob), accepted(tablet)]))
+        let tabletGot = try await tablet.receive()
+        XCTAssertEqual(ids(tabletGot), ["first"])
+        let bobGot = try await bob.receive()
+        XCTAssertEqual(ids(bobGot), ["first"], "completeness requires the evidence device with the new one")
+        XCTAssertEqual(server.deviceBundleFetches(tablet.deviceId), 1)
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(Set(listed), [bob.deviceId, tablet.deviceId])
     }
 
-    func testAChangedIdentityIsAcceptedReportedAndReachedWithAFreshSession() async throws {
+    func testAcceptedEvidenceIsResentWithADeviceThatNeedsTheMessageAndStillReportedAccepted() async throws {
+        _ = await send(alice, to: bob, "warm")
+        _ = try await bob.receive()
+        let tablet = try await server.register(bob.userId)
+        try await alice.directory.add(userId: bob.userId, deviceIds: [tablet.deviceId])
+
+        let results = await send(alice, to: bob, "retry", accepted: [bob.deviceId])
+
+        XCTAssertEqual(byDevice(results), byDevice([accepted(bob), accepted(tablet)]))
+        let tabletGot = try await tablet.receive()
+        XCTAssertEqual(ids(tabletGot), ["retry"])
+        let bobGot = try await bob.receive()
+        XCTAssertEqual(ids(bobGot), ["retry"], "the server takes a user's devices all or none")
+    }
+
+    func testAFetchWithAnUnverifiableBundleRejectsTheUserAndStoresNothing() async throws {
+        _ = try await server.register(bob.userId, corruptBundle: true)
+
+        for _ in 0..<2 {
+            let results = await send(alice, to: bob, "one")
+            XCTAssertEqual(results.map(\.status), [.rejected])
+            XCTAssertNil(results.first?.deviceId)
+        }
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(listed, [])
+        let session = try await alice.messenger.hasSession(bob.deviceId)
+        XCTAssertFalse(session)
+    }
+
+    func testAFetchWhoseBundlesCarryDifferentIdentitiesRejectsTheUserAndStoresNothing() async throws {
+        let rogue = try await server.register(bob.userId, rogueIdentity: true)
+
+        let results = await send(alice, to: bob, "one")
+
+        XCTAssertEqual(results.map(\.status), [.rejected])
+        XCTAssertTrue(results.first?.error?.contains("identity") == true)
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(listed, [])
+        let bobSession = try await alice.messenger.hasSession(bob.deviceId)
+        let rogueSession = try await alice.messenger.hasSession(rogue.deviceId)
+        XCTAssertFalse(bobSession)
+        XCTAssertFalse(rogueSession)
+    }
+
+    func testAResetPeerIsReachedInTheSameSendAsAnIdentityChangeForTheWholeAccount() async throws {
         _ = await send(alice, to: bob, "before")
         _ = try await bob.receive()
-
-        try bob.rekey()
-        try alice.forgetSessions()
+        let reset = try await server.reset(bob.userId)
 
         let after = await send(alice, to: bob, "after")
-        XCTAssertEqual(after, [accepted(bob)])
-        let bobGot = ids(try await bob.receive())
-        XCTAssertEqual(bobGot, ["after"])
+
+        XCTAssertEqual(after, [accepted(reset)])
+        let resetGot = try await reset.receive()
+        XCTAssertEqual(ids(resetGot), ["after"])
         XCTAssertEqual(alice.logger.snapshot().filter { $0.hasPrefix("identity changed") },
-                       ["identity changed for \(bob.deviceId).1"])
-        XCTAssertEqual(server.bundleFetches(bob.userId), 2)
+                       ["identity changed for \(bob.userId)"])
+        let listed = try await alice.directory.deviceIds(of: bob.userId)
+        XCTAssertEqual(listed, [reset.deviceId])
     }
 
-    func testAPeersNewIdentityInAnIncomingPrekeyMessageReplacesTheOldSession() async throws {
+    func testAResetPeersIncomingPrekeyMessageReplacesTheIdentityAndDropsTheOldDevicesSessions() async throws {
         _ = await send(alice, to: bob, "before")
         _ = try await bob.receive()
-        _ = await send(bob, to: alice, "ack")
-        _ = try await alice.receive()
+        let reset = try await server.reset(bob.userId)
 
-        try bob.rekey()
-        _ = await send(bob, to: alice, "from-new-identity")
-        let aliceGot = ids(try await alice.receive())
-        XCTAssertEqual(aliceGot, ["from-new-identity"])
+        _ = await send(reset, to: alice, "from-new-identity")
+        let aliceGot = try await alice.receive()
+        XCTAssertEqual(ids(aliceGot), ["from-new-identity"])
+        XCTAssertEqual(alice.logger.snapshot().filter { $0.hasPrefix("identity changed") },
+                       ["identity changed for \(bob.userId)"])
+        let oldSession = try await alice.messenger.hasSession(bob.deviceId)
+        XCTAssertFalse(oldSession)
 
-        _ = await send(alice, to: bob, "to-new-identity")
-        let bobGot = ids(try await bob.receive())
-        XCTAssertEqual(bobGot, ["to-new-identity"])
+        let reply = await send(alice, to: bob, "to-new-identity")
+        XCTAssertEqual(reply, [accepted(reset)])
+        let resetGot = try await reset.receive()
+        XCTAssertEqual(ids(resetGot), ["to-new-identity"])
+        XCTAssertEqual(resetGot.map(\.type), [.encryptedMessage])
         XCTAssertEqual(server.bundleFetches(bob.userId), 1)
+    }
+
+    func testALinkedDeviceSharesTheAccountIdentityWithoutAnIdentityChange() async throws {
+        _ = await send(alice, to: bob, "before")
+        let tablet = try await server.register(bob.userId)
+
+        _ = await send(alice, to: bob, "after")
+
+        let tabletGot = try await tablet.receive()
+        XCTAssertEqual(ids(tabletGot), ["after"])
+        XCTAssertTrue(alice.logger.snapshot().filter { $0.hasPrefix("identity changed") }.isEmpty)
     }
 }

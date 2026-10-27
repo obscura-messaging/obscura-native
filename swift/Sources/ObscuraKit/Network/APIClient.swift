@@ -1,9 +1,19 @@
 import Foundation
-import CryptoKit
+
+/// How a request authenticates.
+enum Auth {
+    /// The signed-in device's token. A 401 runs the client's shared refresh: a rejected refresh signs
+    /// out and throws `notAuthenticated`, a successful one retries the request once.
+    case device
+    /// An explicit token, such as a short-lived account token; never refreshed.
+    case bearer(String)
+    case none
+}
 
 actor APIClient {
     nonisolated let baseURL: URL
     private nonisolated let token = Locked<String?>(nil)
+    private nonisolated let tokenRejected = Locked<(@Sendable () async throws -> TokenStatus)?>(nil)
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -19,6 +29,11 @@ actor APIClient {
 
     nonisolated func setToken(_ token: String?) {
         self.token.withLock { $0 = token }
+    }
+
+    /// The client's shared refresh, run when the server rejects the device token.
+    nonisolated func onTokenRejected(_ refresh: @escaping @Sendable () async throws -> TokenStatus) {
+        tokenRejected.withLock { $0 = refresh }
     }
 
     // MARK: - JWT
@@ -46,23 +61,55 @@ actor APIClient {
         return min(max(seconds, 1), 10)
     }
 
-    private func request(_ path: String, method: String = "GET", body: Data? = nil,
+    private func request(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Data? = nil,
                          contentType: String = "application/json", headers: [String: String] = [:],
-                         bearer: String? = nil) async throws -> Data {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+                         auth: Auth = .device) async throws -> Data {
+        try await exchange(path, method: method, query: query, body: body, contentType: contentType, headers: headers,
+                           auth: auth).data
+    }
+
+    private func exchange(_ path: String, method: String, query: [URLQueryItem] = [], body: Data? = nil,
+                          contentType: String = "application/json", headers: [String: String] = [:],
+                          auth: Auth = .device) async throws -> (data: Data, status: Int) {
+        guard var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false) else {
+            throw ObscuraError.invalidArgument("path \(path)")
+        }
+        if !query.isEmpty { components.queryItems = query }
+        guard let url = components.url else { throw ObscuraError.invalidArgument("path \(path)") }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        if let token = bearer ?? token.withLock({ $0 }) { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        switch auth {
+        case .device:
+            do {
+                return try await send(request, path, token: token.withLock { $0 })
+            } catch ObscuraError.http(status: 401, body: let body) {
+                switch try await tokenRejected.withLock({ $0 })?() ?? .rejected {
+                case .fresh: return try await send(request, path, token: token.withLock { $0 })
+                case .rejected: throw ObscuraError.notAuthenticated
+                case .unavailable: throw ObscuraError.http(status: 401, body: body)
+                }
+            }
+        case .bearer(let bearer):
+            return try await send(request, path, token: bearer)
+        case .none:
+            return try await send(request, path, token: nil)
+        }
+    }
 
+    /// Sends with 429/503 retries.
+    private func send(_ request: URLRequest, _ path: String, token: String?) async throws -> (data: Data, status: Int) {
+        var request = request
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         var retries = 0
         while true {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw ObscuraError.protocolViolation("non-HTTP response for \(path)")
             }
-            if (200..<300).contains(http.statusCode) { return data }
+            if (200..<300).contains(http.statusCode) { return (data, http.statusCode) }
             if [429, 503].contains(http.statusCode), retries < Self.maxRetries {
                 retries += 1
                 let delay = Self.retryDelay(retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
@@ -73,8 +120,10 @@ actor APIClient {
         }
     }
 
-    private func json<T: Decodable>(_ path: String, method: String = "GET", body: (any Encodable)? = nil) async throws -> T {
-        try decoder.decode(T.self, from: await request(path, method: method, body: body.map { try encoder.encode($0) }))
+    private func json<T: Decodable>(_ path: String, method: String = "GET", body: (any Encodable)? = nil,
+                                    auth: Auth = .device) async throws -> T {
+        try decoder.decode(T.self, from: await request(path, method: method, body: body.map { try encoder.encode($0) },
+                                                       auth: auth))
     }
 
     private func call(_ path: String, method: String, body: any Encodable) async throws {
@@ -84,46 +133,48 @@ actor APIClient {
     // MARK: - Endpoints
 
     func registerUser(_ username: String, _ password: String) async throws -> AuthResponse {
-        try await json("v1/users", method: "POST", body: ["username": username, "password": password])
+        try await json("v1/users", method: "POST", body: ["username": username, "password": password], auth: .none)
     }
 
     func login(_ username: String, _ password: String, deviceId: String?) async throws -> AuthResponse {
         var body = ["username": username, "password": password]
         body["deviceId"] = deviceId
-        return try await json("v1/sessions", method: "POST", body: body)
+        return try await json("v1/sessions", method: "POST", body: body, auth: .none)
     }
 
     func refreshSession(_ refreshToken: String) async throws -> AuthResponse {
-        try await json("v1/sessions/refresh", method: "POST", body: ["refreshToken": refreshToken])
+        try await json("v1/sessions/refresh", method: "POST", body: ["refreshToken": refreshToken], auth: .none)
     }
 
     /// Takes the session's access token explicitly: the client has already forgotten it.
     func logout(_ refreshToken: String, token: String) async throws {
-        _ = try await request("v1/sessions", method: "DELETE", body: encoder.encode(["refreshToken": refreshToken]), bearer: token)
+        _ = try await request("v1/sessions", method: "DELETE", body: encoder.encode(["refreshToken": refreshToken]),
+                               auth: .bearer(token))
     }
 
-    func provisionDevice(name: String, keys: DeviceKeysUpload) async throws -> AuthResponse {
-        struct Provision: Encodable {
-            let name: String
-            let identityKey: String
-            let registrationId: Int
-            let signedPreKey: SignedPreKeyUpload
-            let oneTimePreKeys: [PreKeyUpload]
-        }
-        return try await json("v1/devices", method: "POST", body: Provision(
-            name: name, identityKey: keys.identityKey, registrationId: keys.registrationId,
-            signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys))
+    /// Takes a user-scoped token explicitly: it is never the client's token.
+    func createDevice(_ device: CreateDeviceRequest, bearer: String) async throws -> AuthResponse {
+        try await json("v1/devices", method: "POST", body: device, auth: .bearer(bearer))
     }
 
-    func uploadDeviceKeys(_ keys: DeviceKeysUpload) async throws {
+    /// The account's devices. `bearer` is a user-scoped token; nil uses the device's own token.
+    func listDevices(bearer: String? = nil) async throws -> [DeviceResponse] {
+        struct Directory: Decodable { let devices: [DeviceResponse] }
+        let response: Directory = try await json("v1/devices", auth: bearer.map(Auth.bearer) ?? .device)
+        return response.devices
+    }
+
+    func deleteDevice(_ deviceId: String) async throws {
+        _ = try await request("v1/devices/\(deviceId)", method: "DELETE")
+    }
+
+    func resetAccount(_ username: String, _ password: String) async throws {
+        _ = try await request("v1/account/reset", method: "POST",
+                              body: encoder.encode(["username": username, "password": password]), auth: .none)
+    }
+
+    func uploadPreKeys(_ keys: PreKeysUpload) async throws {
         try await call("v1/devices/keys", method: "POST", body: keys)
-    }
-
-    func fetchOwnDeviceIds() async throws -> [String] {
-        struct Device: Decodable { let deviceId: String }
-        struct Directory: Decodable { let devices: [Device] }
-        let response: Directory = try await json("v1/devices")
-        return response.devices.map(\.deviceId)
     }
 
     /// Consumes one one-time prekey on every device of `userId`.
@@ -131,8 +182,29 @@ actor APIClient {
         try await json("v1/users/\(userId)")
     }
 
+    /// Consumes one one-time prekey on that device only.
+    func fetchPreKeyBundle(_ userId: String, deviceId: String) async throws -> PreKeyBundleResponse {
+        try await json("v1/users/\(userId)/devices/\(deviceId)")
+    }
+
+    func createLinkSession(bearer: String) async throws -> LinkSessionResponse {
+        try await json("v1/link-sessions", method: "POST", auth: .bearer(bearer))
+    }
+
+    /// The primary's body once the session is approved; nil if it was not approved within `wait` seconds.
+    func awaitLinkSession(_ id: String, wait: Int, bearer: String) async throws -> Data? {
+        let response = try await exchange("v1/link-sessions/\(id)", method: "GET",
+                                          query: [URLQueryItem(name: "wait", value: "\(wait)")], auth: .bearer(bearer))
+        return response.status == 204 ? nil : response.data
+    }
+
+    func approveLinkSession(_ id: String, envelope: Data) async throws {
+        _ = try await request("v1/link-sessions/\(id)", method: "PUT", body: envelope, contentType: "application/octet-stream")
+    }
+
+    /// One fresh `Idempotency-Key` per call, kept across its 429/503 retries.
     func sendMessage(_ protobuf: Data) async throws -> Data {
-        let idempotencyKey = SHA256.hash(data: protobuf).prefix(16).map { String(format: "%02x", $0) }.joined()
+        let idempotencyKey = UUID().uuidString.lowercased()
         return try await request("v1/messages", method: "POST", body: protobuf, contentType: "application/x-protobuf",
                                  headers: ["Idempotency-Key": idempotencyKey])
     }

@@ -4,13 +4,18 @@ import LibSignalClient
 @testable import ObscuraKit
 
 final class PersistentSignalStoreTests: XCTestCase {
-    private func store(_ db: DatabaseQueue? = nil) throws -> PersistentSignalStore {
-        PersistentSignalStore(db: try db ?? ObscuraDatabase.inMemory(), logger: SilentLogger())
+    private func store(_ db: DatabaseQueue? = nil, listing devices: [String: String] = [:],
+                       logger: ObscuraLogger = SilentLogger()) throws -> PersistentSignalStore {
+        let db = try db ?? ObscuraDatabase.inMemory()
+        try db.write { db in
+            for (deviceId, userId) in devices { try DeviceStore.add(userId: userId, deviceId: deviceId, in: db) }
+        }
+        return PersistentSignalStore(db: db, logger: logger)
     }
 
     /// Installs fresh keys in `peer` and returns a bundle for them using its first one-time prekey.
-    private func bundle(installingIn peer: PersistentSignalStore) throws -> PreKeyBundle {
-        let keys = try SignalKeys.generate()
+    private func bundle(installingIn peer: PersistentSignalStore, identity: IdentityKeyPair = .generate()) throws -> PreKeyBundle {
+        let keys = try SignalKeys.generate(identity: identity)
         try peer.install(keys)
         return try PreKeyBundle(
             registrationId: keys.registrationId, deviceId: 1, prekeyId: keys.preKeys[0].id, prekey: keys.preKeys[0].publicKey,
@@ -38,7 +43,7 @@ final class PersistentSignalStoreTests: XCTestCase {
     }
 
     func testInstallReplacesEveryEarlierRecord() throws {
-        let store = try store()
+        let store = try store(listing: ["peer": "peer-user"])
         try store.install(SignalKeys.generate())
         let peerAddress = try ProtocolAddress(name: "peer", deviceId: 1)
         try processPreKeyBundle(bundle(installingIn: try self.store()), for: peerAddress,
@@ -59,23 +64,53 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.localRegistrationId(context: NullContext()))
     }
 
-    // MARK: - Identity trust (Signal's policy for unverified contacts)
+    // MARK: - Identity trust (per account, Signal's policy for unverified contacts)
 
-    func testAChangedIdentityIsTrustedReplacedAndLogged() throws {
+    func testTheFirstIdentityOfAnAccountIsTrustedAndSharedByItsDevices() throws {
         let logger = RecordingLogger(SilentLogger())
-        let store = PersistentSignalStore(db: try ObscuraDatabase.inMemory(), logger: logger)
-        let first = IdentityKey(publicKey: PrivateKey.generate().publicKey)
-        let second = IdentityKey(publicKey: PrivateKey.generate().publicKey)
-        let address = try ProtocolAddress(name: "alice", deviceId: 1)
+        let store = try store(listing: ["phone": "alice", "laptop": "alice"], logger: logger)
+        let identity = IdentityKey(publicKey: PrivateKey.generate().publicKey)
+        let phone = try ProtocolAddress(name: "phone", deviceId: 1)
+        let laptop = try ProtocolAddress(name: "laptop", deviceId: 1)
 
-        XCTAssertTrue(try store.isTrustedIdentity(first, for: address, direction: .receiving, context: NullContext()))
-        XCTAssertFalse(try store.saveIdentity(first, for: address, context: NullContext()), "first save replaces nothing")
-        XCTAssertTrue(try store.saveIdentity(first, for: address, context: NullContext()), "a known key is replaced")
-        XCTAssertTrue(logger.snapshot().isEmpty, "the same key again is not a change")
-        XCTAssertTrue(try store.isTrustedIdentity(second, for: address, direction: .sending, context: NullContext()))
-        XCTAssertTrue(try store.saveIdentity(second, for: address, context: NullContext()))
-        XCTAssertEqual(try store.identity(for: address, context: NullContext()), second)
-        XCTAssertEqual(logger.snapshot(), ["identity changed for alice.1"])
+        XCTAssertTrue(try store.isTrustedIdentity(identity, for: phone, direction: .receiving, context: NullContext()))
+        XCTAssertFalse(try store.saveIdentity(identity, for: phone, context: NullContext()), "the first key is not a change")
+        XCTAssertFalse(try store.saveIdentity(identity, for: laptop, context: NullContext()), "a linked device shares it")
+        XCTAssertEqual(try store.identity(for: laptop, context: NullContext()), identity)
+        XCTAssertTrue(logger.snapshot().isEmpty)
+    }
+
+    func testADifferentIdentityIsAcceptedForTheWholeAccountDroppingItsSessionsAndLogged() throws {
+        let logger = RecordingLogger(SilentLogger())
+        let store = try store(listing: ["phone": "alice", "laptop": "alice", "bob-phone": "bob"], logger: logger)
+        try store.install(SignalKeys.generate())
+        let alice = IdentityKeyPair.generate()
+        for (name, identity) in [("phone", alice), ("laptop", alice), ("bob-phone", IdentityKeyPair.generate())] {
+            try processPreKeyBundle(bundle(installingIn: try self.store(), identity: identity),
+                                    for: ProtocolAddress(name: name, deviceId: 1),
+                                    sessionStore: store, identityStore: store, context: NullContext())
+        }
+        XCTAssertTrue(logger.snapshot().isEmpty, "devices of one account share its identity")
+        let replacement = IdentityKey(publicKey: PrivateKey.generate().publicKey)
+        let phone = try ProtocolAddress(name: "phone", deviceId: 1)
+
+        XCTAssertTrue(try store.isTrustedIdentity(replacement, for: phone, direction: .sending, context: NullContext()))
+        XCTAssertTrue(try store.saveIdentity(replacement, for: phone, context: NullContext()))
+
+        XCTAssertEqual(try store.identity(for: ProtocolAddress(name: "laptop", deviceId: 1), context: NullContext()), replacement)
+        XCTAssertNil(try store.loadSession(for: phone, context: NullContext()))
+        XCTAssertNil(try store.loadSession(for: ProtocolAddress(name: "laptop", deviceId: 1), context: NullContext()))
+        XCTAssertNotNil(try store.loadSession(for: ProtocolAddress(name: "bob-phone", deviceId: 1), context: NullContext()),
+                        "another account is untouched")
+        XCTAssertEqual(logger.snapshot(), ["identity changed for alice"])
+    }
+
+    func testAnAddressOutsideTheDirectoryHasNoTrustDecision() throws {
+        let store = try store()
+        let identity = IdentityKey(publicKey: PrivateKey.generate().publicKey)
+        let stranger = try ProtocolAddress(name: "stranger", deviceId: 1)
+        XCTAssertThrowsError(try store.saveIdentity(identity, for: stranger, context: NullContext()))
+        XCTAssertThrowsError(try store.identity(for: stranger, context: NullContext()))
     }
 
     // MARK: - Prekeys
@@ -109,8 +144,6 @@ final class PersistentSignalStoreTests: XCTestCase {
             XCTAssertEqual(upload.signedPreKey.keyId, serverMaxId + 1)
             XCTAssertEqual(upload.oneTimePreKeys.map(\.keyId), Array((101 + refill * 50)...(150 + refill * 50)))
             XCTAssertEqual(try reopened.preKeyCount(), 150 + refill * 50)
-            XCTAssertEqual(upload.registrationId, Int(keys.registrationId))
-            XCTAssertEqual(upload.identityKey, Data(keys.identity.publicKey.serialize()).base64EncodedString())
             let signed = try reopened.loadSignedPreKey(id: UInt32(upload.signedPreKey.keyId), context: NullContext())
             XCTAssertEqual(upload.signedPreKey.publicKey, Data(signed.publicKey.serialize()).base64EncodedString())
             XCTAssertEqual(upload.signedPreKey.signature, Data(signed.signature).base64EncodedString())
@@ -171,10 +204,10 @@ final class PersistentSignalStoreTests: XCTestCase {
     }
 
     func testAMessageUsingAnEarlierBundleDecryptsAfterSignedPreKeyRotation() throws {
-        let alice = try store()
+        let alice = try store(listing: ["bob": "bob-user"])
         try alice.install(SignalKeys.generate())
         let db = try ObscuraDatabase.inMemory()
-        let bob = try store(db)
+        let bob = try store(db, listing: ["alice": "alice-user"])
         let bobAddress = try ProtocolAddress(name: "bob", deviceId: 1)
         try processPreKeyBundle(bundle(installingIn: bob), for: bobAddress,
                                 sessionStore: alice, identityStore: alice, context: NullContext())
@@ -195,9 +228,9 @@ final class PersistentSignalStoreTests: XCTestCase {
     // MARK: - Sessions
 
     func testAPreKeyMessageDecryptsAndItsSessionPersists() throws {
-        let alice = try store()
+        let alice = try store(listing: ["bob": "bob-user"])
         try alice.install(SignalKeys.generate())
-        let bob = try store()
+        let bob = try store(listing: ["alice": "alice-user"])
         let bobAddress = try ProtocolAddress(name: "bob", deviceId: 1)
         try processPreKeyBundle(bundle(installingIn: bob), for: bobAddress,
                                 sessionStore: alice, identityStore: alice, context: NullContext())

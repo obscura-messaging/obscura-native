@@ -16,12 +16,7 @@ final class SessionRestoreTests: XCTestCase {
     }
 
     static func jwt(exp: Int, userId: String = "u1", deviceId: String = "d1") -> String {
-        func encode(_ s: String) -> String {
-            Data(s.utf8).base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "=", with: "")
-        }
-        return "\(encode(#"{"alg":"none"}"#)).\(encode("{\"exp\":\(exp),\"sub\":\"\(userId)\",\"device_id\":\"\(deviceId)\"}")).sig"
+        UnitTests.jwt(exp: exp, userId: userId, deviceId: deviceId)
     }
 
     private static let stored = ["token": jwt(exp: 1), "refreshToken": "rt", "userId": "u1", "deviceId": "d1",
@@ -31,7 +26,7 @@ final class SessionRestoreTests: XCTestCase {
         let db = try ObscuraDatabase.inMemory()
         if identity {
             try PersistentSignalStore(db: db, logger: SilentLogger()).install(SignalKeys.generate())
-            try db.write { try $0.execute(sql: "INSERT INTO device_identity VALUES (1, 'd1')") }
+            try db.write { try DeviceStore.setLocalDevice("d1", primaryDeviceId: "d1", in: $0) }
         }
         return try makeClient(apiURL: "https://\(StubProtocol.host)", database: db, storage: storage)
     }
@@ -165,7 +160,7 @@ final class SessionRestoreTests: XCTestCase {
     func testStoredDeviceMismatchIsClearedRatherThanRestored() async throws {
         let storage = MemorySessionStorage(Self.stored)
         let client = try client(storage)
-        try await client.devices.setLocalDeviceId("different-device")
+        try await client.db.write { try DeviceStore.setLocalDevice("different-device", primaryDeviceId: "d1", in: $0) }
         let restored = await client.restorePersistedSession()
         XCTAssertFalse(restored)
         XCTAssertNil(storage.session)

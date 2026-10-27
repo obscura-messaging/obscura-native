@@ -30,8 +30,8 @@ final class SchemaTests: XCTestCase {
         let store = PersistentSignalStore(db: db, logger: SilentLogger())
         try store.install(SignalKeys.generate())
         try await FriendStore(db: db).add("peer", username: "alice", status: .accepted)
-        try await DeviceStore(db: db).setLocalDeviceId("me")
-        try await DeviceStore(db: db).add(userId: "peer", deviceId: "d")
+        try await db.write { try DeviceStore.setLocalDevice("me", primaryDeviceId: "me", in: $0) }
+        try await DeviceStore(db: db).add(userId: "peer", deviceIds: ["d"])
         _ = try await InboxStore(db: db, logger: SilentLogger()).put(InboxInsert(
             envelopeId: "e", kind: "APP_ENTRY", senderUserId: "peer", senderDeviceId: "d",
             modelKey: "m", entryId: "1", sentAt: 1, payload: Data([1])))
@@ -50,12 +50,12 @@ final class SchemaTests: XCTestCase {
         let db = try ObscuraDatabase.inMemory()
 
         XCTAssertEqual(try columns(of: "model_entries", in: db), [
-            "model_name:TEXT", "id:TEXT", "data:TEXT", "timestamp:INTEGER",
-            "author_device_id:TEXT", "local_metadata:TEXT",
+            "model_name:BLOB", "id:BLOB", "data:BLOB", "timestamp:INTEGER",
+            "author_device_id:BLOB", "local_metadata:BLOB",
         ])
         XCTAssertEqual(try columns(of: "inbox_rows", in: db), [
             "id:INTEGER", "envelope_id:TEXT", "kind:TEXT", "sender_user_id:TEXT",
-            "sender_device_id:TEXT", "model_key:TEXT", "entry_id:TEXT",
+            "sender_device_id:TEXT", "model_key:BLOB", "entry_id:BLOB",
             "sent_at:INTEGER", "payload:BLOB",
         ])
     }
