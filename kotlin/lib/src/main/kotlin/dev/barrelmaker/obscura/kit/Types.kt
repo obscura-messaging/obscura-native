@@ -10,13 +10,30 @@ enum class LoginScenario {
     /** Authenticated as the stored local device. */
     EXISTING_DEVICE,
 
-    /** No local device: call `loginAndProvision`. */
-    NEW_DEVICE,
+    /** No local device and the account has devices: link this device with `beginLink`. */
+    LINK_REQUIRED,
 
-    /** The server does not know the stored local device: `wipeDevice`, then `loginAndProvision`. */
+    /** No local device and the account has none (new or reset): call `provisionPrimary`. */
+    NO_DEVICES,
+
+    /** The stored device no longer belongs to the account (unlinked or reset): `wipeDevice`, then log in again. */
     DEVICE_MISMATCH,
     INVALID_CREDENTIALS,
 }
+
+/** One device of the signed-in account. */
+data class DeviceInfo(val deviceId: String, val name: String?, val isPrimary: Boolean, val isThisDevice: Boolean)
+
+/** A pending link of this device. Show [code] as a QR code for the primary, then call `completeLink`. */
+class LinkRequest internal constructor(
+    val code: String,
+    internal val sessionId: String,
+    internal val expiresAt: Long,
+    internal val ephemeral: org.signal.libsignal.protocol.ecc.ECKeyPair,
+    internal val userToken: String,
+    internal val username: String,
+    internal val deviceName: String,
+)
 
 enum class SubmissionStatus { ACCEPTED, REJECTED, UNKNOWN }
 

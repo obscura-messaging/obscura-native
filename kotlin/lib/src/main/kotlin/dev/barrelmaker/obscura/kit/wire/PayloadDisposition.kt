@@ -18,7 +18,7 @@ internal enum class PayloadDisposition {
  * per-device queue, which evicts oldest first.
  */
 internal fun payloadDisposition(arm: PayloadCase): PayloadDisposition = when (arm) {
-    PayloadCase.FRIEND_REQUEST, PayloadCase.FRIEND_ACCEPT -> PayloadDisposition.KIT_INTERNAL
+    PayloadCase.FRIEND_REQUEST, PayloadCase.FRIEND_ACCEPT, PayloadCase.FRIEND_LIST_SYNC -> PayloadDisposition.KIT_INTERNAL
     PayloadCase.TYPING_SIGNAL -> PayloadDisposition.DROPPABLE
     else -> PayloadDisposition.INBOXED
 }

@@ -31,19 +31,28 @@ internal class APIClient(baseUrl: String, private val token: () -> String?) {
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    suspend fun registerUser(username: String, password: String): AuthResponse = AuthResponse.from(
-        json("POST", "/v1/users", JSONObject().put("username", username).put("password", password), bearer = null)
-    )
+    /** Returns a user-scoped token. */
+    suspend fun registerUser(username: String, password: String): String = AuthResponse.from(
+        json("POST", "/v1/users", credentials(username, password), bearer = null)
+    ).token
 
+    /** Device-scoped when [deviceId] belongs to the user, otherwise user-scoped. */
     suspend fun login(username: String, password: String, deviceId: String?): AuthResponse {
-        val body = JSONObject().put("username", username).put("password", password)
+        val body = credentials(username, password)
         if (deviceId != null) body.put("deviceId", deviceId)
         return AuthResponse.from(json("POST", "/v1/sessions", body, bearer = null))
     }
 
-    /** Creates a device for the user that [userToken] belongs to. */
-    suspend fun provisionDevice(userToken: String, name: String, keys: DeviceKeys): AuthResponse =
-        AuthResponse.from(json("POST", "/v1/devices", keys.toJson().put("name", name), bearer = userToken))
+    suspend fun resetAccount(username: String, password: String) {
+        send("POST", "/v1/account/reset", credentials(username, password).body(), bearer = null)
+    }
+
+    /** Creates a device for the user that [userToken] belongs to; [linkSessionId] when the account has devices. */
+    suspend fun provisionDevice(userToken: String, name: String, keys: DeviceKeys, linkSessionId: String?): AuthResponse {
+        val body = keys.toJson().put("name", name)
+        if (linkSessionId != null) body.put("linkSessionId", linkSessionId)
+        return AuthResponse.from(json("POST", "/v1/devices", body, bearer = userToken))
+    }
 
     suspend fun refreshSession(refreshToken: String): AuthResponse = AuthResponse.from(
         json("POST", "/v1/sessions/refresh", JSONObject().put("refreshToken", refreshToken), bearer = null)
@@ -57,32 +66,58 @@ internal class APIClient(baseUrl: String, private val token: () -> String?) {
         send("PUT", "/v1/push-tokens", JSONObject().put("token", pushToken).body(), requireToken())
     }
 
-    suspend fun uploadDeviceKeys(keys: DeviceKeys) {
+    suspend fun uploadPreKeys(keys: PreKeyUpload) {
         send("POST", "/v1/devices/keys", keys.toJson().body(), requireToken())
     }
 
+    /** One bundle per device of [userId]; consumes a one-time prekey on each. */
     suspend fun fetchPreKeyBundles(userId: String): JSONArray =
-        JSONArray(String(send("GET", "/v1/users/${enc(userId)}", null, requireToken())))
+        parse("/v1/users") { JSONArray(String(send("GET", "/v1/users/${enc(userId)}", null, requireToken()))) }
 
-    suspend fun fetchOwnDeviceIds(): List<String> {
-        val bytes = send("GET", "/v1/devices", null, requireToken())
-        try {
-            val response = JSONObject(String(bytes))
-            val devices = response.getJSONArray("devices")
-            return (0 until devices.length()).map { devices.getJSONObject(it).getString("deviceId") }.also { ids ->
-                if (ids.any { runCatching { UUID.fromString(it) }.isFailure } || ids.distinct().size != ids.size) {
-                    throw ObscuraError.ProtocolViolation("Invalid own-device directory")
-                }
-            }
-        } catch (e: org.json.JSONException) {
-            throw ObscuraError.ProtocolViolation("Invalid own-device directory", e)
+    /** The bundle of one device; consumes a one-time prekey on that device only. */
+    suspend fun fetchPreKeyBundle(userId: String, deviceId: String): JSONObject = parse("/v1/users") {
+        JSONObject(String(send("GET", "/v1/users/${enc(userId)}/devices/${enc(deviceId)}", null, requireToken())))
+    }
+
+    /** The account's devices. [bearer] may be a user-scoped token. */
+    suspend fun fetchOwnDevices(bearer: String = requireToken()): List<OwnDevice> = parse("/v1/devices") {
+        val devices = JSONObject(String(send("GET", "/v1/devices", null, bearer))).getJSONArray("devices")
+        (0 until devices.length()).map { i ->
+            val d = devices.getJSONObject(i)
+            OwnDevice(d.getString("deviceId"), if (d.isNull("name")) null else d.getString("name"), d.optBoolean("isPrimary"))
+        }
+    }.also { list ->
+        if (list.any { !isUuid(it.deviceId) } || list.map { it.deviceId }.distinct().size != list.size || list.count { it.isPrimary } > 1) {
+            throw ObscuraError.ProtocolViolation("Invalid device list")
         }
     }
 
-    /** The idempotency key is derived from the body, so a retried batch cannot be delivered twice. */
+    suspend fun deleteDevice(deviceId: String) {
+        send("DELETE", "/v1/devices/${enc(deviceId)}", null, requireToken())
+    }
+
+    suspend fun createLinkSession(userToken: String): LinkSession = json("POST", "/v1/link-sessions", JSONObject(), userToken).let {
+        val id = it.optString("id")
+        val expiresAt = it.optLong("expiresAt")
+        if (id.isBlank() || expiresAt <= 0) throw ObscuraError.ProtocolViolation("Invalid link session")
+        LinkSession(id, expiresAt)
+    }
+
+    suspend fun approveLinkSession(id: String, body: ByteArray) {
+        send("PUT", "/v1/link-sessions/${enc(id)}", body.toRequestBody(OCTET), requireToken())
+    }
+
+    /** The approved body, or null when the session was not approved within [waitSeconds]. */
+    suspend fun awaitLinkSession(userToken: String, id: String, waitSeconds: Int): ByteArray? {
+        val (status, bytes) = exchange("GET", "/v1/link-sessions/${enc(id)}?wait=$waitSeconds", null, userToken,
+            readTimeoutSeconds = waitSeconds + 15L)
+        return if (status == 204) null else bytes
+    }
+
+    /** A fresh idempotency key per call; [send]'s own 429/503 retries reuse it. */
     suspend fun sendMessage(protobuf: ByteArray): ByteArray = send(
         "POST", "/v1/messages", protobuf.toRequestBody(PROTOBUF), requireToken(),
-        "Idempotency-Key" to UUID.nameUUIDFromBytes(protobuf).toString(),
+        "Idempotency-Key" to UUID.randomUUID().toString(),
     )
 
     suspend fun uploadAttachment(blob: ByteArray): String =
@@ -97,33 +132,45 @@ internal class APIClient(baseUrl: String, private val token: () -> String?) {
 
     private fun requireToken(): String = token() ?: throw ObscuraError.NotAuthenticated()
 
-    private suspend fun json(method: String, path: String, body: JSONObject, bearer: String?): JSONObject {
-        val bytes = send(method, path, body.body(), bearer)
-        return try {
-            JSONObject(String(bytes))
-        } catch (e: org.json.JSONException) {
-            throw ObscuraError.ProtocolViolation("Invalid JSON response for $path", e)
-        }
+    private suspend fun json(method: String, path: String, body: JSONObject, bearer: String?): JSONObject =
+        parse(path) { JSONObject(String(send(method, path, body.body(), bearer))) }
+
+    private inline fun <T> parse(path: String, block: () -> T): T = try {
+        block()
+    } catch (e: org.json.JSONException) {
+        throw ObscuraError.ProtocolViolation("Invalid JSON response for $path", e)
     }
 
-    /** Retries 429 and 503 after `Retry-After`; any other non-2xx is [ObscuraError.Http]. */
+    private fun credentials(username: String, password: String) = JSONObject().put("username", username).put("password", password)
+
     private suspend fun send(
         method: String,
         path: String,
         body: RequestBody?,
         bearer: String?,
         vararg headers: Pair<String, String>,
-    ): ByteArray {
+    ): ByteArray = exchange(method, path, body, bearer, *headers).second
+
+    /** Retries 429 and 503 after `Retry-After`; any other non-2xx is [ObscuraError.Http]. */
+    private suspend fun exchange(
+        method: String,
+        path: String,
+        body: RequestBody?,
+        bearer: String?,
+        vararg headers: Pair<String, String>,
+        readTimeoutSeconds: Long? = null,
+    ): Pair<Int, ByteArray> {
         val request = Request.Builder().url("$baseUrl$path").method(method, body).apply {
             if (bearer != null) header("Authorization", "Bearer $bearer")
             headers.forEach { (name, value) -> header(name, value) }
         }.build()
+        val client = readTimeoutSeconds?.let { http.newBuilder().readTimeout(it, TimeUnit.SECONDS).build() } ?: http
         var retries = 0
         while (true) {
             val (status, bytes, retryAfter) = withContext(Dispatchers.IO) {
-                http.newCall(request).execute().use { Triple(it.code, it.body.bytes(), it.header("Retry-After")) }
+                client.newCall(request).execute().use { Triple(it.code, it.body.bytes(), it.header("Retry-After")) }
             }
-            if (status in 200..299) return bytes
+            if (status in 200..299) return status to bytes
             if (status !in RETRYABLE || retries == MAX_RETRIES) throw ObscuraError.Http(status, String(bytes))
             retries++
             delay(retryAfterMs(retryAfter))

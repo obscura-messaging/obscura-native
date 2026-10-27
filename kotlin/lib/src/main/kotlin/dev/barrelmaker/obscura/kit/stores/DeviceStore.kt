@@ -4,20 +4,40 @@ import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** This device's id, and the device ids of every user the client addresses, its own included. */
+/** This device and the account's primary; null until known on a linked device. */
+internal data class LocalDevice(val deviceId: String, val primaryDeviceId: String?) {
+    val isPrimary get() = deviceId == primaryDeviceId
+}
+
+/** This device, and the device directory: every device the client addresses, its own included. */
 internal class DeviceStore(private val db: ObscuraDatabase) {
     private val dispatcher = Dispatchers.IO.limitedParallelism(1)
     private val queries = db.deviceQueries
 
-    suspend fun storeIdentity(deviceId: String) = withContext(dispatcher) { queries.insertIdentity(deviceId) }
+    suspend fun getIdentity(): String? = getLocal()?.deviceId
 
-    suspend fun getIdentity(): String? = withContext(dispatcher) { queries.selectIdentity().executeAsOneOrNull() }
+    suspend fun getLocal(): LocalDevice? = withContext(dispatcher) { getLocalInTransaction() }
 
-    suspend fun add(userId: String, deviceId: String) = withContext(dispatcher) {
-        addInTransaction(userId, deviceId)
+    internal fun getLocalInTransaction(): LocalDevice? =
+        queries.selectIdentity().executeAsOneOrNull()?.let { LocalDevice(it.device_id, it.primary_device_id) }
+
+    /** This device and its own directory entry. Joins an enclosing transaction. */
+    internal fun storeLocalInTransaction(userId: String, local: LocalDevice) = db.transaction {
+        queries.insertIdentity(local.deviceId, local.primaryDeviceId)
+        queries.insert(userId, local.deviceId)
+    }
+
+    suspend fun setPrimary(primaryDeviceId: String?) = withContext(dispatcher) { queries.updatePrimary(primaryDeviceId) }
+
+    suspend fun add(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
+        db.transaction { deviceIds.forEach { addInTransaction(userId, it) } }
     }
 
     internal fun addInTransaction(userId: String, deviceId: String) = queries.insert(userId, deviceId)
+
+    suspend fun remove(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
+        db.transaction { deviceIds.forEach { queries.delete(userId, it) } }
+    }
 
     suspend fun devicesOf(userId: String): List<String> = withContext(dispatcher) {
         queries.selectByUser(userId).executeAsList()

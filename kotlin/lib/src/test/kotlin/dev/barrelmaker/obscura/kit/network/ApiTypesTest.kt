@@ -14,8 +14,7 @@ class ApiTypesTest {
         val json = DeviceKeys(
             identityKey = "idk",
             registrationId = 100,
-            signedPreKey = SignedPreKeyJson(1, "spk", "sig"),
-            oneTimePreKeys = listOf(OneTimePreKeyJson(2, "otk")),
+            preKeys = PreKeyUpload(SignedPreKeyJson(1, "spk", "sig"), listOf(OneTimePreKeyJson(2, "otk"))),
         ).toJson()
 
         assertEquals(setOf("identityKey", "registrationId", "signedPreKey", "oneTimePreKeys"), json.keySet())
@@ -26,10 +25,10 @@ class ApiTypesTest {
     }
 
     @Test
-    fun `an auth response has a device id only when device-scoped`() {
-        val user = AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1}"""))
+    fun `an auth response has a refresh token and device id only when device-scoped`() {
+        val user = AuthResponse.from(JSONObject("""{"token":"t","expiresAt":1}"""))
         val device = AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1,"deviceId":"d"}"""))
-        assertNull(user.deviceId)
+        assertEquals(AuthResponse("t", null, null), user)
         assertEquals(AuthResponse("t", "r", "d"), device)
     }
 

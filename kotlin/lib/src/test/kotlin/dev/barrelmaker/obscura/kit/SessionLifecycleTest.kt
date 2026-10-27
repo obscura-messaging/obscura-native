@@ -77,12 +77,12 @@ class SessionLifecycleTest {
 
     @Test fun `restore rejects missing Signal identity and a mismatched device before authentication`() = runBlocking {
         val missing = newClient(url, storedSession())
-        missing.devices.storeIdentity(SELF_DEVICE_ID)
+        missing.storeLocalDevice()
         assertFalse(missing.restorePersistedSession())
         assertEquals(AuthState.LOGGED_OUT, missing.authState.value)
 
         val mismatch = sessionClient(url, storedSession())
-        mismatch.devices.storeIdentity("019f025a-0000-7de6-84b6-000000000099")
+        mismatch.storeLocalDevice(deviceId = "019f025a-0000-7de6-84b6-000000000099")
         assertFalse(mismatch.restorePersistedSession())
         assertEquals(AuthState.LOGGED_OUT, mismatch.authState.value)
         assertEquals(0, server.requestCount)

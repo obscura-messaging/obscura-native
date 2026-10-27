@@ -4,6 +4,7 @@ import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.google.protobuf.ByteString
 import dev.barrelmaker.obscura.kit.crypto.AttachmentCrypto
+import dev.barrelmaker.obscura.kit.crypto.LinkCrypto
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
@@ -15,14 +16,19 @@ import dev.barrelmaker.obscura.kit.managers.TokenStatus
 import dev.barrelmaker.obscura.kit.messaging.Messenger
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.network.GatewayConnection
+import dev.barrelmaker.obscura.kit.network.Jwt
+import dev.barrelmaker.obscura.kit.network.OwnDevice
 import dev.barrelmaker.obscura.kit.persistence.SessionStorage
 import dev.barrelmaker.obscura.kit.stores.DeviceStore
 import dev.barrelmaker.obscura.kit.stores.EntryStore
 import dev.barrelmaker.obscura.kit.stores.FriendData
+import dev.barrelmaker.obscura.kit.stores.FriendList
 import dev.barrelmaker.obscura.kit.stores.FriendStatus
 import dev.barrelmaker.obscura.kit.stores.FriendStore
 import dev.barrelmaker.obscura.kit.stores.InboxInsert
 import dev.barrelmaker.obscura.kit.stores.InboxStore
+import dev.barrelmaker.obscura.kit.stores.LocalDevice
+import dev.barrelmaker.obscura.kit.stores.StoredEntry
 import dev.barrelmaker.obscura.kit.stores.pragma
 import dev.barrelmaker.obscura.kit.stores.truncateWal
 import dev.barrelmaker.obscura.kit.wire.PayloadDisposition
@@ -47,12 +53,21 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import com.google.protobuf.InvalidProtocolBufferException
 import obscura.client.v1.Client.ClientMessage
+import obscura.client.v1.Client.EntrySnapshot
+import obscura.client.v1.Client.FriendListSync
+import obscura.client.v1.Client.HistorySnapshot
+import obscura.client.v1.Client.LinkBundle
+import obscura.client.v1.Client.LinkCode
+import obscura.client.v1.Client.SnapshotEntry
 import obscura.client.v1.appEntry
 import obscura.client.v1.friendAccept
 import obscura.client.v1.friendRequest
 import obscura.client.v1.typingSignal
 import org.signal.libsignal.protocol.DuplicateMessageException
+import org.signal.libsignal.protocol.IdentityKeyPair
+import org.signal.libsignal.protocol.ecc.Curve
 import xyz.obscura.server.contracts.ObscuraProtocol.Envelope
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -84,7 +99,12 @@ class ObscuraClient(
         db = ObscuraDatabase(sqlDriver)
     }
 
-    internal val signalStore = SignalStore(db).apply { onIdentityChanged = { logger.identityChanged(it) } }
+    internal val signalStore = SignalStore(db).apply {
+        onIdentityChanged = {
+            log("IDENTITY changed for $it; sessions with its devices dropped")
+            logger.identityChanged(it)
+        }
+    }
     private val friends = FriendStore(db)
     internal val devices = DeviceStore(db)
 
@@ -107,10 +127,7 @@ class ObscuraClient(
             onRejected = { credentials, generation -> endSession(revoke = false, expected = credentials, expectedGeneration = generation) },
         )
         authRef = auth
-        gateway = GatewayConnection(api, scope, beforeConnect = {
-            val self = requireFreshToken()
-            refreshOwnDirectory(self)
-        }, log = ::log)
+        gateway = GatewayConnection(api, scope, beforeConnect = { ownDevices(requireFreshToken()) }, log = ::log)
         messenger = Messenger(signalStore, api)
         sender = MessageSender(api, messenger, devices) { auth.credentials?.deviceId }
     }
@@ -135,11 +152,155 @@ class ObscuraClient(
     /** The last [DEBUG_LOG_SIZE] log lines, newest first. */
     fun getDebugLog(): List<String> = debugLog.toList()
 
+    /** Creates the account; this device becomes its primary with a new identity. */
     suspend fun register(username: String, password: String) = auth.register(username, password)
 
     suspend fun login(username: String, password: String): LoginScenario = auth.login(username, password)
 
-    suspend fun loginAndProvision(username: String, password: String) = auth.loginAndProvision(username, password)
+    /** After [LoginScenario.NO_DEVICES]: this device becomes the primary with a new identity. */
+    suspend fun provisionPrimary(username: String, password: String) = auth.provisionPrimary(username, password)
+
+    /**
+     * Deletes every device of the account on the server, then all local data. Peers see the next
+     * primary's new identity as an identity change. Call [provisionPrimary] next.
+     */
+    suspend fun resetAccount(username: String, password: String) {
+        auth.resetAccount(username, password)
+        wipeDevice()
+    }
+
+    /** Whether this device is the account's primary. False before provisioning. */
+    suspend fun isPrimary(): Boolean = devices.getLocal()?.isPrimary == true
+
+    /** Start linking this unprovisioned device. The ephemeral key lives only in the returned request. */
+    suspend fun beginLink(username: String, password: String, deviceName: String): LinkRequest {
+        if (deviceName.isBlank()) throw ObscuraError.InvalidArgument("deviceName must not be blank")
+        val userToken = auth.userToken(username, password)
+        val session = api.createLinkSession(userToken)
+        val ephemeral = Curve.generateKeyPair()
+        val code = LinkCode.newBuilder()
+            .setSessionId(session.id)
+            .setEphemeralPublicKey(ByteString.copyFrom(ephemeral.publicKey.serialize()))
+            .setDeviceName(deviceName)
+            .build()
+        return LinkRequest(LinkCrypto.encodeCode(code), session.id, session.expiresAt, ephemeral, userToken, username, deviceName)
+    }
+
+    /**
+     * Wait for the primary's approval, then provision this device with the account identity, import
+     * the friend list and history, and connect. Nothing is stored if provisioning fails.
+     */
+    suspend fun completeLink(request: LinkRequest) {
+        val bundle = try {
+            LinkBundle.parseFrom(LinkCrypto.open(awaitApproval(request), request.ephemeral.privateKey))
+        } catch (e: InvalidProtocolBufferException) {
+            throw ObscuraError.ProtocolViolation("Invalid link bundle", e)
+        }
+        if (bundle.userId != Jwt.userId(request.userToken)) throw ObscuraError.ProtocolViolation("Link bundle is for another account")
+        val identity = try {
+            IdentityKeyPair(bundle.identityKeyPair.toByteArray())
+        } catch (e: Exception) {
+            throw ObscuraError.ProtocolViolation("Invalid identity in link bundle", e)
+        }
+        val friendList = FriendList(bundle.friendListVersion, bundle.friendsList.map {
+            WireCodec.decodeFriend(it) ?: throw ObscuraError.ProtocolViolation("Invalid friend in link bundle")
+        })
+        auth.provision(
+            request.userToken, request.username, request.deviceName,
+            SignalKeyUtils.generateProvisioningKeys(identity), request.sessionId,
+        ) { friends.replaceInTransaction(friendList) }
+        if (bundle.hasHistory()) importHistory(bundle.history)
+        connect()
+    }
+
+    private suspend fun awaitApproval(request: LinkRequest): ByteArray {
+        while (System.currentTimeMillis() / 1000 < request.expiresAt) {
+            val body = try {
+                api.awaitLinkSession(request.userToken, request.sessionId, LINK_WAIT_S)
+            } catch (e: ObscuraError.Http) {
+                if (e.status == 404) throw ObscuraError.LinkFailed("Link session expired or unknown", e)
+                throw e
+            }
+            if (body != null) return body
+        }
+        throw ObscuraError.LinkFailed("Link session expired")
+    }
+
+    private suspend fun importHistory(history: HistorySnapshot) {
+        val plaintext = downloadDecryptedAttachment(history.attachmentId, history.contentKey.toByteArray(), history.nonce.toByteArray())
+        val snapshot = try {
+            EntrySnapshot.parseFrom(plaintext)
+        } catch (e: InvalidProtocolBufferException) {
+            throw ObscuraError.ProtocolViolation("Invalid history snapshot", e)
+        }
+        entries.import(snapshot.entriesList.map { it.model to StoredEntry(it.id, it.data.toStringUtf8(), it.sentAt, it.authorDeviceId) })
+    }
+
+    /** Primary only: approve the device showing [code] by sending it the account identity, friends and history. */
+    suspend fun approveLink(code: String) {
+        val self = requirePrimary()
+        val link = LinkCrypto.decodeCode(code)
+        val friendList = friends.list()
+        val bundle = LinkBundle.newBuilder()
+            .setIdentityKeyPair(ByteString.copyFrom(signalStore.identityKeyPair.serialize()))
+            .setUserId(self.userId)
+            .setUsername(self.username)
+            .setFriendListVersion(friendList.version)
+            .addAllFriends(friendList.friends.map(WireCodec::encodeFriend))
+        exportHistory()?.let { bundle.setHistory(it) }
+        val envelope = LinkCrypto.seal(bundle.build().toByteArray(), LinkCrypto.publicKey(link))
+        try {
+            api.approveLinkSession(link.sessionId, envelope.toByteArray())
+        } catch (e: ObscuraError.Http) {
+            if (e.status == 404) throw ObscuraError.LinkFailed("Link session expired or unknown", e)
+            throw e
+        }
+    }
+
+    /** The whole entry store as an encrypted attachment; null when it is empty. */
+    private suspend fun exportHistory(): HistorySnapshot? {
+        val all = entries.export().ifEmpty { return null }
+        val snapshot = EntrySnapshot.newBuilder().addAllEntries(all.map { (model, entry) ->
+            SnapshotEntry.newBuilder()
+                .setModel(model)
+                .setId(entry.id)
+                .setData(ByteString.copyFromUtf8(entry.data))
+                .setSentAt(entry.sentAt)
+                .setAuthorDeviceId(entry.authorDeviceId)
+                .build()
+        }).build()
+        val upload = uploadAttachment(snapshot.toByteArray())
+        return HistorySnapshot.newBuilder()
+            .setAttachmentId(upload.id)
+            .setContentKey(ByteString.copyFrom(upload.contentKey))
+            .setNonce(ByteString.copyFrom(upload.nonce))
+            .build()
+    }
+
+    /** The account's devices. */
+    suspend fun devices(): List<DeviceInfo> {
+        val self = requireFreshToken()
+        return ownDevices(self).map { DeviceInfo(it.deviceId, it.name, it.isPrimary, it.deviceId == self.deviceId) }
+    }
+
+    /**
+     * The primary unlinks any other device. A linked device unlinks only itself, then is wiped and
+     * logged out. The primary cannot unlink itself: [resetAccount] instead.
+     */
+    suspend fun unlinkDevice(deviceId: String) {
+        val self = requireFreshToken()
+        val primary = isPrimary()
+        when {
+            deviceId == self.deviceId && primary ->
+                throw ObscuraError.InvalidArgument("The primary device cannot unlink itself; reset the account instead")
+            deviceId == self.deviceId -> {
+                api.deleteDevice(deviceId)
+                wipeDevice()
+            }
+            !primary -> throw ObscuraError.NotPrimary()
+            else -> api.deleteDevice(deviceId)
+        }
+    }
 
     /**
      * Restore the stored session. True when restored; the client then connects if it can and stays
@@ -174,6 +335,7 @@ class ObscuraClient(
             db.transaction {
                 sqlDriver.pragma("PRAGMA secure_delete = ON")
                 db.friendQueries.deleteAll()
+                db.friendQueries.deleteVersion()
                 db.deviceQueries.deleteAll()
                 db.deviceQueries.deleteIdentity()
                 db.modelEntryQueries.deleteAllEntries()
@@ -263,26 +425,22 @@ class ObscuraClient(
             logger.databaseError("inbox", "contains", e.message ?: e.javaClass.simpleName)
             return
         }
-        var stage = "decrypt"
-        val (message, inserted, handledLocally) = try {
-            messenger.decryptAndCommit(senderDeviceId, envelope.message) { plaintext ->
-                stage = "directory"
+        var stage = "directory"
+        val stored = try {
+            messenger.decryptAndCommit(senderDeviceId, envelope.message, record = {
                 devices.addInTransaction(senderUserId, senderDeviceId)
+                stage = "decrypt"
+            }) { plaintext ->
                 val parsed = try {
                     ClientMessage.parseFrom(plaintext)
                 } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
                     // Its ratchet step is committed and it can never parse, so it is acked and dropped.
                     log("RECV invalid client message from $senderUserId: ${e.message}; dropped")
                     logger.log("dropped an unparseable client message from $senderUserId: ${e.message}")
-                    return@decryptAndCommit Triple(null, false, false)
+                    return@decryptAndCommit null
                 }
                 stage = "persist"
-                val inserted = if (payloadDisposition(parsed.payloadCase) == PayloadDisposition.INBOXED) {
-                    inbox.putInTransaction(inboxRecord(parsed, senderUserId, senderDeviceId, envelopeId))
-                } else false
-                val handledLocally = payloadDisposition(parsed.payloadCase) == PayloadDisposition.KIT_INTERNAL &&
-                    handleLocalFriendMessage(parsed, senderUserId)
-                Triple(parsed, inserted, handledLocally)
+                store(parsed, senderUserId, senderDeviceId, envelopeId)
             }
         } catch (e: CancellationException) {
             throw e
@@ -303,16 +461,12 @@ class ObscuraClient(
             return
         }
         try {
-            when {
-                message == null -> Unit
-                payloadDisposition(message.payloadCase) == PayloadDisposition.INBOXED -> wakeInbox(message, envelopeId, inserted)
-                !handledLocally -> route(message, senderUserId, senderDeviceId, envelopeId)
-            }
+            if (stored != null) followUp(stored, senderUserId, senderDeviceId, envelopeId)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("RECV ${message?.payloadCase?.name} not stored: ${e.message}")
-            logger.databaseError("receive", message?.payloadCase?.name ?: "UNKNOWN", e.message ?: e.javaClass.simpleName)
+            log("RECV ${stored?.message?.payloadCase?.name} not stored: ${e.message}")
+            logger.databaseError("receive", stored?.message?.payloadCase?.name ?: "UNKNOWN", e.message ?: e.javaClass.simpleName)
             return
         }
         replenishPreKeys { signalStore.getPreKeyCount() < PREKEY_MIN_COUNT }
@@ -336,20 +490,43 @@ class ObscuraClient(
         processedEnvelopes.value++
     }
 
-    /** Store or apply a decrypted message. Throws when it could not be stored. */
+    /** A decrypted message after its durable writes, and the network work that follows them. */
+    private class Stored(val message: ClientMessage, val inserted: Boolean = false, val friendFollowUp: FriendFollowUp = FriendFollowUp.NONE)
+
+    private enum class FriendFollowUp { NONE, SYNC, ACCEPT, REPLY_ACCEPT }
+
+    /** [store] then [followUp] for a decrypted message outside a decrypt transaction. Throws when it could not be stored. */
     internal suspend fun route(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String) {
-        when (payloadDisposition(message.payloadCase)) {
-            PayloadDisposition.INBOXED -> inboxMessage(message, senderUserId, senderDeviceId, envelopeId)
-            PayloadDisposition.KIT_INTERNAL ->
-                if (message.payloadCase == ClientMessage.PayloadCase.FRIEND_REQUEST) onFriendRequest(message, senderUserId)
-                else onFriendAccept(senderUserId)
-            PayloadDisposition.DROPPABLE -> onTypingSignal(message, senderUserId, senderDeviceId)
-        }
+        val stored = withContext(Dispatchers.IO) { db.transactionWithResult { store(message, senderUserId, senderDeviceId, envelopeId) } }
+        followUp(stored, senderUserId, senderDeviceId, envelopeId)
     }
 
-    private suspend fun inboxMessage(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String) {
-        val inserted = inbox.put(inboxRecord(message, senderUserId, senderDeviceId, envelopeId))
-        wakeInbox(message, envelopeId, inserted)
+    /** The local, synchronous part of handling a message; runs inside the receive transaction. */
+    private fun store(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String): Stored =
+        when (payloadDisposition(message.payloadCase)) {
+            PayloadDisposition.INBOXED -> Stored(message, inserted = inbox.putInTransaction(inboxRecord(message, senderUserId, senderDeviceId, envelopeId)))
+            PayloadDisposition.KIT_INTERNAL -> Stored(message, friendFollowUp = applyFriendMessage(message, senderUserId, senderDeviceId))
+            PayloadDisposition.DROPPABLE -> Stored(message)
+        }
+
+    /** Network-dependent work after the receive transaction committed. Throws when it failed. */
+    private suspend fun followUp(stored: Stored, senderUserId: String, senderDeviceId: String, envelopeId: String) {
+        val message = stored.message
+        when (payloadDisposition(message.payloadCase)) {
+            PayloadDisposition.INBOXED -> wakeInbox(message, envelopeId, stored.inserted)
+            PayloadDisposition.DROPPABLE -> onTypingSignal(message, senderUserId, senderDeviceId)
+            PayloadDisposition.KIT_INTERNAL -> when (stored.friendFollowUp) {
+                FriendFollowUp.NONE -> Unit
+                FriendFollowUp.SYNC -> syncFriendList()
+                // Crossed requests are mutual consent.
+                FriendFollowUp.ACCEPT -> acceptFriend(senderUserId)
+                FriendFollowUp.REPLY_ACCEPT -> {
+                    requireFreshToken()
+                    sendFriendAccept(senderUserId)
+                    log("FRIEND_REQUEST from known peer $senderUserId (accepted); unchanged, acceptance replied")
+                }
+            }
+        }
     }
 
     private fun inboxRecord(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String): InboxInsert {
@@ -374,47 +551,54 @@ class ObscuraClient(
         }
     }
 
-    private suspend fun onFriendRequest(message: ClientMessage, senderUserId: String) {
-        val existing = friends.get(senderUserId)
-        when (existing?.status) {
-            null -> friends.add(senderUserId, message.friendRequest.username, FriendStatus.PENDING_RECEIVED)
-            // Crossed requests are mutual consent.
-            FriendStatus.PENDING_SENT -> acceptFriend(senderUserId)
-            FriendStatus.ACCEPTED -> {
-                requireFreshToken()
-                sendFriendAccept(senderUserId)
-                log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged, acceptance replied")
-            }
-            else -> log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged")
+    /**
+     * The primary owns the friend list: it applies requests and accepts. A linked device leaves its
+     * list alone except for a newer [ClientMessage.PayloadCase.FRIEND_LIST_SYNC] from the primary.
+     */
+    private fun applyFriendMessage(message: ClientMessage, senderUserId: String, senderDeviceId: String): FriendFollowUp {
+        val local = devices.getLocalInTransaction()
+        if (message.payloadCase == ClientMessage.PayloadCase.FRIEND_LIST_SYNC) {
+            applyFriendListSync(message.friendListSync, local, senderUserId, senderDeviceId)
+            return FriendFollowUp.NONE
         }
-    }
-
-    private suspend fun onFriendAccept(senderUserId: String) {
-        if (friends.get(senderUserId)?.status == FriendStatus.PENDING_SENT) {
-            friends.updateStatus(senderUserId, FriendStatus.ACCEPTED)
+        if (local?.isPrimary != true) {
+            log("${message.payloadCase} from $senderUserId on a linked device; unchanged")
+            return FriendFollowUp.NONE
+        }
+        val existing = friends.getInTransaction(senderUserId)
+        return if (message.payloadCase == ClientMessage.PayloadCase.FRIEND_REQUEST) {
+            when (existing?.status) {
+                null -> {
+                    friends.addInTransaction(senderUserId, message.friendRequest.username, FriendStatus.PENDING_RECEIVED)
+                    FriendFollowUp.SYNC
+                }
+                FriendStatus.PENDING_SENT -> FriendFollowUp.ACCEPT
+                FriendStatus.ACCEPTED -> FriendFollowUp.REPLY_ACCEPT
+                FriendStatus.PENDING_RECEIVED -> {
+                    log("FRIEND_REQUEST from known peer $senderUserId (${existing.status.value}); unchanged")
+                    FriendFollowUp.NONE
+                }
+            }
+        } else if (existing?.status == FriendStatus.PENDING_SENT) {
+            friends.updateStatusInTransaction(senderUserId, FriendStatus.ACCEPTED)
+            FriendFollowUp.SYNC
         } else {
             log("FRIEND_ACCEPT from $senderUserId without a pending request; ignored")
+            FriendFollowUp.NONE
         }
     }
 
-    /** Only local transitions belong in the receive transaction; acceptance replies require HTTP. */
-    private fun handleLocalFriendMessage(message: ClientMessage, senderUserId: String): Boolean =
-        when (message.payloadCase) {
-            ClientMessage.PayloadCase.FRIEND_REQUEST ->
-                if (friends.getInTransaction(senderUserId) == null) {
-                    friends.addInTransaction(senderUserId, message.friendRequest.username, FriendStatus.PENDING_RECEIVED)
-                    true
-                } else false
-            ClientMessage.PayloadCase.FRIEND_ACCEPT -> {
-                if (friends.getInTransaction(senderUserId)?.status == FriendStatus.PENDING_SENT) {
-                    friends.updateStatusInTransaction(senderUserId, FriendStatus.ACCEPTED)
-                } else {
-                    log("FRIEND_ACCEPT from $senderUserId without a pending request; ignored")
-                }
-                true
-            }
-            else -> false
+    private fun applyFriendListSync(sync: FriendListSync, local: LocalDevice?, senderUserId: String, senderDeviceId: String) {
+        val records = sync.friendsList.map(WireCodec::decodeFriend)
+        val reason = when {
+            local == null || local.isPrimary -> "this device is not a linked device"
+            senderUserId != auth.credentials?.userId || senderDeviceId != local.primaryDeviceId -> "not from this account's primary"
+            java.lang.Long.compareUnsigned(sync.version, friends.versionInTransaction()) <= 0 -> "version ${sync.version} is not newer"
+            records.any { it == null } -> "it has an invalid friend record"
+            else -> return friends.replaceInTransaction(FriendList(sync.version, records.filterNotNull()))
         }
+        log("FRIEND_LIST_SYNC from $senderUserId ignored: $reason")
+    }
 
     private fun onTypingSignal(message: ClientMessage, senderUserId: String, senderDeviceId: String) {
         val signal = message.typingSignal
@@ -434,7 +618,7 @@ class ObscuraClient(
                 if (needed()) {
                     requireFreshToken()
                     val keys = SignalKeyUtils.generateMorePreKeys(signalStore, PREKEY_REPLENISH_COUNT)
-                    api.uploadDeviceKeys(keys)
+                    api.uploadPreKeys(keys)
                     signalStore.retireSignedPreKeys(keys.signedPreKey.keyId)
                 }
             } catch (e: CancellationException) {
@@ -517,15 +701,7 @@ class ObscuraClient(
         }
         val recipients = recipientUserIds.distinct().filter { it != self.userId }
             .flatMap { sender.send(it, message, acceptedDeviceIds) }
-        val ownIds = try {
-            fetchOwnDirectory()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            return SendReport(recipients, listOf(SubmissionResult(self.userId, null, SubmissionStatus.UNKNOWN, e.message ?: e.javaClass.simpleName)))
-        }
         val selfSync = try {
-            storeOwnDirectory(self, ownIds)
             sender.send(self.userId, message, acceptedDeviceIds)
         } catch (e: CancellationException) {
             throw e
@@ -580,14 +756,15 @@ class ObscuraClient(
         return FriendCode.encode(self.userId, self.username)
     }
 
-    /** Whitespace and soft hyphens (added by share sheets) are stripped before decoding. */
+    /** Primary only. Whitespace and soft hyphens (added by share sheets) are stripped before decoding. */
     suspend fun addFriendByCode(code: String) {
+        requirePrimary()
         val decoded = FriendCode.decode(code.filterNot { it.isWhitespace() || it == '­' })
         befriend(decoded.userId, decoded.username)
     }
 
     internal suspend fun befriend(targetUserId: String, targetUsername: String) {
-        val self = requireFreshToken()
+        val self = requirePrimary()
         if (targetUserId == self.userId) throw ObscuraError.InvalidArgument("Cannot befriend yourself")
         val existing = friends.prepareRequest(targetUserId, targetUsername)
         when (existing?.status) {
@@ -598,47 +775,74 @@ class ObscuraClient(
         try {
             sender.sendOrThrow(targetUserId, clientMessage { setFriendRequest(friendRequest { username = self.username }) })
         } catch (e: Exception) {
-            if (existing == null) withContext(NonCancellable) { friends.removePendingRequest(targetUserId) }
+            if (existing == null) withContext(NonCancellable) { if (friends.removePendingRequest(targetUserId)) syncFriendList() }
             throw e
         }
+        if (existing == null) syncFriendList()
     }
 
+    /** Primary only. */
     suspend fun acceptFriend(userId: String) {
-        requireFreshToken()
+        requirePrimary()
         if (friends.get(userId) == null) throw ObscuraError.InvalidArgument("No friend request from $userId")
         sendFriendAccept(userId)
-        friends.updateStatus(userId, FriendStatus.ACCEPTED)
+        if (friends.updateStatus(userId, FriendStatus.ACCEPTED)) syncFriendList()
     }
 
     private suspend fun sendFriendAccept(userId: String) =
         sender.sendOrThrow(userId, clientMessage { setFriendAccept(friendAccept {}) })
 
-    /** Forget [userId] and their devices locally. Nothing is sent to them. */
+    /** Primary only. Forget [userId] and their devices locally. Nothing is sent to them. */
     suspend fun removeFriend(userId: String) {
-        friends.remove(userId)
+        requirePrimary()
+        val removed = friends.remove(userId)
         devices.replace(userId, emptyList())
+        if (removed) syncFriendList()
     }
 
     suspend fun getFriends(): List<FriendData> = friends.getAll()
 
-    private suspend fun refreshOwnDirectory(self: Credentials) {
-        storeOwnDirectory(self, fetchOwnDirectory())
-    }
-
-    private suspend fun fetchOwnDirectory(): List<String> =
+    /**
+     * Send the whole friend list to this account's other devices after a change. Best effort and
+     * logged: every later change sends the whole list again.
+     */
+    private suspend fun syncFriendList() {
         try {
-            api.fetchOwnDeviceIds()
+            val self = requireFreshToken()
+            val list = friends.list()
+            val sync = FriendListSync.newBuilder().setVersion(list.version).addAllFriends(list.friends.map(WireCodec::encodeFriend))
+            sender.send(self.userId, clientMessage { setFriendListSync(sync) })
+                .filter { it.status != SubmissionStatus.ACCEPTED }
+                .forEach { log("FRIEND_LIST_SYNC v${list.version} not accepted by ${it.deviceId}: ${it.error}") }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("DIRECTORY own refresh failed: ${e.message}")
+            log("FRIEND_LIST_SYNC not sent: ${e.message}")
+        }
+    }
+
+    private suspend fun requirePrimary(): Credentials {
+        val self = requireFreshToken()
+        if (!isPrimary()) throw ObscuraError.NotPrimary()
+        return self
+    }
+
+    /**
+     * The account's devices from the server; this device's directory and primary follow them. A
+     * rejected token is checked with a refresh, which ends the session of an unlinked device.
+     */
+    private suspend fun ownDevices(self: Credentials): List<OwnDevice> {
+        val list = try {
+            api.fetchOwnDevices()
+        } catch (e: ObscuraError.Http) {
+            if (e.status == 401 && auth.refresh() == TokenStatus.REJECTED) throw ObscuraError.NotAuthenticated()
             throw e
         }
-
-    private suspend fun storeOwnDirectory(self: Credentials, ids: List<String>) {
         if (auth.credentials?.deviceId == self.deviceId && auth.credentials?.userId == self.userId) {
-            devices.replace(self.userId, ids)
+            devices.replace(self.userId, list.map { it.deviceId })
+            devices.setPrimary(list.singleOrNull { it.isPrimary }?.deviceId)
         }
+        return list
     }
 
     private fun clientMessage(build: ClientMessage.Builder.() -> Unit): ClientMessage =
@@ -657,6 +861,7 @@ class ObscuraClient(
         const val PREKEY_REPLENISH_COUNT = 50
         const val PUSH_IDLE_MS = 500L
         const val PUSH_RECENT_ACTIVITY_MS = 10_000L
+        const val LINK_WAIT_S = 25
     }
 }
 

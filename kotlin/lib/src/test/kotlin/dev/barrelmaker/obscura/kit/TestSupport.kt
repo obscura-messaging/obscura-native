@@ -1,8 +1,17 @@
 package dev.barrelmaker.obscura.kit
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import dev.barrelmaker.obscura.kit.crypto.SignalStore
+import dev.barrelmaker.obscura.kit.managers.ProvisioningKeys
+import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
+import org.json.JSONObject
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import dev.barrelmaker.obscura.kit.persistence.SessionStorage
+import dev.barrelmaker.obscura.kit.stores.LocalDevice
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.signal.libsignal.protocol.IdentityKeyPair
+import org.signal.libsignal.protocol.util.KeyHelper
 
 fun newInMemoryDatabase(): ObscuraDatabase {
     val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
@@ -34,14 +43,27 @@ fun storedSession(token: String = jwt(SELF_USER_ID, FAR_FUTURE), refreshToken: S
 ))
 
 /** Authenticated through the stored-session path, with no server to connect to. */
-suspend fun authenticatedClient(storage: MemoryStorage = storedSession()): ObscuraClient {
-    val client = sessionClient(apiUrl = "http://127.0.0.1:1", storage = storage)
+suspend fun authenticatedClient(storage: MemoryStorage = storedSession(), primaryDeviceId: String? = SELF_DEVICE_ID): ObscuraClient {
+    val client = sessionClient(apiUrl = "http://127.0.0.1:1", storage = storage, primaryDeviceId = primaryDeviceId)
     check(client.restorePersistedSession())
     return client
 }
 
-suspend fun sessionClient(apiUrl: String, storage: SessionStorage): ObscuraClient =
+/** A provisioned device ([SELF_DEVICE_ID] of [SELF_USER_ID]), primary unless [primaryDeviceId] says otherwise. */
+suspend fun sessionClient(apiUrl: String, storage: SessionStorage, primaryDeviceId: String? = SELF_DEVICE_ID): ObscuraClient =
     newClient(apiUrl, storage).also {
         it.signalStore.generateIdentity()
-        it.devices.storeIdentity(SELF_DEVICE_ID)
+        it.storeLocalDevice(primaryDeviceId)
     }
+
+suspend fun ObscuraClient.storeLocalDevice(primaryDeviceId: String? = SELF_DEVICE_ID, deviceId: String = SELF_DEVICE_ID, userId: String = SELF_USER_ID) =
+    withContext(Dispatchers.IO) { devices.storeLocalInTransaction(userId, LocalDevice(deviceId, primaryDeviceId)) }
+
+/** A new local identity, as provisioning installs one. */
+internal fun SignalStore.generateIdentity(): Pair<IdentityKeyPair, Int> =
+    (IdentityKeyPair.generate() to KeyHelper.generateRegistrationId(false)).also { installIdentity(it.first, it.second) }
+
+/** The prekey bundle the server would serve for a device provisioned with these keys. */
+internal fun ProvisioningKeys.bundle(deviceId: String): JSONObject = toDeviceKeys().toJson()
+    .put("deviceId", deviceId)
+    .put("oneTimePreKey", oneTimePreKeys.first().toApiJson().toJson())

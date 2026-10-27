@@ -37,6 +37,18 @@ class EntryStore internal constructor(
         queries.selectByModel(model, ::entry).executeAsList()
     }
 
+    /** Every entry of every model, without [StoredEntry.localMetadata]: what a history snapshot carries. */
+    internal suspend fun export(): List<Pair<String, StoredEntry>> = withContext(dispatcher) {
+        queries.selectAll { model, id, data, sentAt, authorDeviceId, _ -> model to StoredEntry(id, data, sentAt, authorDeviceId) }
+            .executeAsList()
+    }
+
+    internal suspend fun import(entries: List<Pair<String, StoredEntry>>) = withContext(dispatcher) {
+        db.transaction {
+            entries.forEach { (model, e) -> queries.insertEntry(model, e.id, e.data, e.sentAt, e.authorDeviceId, e.localMetadata) }
+        }
+    }
+
     /**
      * Delete entries so their contents cannot be recovered from the database files. `secure_delete`
      * is per connection and drivers may pool, so it is set inside the deleting transaction; the WAL

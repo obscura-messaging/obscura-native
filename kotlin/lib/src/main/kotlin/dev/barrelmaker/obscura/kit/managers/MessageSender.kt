@@ -4,23 +4,29 @@ import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.SubmissionResult
 import dev.barrelmaker.obscura.kit.SubmissionStatus
 import dev.barrelmaker.obscura.kit.messaging.Messenger
-import dev.barrelmaker.obscura.kit.messaging.Submitted
+import dev.barrelmaker.obscura.kit.messaging.PeerBundle
+import dev.barrelmaker.obscura.kit.messaging.SubmitOutcome
+import dev.barrelmaker.obscura.kit.messaging.parsePeerBundle
 import dev.barrelmaker.obscura.kit.messaging.parsePeerBundles
+import dev.barrelmaker.obscura.kit.messaging.requireConsistent
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.stores.DeviceStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import obscura.client.v1.Client.ClientMessage
+import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse.ErrorCode
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The one path every outgoing message takes to a user's devices. Devices come from [DeviceStore]
- * and existing sessions are reused. Fetching bundles consumes a one-time prekey on each of the
- * user's devices, so it happens only when the user has no listed devices, a target has no session,
- * or the server rejects a listed device as nonexistent (then once, retrying the server's list).
- * A device whose bundle cannot be processed is left out so it cannot cause a fetch on every send.
- * This device is never a target.
+ * The one path every outgoing message takes to a user's devices. The server queues a message for
+ * a user only when the request covers all of the user's current devices, so its response, not
+ * discovery, decides the targets: they start as the user's devices in [DeviceStore] (this device
+ * excluded), a mismatch adds the devices the server names, and an invalid device is removed.
+ *
+ * Fetching a bundle consumes a one-time prekey, so bundles are fetched only for a target without a
+ * session, one device at a time; a user absent from the directory is fetched whole. A bundle is
+ * never processed over an existing session.
  */
 internal class MessageSender(
     private val api: APIClient,
@@ -31,38 +37,40 @@ internal class MessageSender(
     // Sends to one user are serialized, so concurrent first contacts share one fetch.
     private val recipientLocks = ConcurrentHashMap<String, Mutex>()
 
-    /** Devices in [acceptedDeviceIds] are reported accepted without being sent again. */
+    /**
+     * Devices in [acceptedDeviceIds] are reported accepted without a request when they are all of
+     * the user's targets; otherwise every target is submitted, as the server requires.
+     */
     suspend fun send(
         userId: String,
         message: ClientMessage,
         acceptedDeviceIds: Set<String> = emptySet(),
     ): List<SubmissionResult> = recipientLocks.computeIfAbsent(userId) { Mutex() }.withLock {
-        val self = selfDeviceId()
-        val targetsOf = { ids: List<String> -> ids.filter { it != self } }
-        val listed = devices.devicesOf(userId)
-        val refreshed = listed.isEmpty() ||
-            targetsOf(listed).any { it !in acceptedDeviceIds && !messenger.hasSession(it) }
-        val resolved = if (refreshed) {
-            refresh(userId).getOrElse { return@withLock listOf(rejected(userId, null, it)) }
-        } else {
-            Resolved(listed, emptyList())
+        var mismatched: SubmitOutcome? = null
+        repeat(MAX_ROUNDS) {
+            val listed = targetsOf(userId)
+            if (listed.isNotEmpty() && listed.all { it in acceptedDeviceIds }) {
+                return@withLock listed.map { SubmissionResult(userId, it, SubmissionStatus.ACCEPTED) }
+            }
+            val targets = catching { sessionTargets(userId) }.getOrElse { return@withLock listOf(rejected(userId, it)) }
+                ?: return@repeat
+            if (targets.isEmpty()) {
+                return@withLock if (devices.devicesOf(userId).isEmpty()) listOf(rejected(userId, "No devices found")) else emptyList()
+            }
+            val submissions = catching { targets.map { messenger.prepareSubmission(it, message) } }
+                .getOrElse { return@withLock listOf(rejected(userId, it)) }
+            val outcome = messenger.submit(userId, submissions)
+            devices.remove(userId, outcome.submitted.filter { it.errorCode == ErrorCode.ERROR_CODE_INVALID_DEVICE }.map { it.result.deviceId!! })
+            val missing = outcome.missingDeviceIds ?: return@withLock outcome.submitted.map { it.result }
+            devices.add(userId, missing)
+            mismatched = outcome
         }
-        if (resolved.deviceIds.isEmpty() && resolved.failures.isEmpty()) {
-            return@withLock listOf(rejected(userId, null, "No devices found"))
-        }
-
-        val targets = targetsOf(resolved.deviceIds)
-        val submitted = submit(userId, targets, message, acceptedDeviceIds)
-        val firstPass = resolved.failures + submitted.map { it.result }
-        val missing = submitted.filter { it.deviceMissing }.mapNotNull { it.result.deviceId }.toSet()
-        if (refreshed || missing.isEmpty()) return@withLock firstPass
-
-        val fresh = refresh(userId).getOrElse { return@withLock firstPass }
-        val gone = missing - fresh.deviceIds.toSet()
-        val added = targetsOf(fresh.deviceIds) - targets.toSet()
-        (firstPass.filterNot { it.deviceId in gone } + fresh.failures +
-            submit(userId, added, message, acceptedDeviceIds).map { it.result })
-            .ifEmpty { listOf(rejected(userId, null, "No devices found")) }
+        mismatched?.let { outcome ->
+            outcome.submitted.map {
+                if (it.errorCode != ErrorCode.ERROR_CODE_DEVICE_MISMATCH) it.result
+                else it.result.copy(error = "Device mismatch after $MAX_ROUNDS rounds; missing ${outcome.missingDeviceIds}")
+            }
+        } ?: listOf(rejected(userId, "Sessions could not be established"))
     }
 
     /** [send], failing when no device accepted. For control messages that must reach the user. */
@@ -73,38 +81,46 @@ internal class MessageSender(
         }
     }
 
-    private data class Resolved(val deviceIds: List<String>, val failures: List<SubmissionResult>)
+    private suspend fun targetsOf(userId: String): List<String> = selfDeviceId().let { self -> devices.devicesOf(userId).filter { it != self } }
 
-    private suspend fun refresh(userId: String): Result<Resolved> = catching {
-        val bundles = try {
-            parsePeerBundles(api.fetchPreKeyBundles(userId))
-        } catch (e: ObscuraError.Http) {
-            if (e.status == 404) emptyList() else throw e
-        }
-        val failures = bundles.filter { it.deviceId != selfDeviceId() }.mapNotNull { peer ->
-            catching { messenger.establishSession(peer) }.exceptionOrNull()?.let { rejected(userId, peer.deviceId, it) }
-        }
-        val failed = failures.mapNotNull { it.deviceId }.toSet()
-        val deviceIds = bundles.map { it.deviceId }.filterNot { it in failed }
-        devices.replace(userId, deviceIds)
-        Resolved(deviceIds, failures)
+    /**
+     * The targets once each has a session, or null when building one dropped another's: a changed
+     * account identity drops every session with the user, and the next round fetches those.
+     */
+    private suspend fun sessionTargets(userId: String): List<String>? {
+        if (devices.devicesOf(userId).isEmpty()) establish(userId, fetchAll(userId))
+        establish(userId, targetsOf(userId).filter { !messenger.hasSession(it) }.mapNotNull { fetchOne(userId, it) })
+        val targets = targetsOf(userId)
+        return targets.takeIf { all -> all.all { messenger.hasSession(it) } }
     }
 
-    private suspend fun submit(
-        userId: String,
-        deviceIds: List<String>,
-        message: ClientMessage,
-        acceptedDeviceIds: Set<String>,
-    ): List<Submitted> {
-        val (alreadyAccepted, pending) = deviceIds.partition { it in acceptedDeviceIds }
-        val prepared = pending.map { it to catching { messenger.prepareSubmission(it, message) } }
-        return alreadyAccepted.map { Submitted(SubmissionResult(userId, it, SubmissionStatus.ACCEPTED)) } +
-            prepared.mapNotNull { (id, r) -> r.exceptionOrNull()?.let { Submitted(rejected(userId, id, it)) } } +
-            messenger.submit(userId, prepared.mapNotNull { it.second.getOrNull() })
+    private suspend fun fetchAll(userId: String): List<PeerBundle> = try {
+        parsePeerBundles(api.fetchPreKeyBundles(userId)).filter { it.deviceId != selfDeviceId() }
+    } catch (e: ObscuraError.Http) {
+        if (e.status == 404) emptyList() else throw e
     }
 
-    private fun rejected(userId: String, deviceId: String?, error: Any) = SubmissionResult(
-        userId, deviceId, SubmissionStatus.REJECTED,
+    /** Null, and the device forgotten, when the server no longer has it. */
+    private suspend fun fetchOne(userId: String, deviceId: String): PeerBundle? = try {
+        parsePeerBundle(api.fetchPreKeyBundle(userId, deviceId)).also {
+            if (it.deviceId != deviceId) throw ObscuraError.ProtocolViolation("Bundle for $deviceId names device ${it.deviceId}")
+        }
+    } catch (e: ObscuraError.Http) {
+        if (e.status != 404) throw e
+        devices.remove(userId, listOf(deviceId))
+        null
+    }
+
+    /** Bundles that disagree store nothing. The directory comes first: identity checks resolve through it. */
+    private suspend fun establish(userId: String, bundles: List<PeerBundle>) {
+        if (bundles.isEmpty()) return
+        requireConsistent(bundles)
+        devices.add(userId, bundles.map { it.deviceId })
+        bundles.forEach { messenger.establishSession(it) }
+    }
+
+    private fun rejected(userId: String, error: Any) = SubmissionResult(
+        userId, null, SubmissionStatus.REJECTED,
         if (error is Throwable) error.message ?: error.javaClass.simpleName else error.toString(),
     )
 
@@ -115,5 +131,9 @@ internal class MessageSender(
         throw e
     } catch (e: Exception) {
         Result.failure(e)
+    }
+
+    private companion object {
+        const val MAX_ROUNDS = 3
     }
 }

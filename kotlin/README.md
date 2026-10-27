@@ -54,16 +54,23 @@ failures and returns false. `logger` remains replaceable after construction.
 ## Kotlin surface
 
 ```kotlin
-client.register(username, password)
+client.register(username, password)          // this device becomes the primary
 when (client.login(username, password)) {
     LoginScenario.EXISTING_DEVICE -> client.connect()
-    LoginScenario.NEW_DEVICE -> client.loginAndProvision(username, password)
-    LoginScenario.DEVICE_MISMATCH -> {
-        client.wipeDevice()
-        client.loginAndProvision(username, password)
+    LoginScenario.LINK_REQUIRED -> {
+        val request = client.beginLink(username, password, deviceName)
+        showQrCode(request.code)                // the primary calls approveLink(code)
+        client.completeLink(request)            // suspends until approved; connects
     }
+    LoginScenario.NO_DEVICES -> client.provisionPrimary(username, password)
+    LoginScenario.DEVICE_MISMATCH -> client.wipeDevice() // then log in again
     LoginScenario.INVALID_CREDENTIALS -> showLoginError()
 }
+client.approveLink(code)        // primary only
+client.devices()                // List<DeviceInfo>
+client.unlinkDevice(deviceId)
+client.isPrimary()              // Boolean
+client.resetAccount(username, password) // then provisionPrimary
 client.restorePersistedSession() // Boolean
 client.connect()                // suspends until open
 client.disconnect()             // non-suspending
@@ -106,8 +113,9 @@ from the inbox. `getDebugLog()` returns recent log lines.
 
 The purposeful error subclasses of `ObscuraError` are `NotAuthenticated`,
 `InvalidArgument`, `InvalidFriendCode`, `Http`, `ConnectionFailed`,
-`SendFailed`, `ProtocolViolation`, and `StorageFailed`. Use `code` for bridge
-mapping, rather than matching exception messages.
+`SendFailed`, `ProtocolViolation`, `StorageFailed`, `NotPrimary`, and
+`LinkFailed`. Use `code` for bridge mapping, rather than matching exception
+messages.
 
 ## Code map and testing
 
@@ -115,12 +123,12 @@ mapping, rather than matching exception messages.
 |---|---|
 | `ObscuraClient.kt` | Facade, receive path and push drain |
 | `managers/AuthManager.kt` | Credentials, secure storage and refresh lifecycle |
-| `managers/MessageSender.kt` | Serialized per-user fanout and session bootstrap |
+| `managers/MessageSender.kt` | Serialized per-user complete-delivery fanout and session bootstrap |
 | `network/` | REST and gateway; gateway owns reconnection |
 | `messaging/Messenger.kt` | Confined Signal operations; HTTP runs outside confinement |
 | `stores/` | SQLDelight-backed inbox, entries, friends and device directory |
 | `wire/` | Wire mappings, disposition and typing |
-| `crypto/` | Signal persistence, attachment encryption and UUID encoding |
+| `crypto/` | Signal persistence, attachment and link encryption, UUID encoding |
 
 - Use `runBlocking`, not virtual-time `runTest`, for real HTTP/WebSocket I/O.
 - JUnit 5 test methods must return `Unit`; an expression ending with a
