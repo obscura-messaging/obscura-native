@@ -56,6 +56,45 @@ final class MultiDeviceTests: XCTestCase {
         }
     }
 
+    func testAConnectedPrimaryReachesADeviceLinkedAfterItsLastConnect() async throws {
+        let alice = try await TestUser.register()
+        let bob = try await TestUser.register()
+        try await alice.client.connect()
+        try await bob.client.connect()
+        let laptop = try await TestUser.link(to: alice, name: "laptop")
+        let known = try await alice.client.directory.deviceIds(of: alice.userId)
+        XCTAssertEqual(known, [alice.deviceId], "the primary has not seen the laptop")
+
+        try await alice.client.addFriendByCode(bob.client.friendCode())
+        try await laptop.waitForFriend(bob, .pendingSent)
+
+        let report = try await alice.send("self-sync-after-link", to: [])
+        XCTAssertEqual(report.selfSync.map(\.deviceId), [laptop.deviceId])
+        XCTAssertEqual(report.selfSync.map(\.status), [.accepted])
+        _ = try await laptop.waitForEntry("self-sync-after-link")
+        XCTAssertEqual(alice.client.connectionState, .connected)
+    }
+
+    func testASendRightAfterAPeerResetReachesTheNewPrimaryInThatSend() async throws {
+        let (alice, bob) = try await TestUser.friends()
+        try await bob.send("warm", to: [alice])
+        _ = try await alice.waitForEntry("warm")
+
+        try await alice.client.resetAccount(alice.username, TestServer.password)
+        try await alice.client.provisionPrimary(alice.username, TestServer.password)
+        let deviceId = await alice.client.deviceId
+        let newDeviceId = try XCTUnwrap(deviceId)
+
+        let report = try await bob.send("right-after-reset", to: [alice])
+
+        XCTAssertEqual(report.recipients.map(\.deviceId), [newDeviceId])
+        XCTAssertEqual(report.recipients.map(\.status), [.accepted])
+        let known = try await bob.client.directory.deviceIds(of: alice.userId)
+        XCTAssertEqual(known, [newDeviceId])
+        try await alice.client.connect()
+        _ = try await alice.waitForEntry("right-after-reset")
+    }
+
     func testADeviceLinkedMidConversationIsReachedThroughTheMismatchResponse() async throws {
         let (alice, bob) = try await TestUser.friends()
         try await alice.send("before-link", to: [bob])
