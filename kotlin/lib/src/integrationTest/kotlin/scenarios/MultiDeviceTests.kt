@@ -55,8 +55,6 @@ class MultiDeviceTests {
         becomeFriends(alice, bob)
         val tablet = linkDevice(alice, "Alice Tablet")
         assertEquals(listOf(bob.userId), tablet.getFriends().map { it.userId }, "the link carries the friend list")
-        // The primary learns of the linked device from the device list, as an app showing it does.
-        assertEquals(2, alice.devices().size)
 
         alice.addFriendByCode(carol.friendCode())
         eventually(message = "pending request synced") { tablet.friendStatus(carol.userId!!) == FriendStatus.PENDING_SENT }
@@ -68,6 +66,24 @@ class MultiDeviceTests {
         eventually(message = "removal synced") { tablet.friendStatus(bob.userId!!) == null }
         assertEquals(alice.getFriends(), tablet.getFriends())
         alice.disconnect(); bob.disconnect(); carol.disconnect(); tablet.disconnect()
+    }
+
+    @Test
+    fun `a connected primary reaches a device linked after it on its next self sync`() = runBlocking {
+        requireServer()
+        val alice = registerAndConnect("late_alice")
+        val bob = registerAndConnect("late_bob")
+        becomeFriends(alice, bob)
+        assertEquals(listOf(alice.deviceId), alice.devices.devicesOf(alice.userId!!))
+
+        val tablet = linkDevice(alice, "Alice Tablet")
+        val report = sendText(alice, bob, "after linking")
+
+        assertEquals(listOf(tablet.deviceId), report.selfSync.map { it.deviceId })
+        assertEquals(SubmissionStatus.ACCEPTED, report.selfSync.single().status)
+        assertEquals(alice.deviceId, tablet.awaitContent("after linking").senderDeviceId)
+        bob.awaitContent("after linking")
+        alice.disconnect(); bob.disconnect(); tablet.disconnect()
     }
 
     @Test
@@ -151,10 +167,10 @@ class MultiDeviceTests {
         alice.provisionPrimary(username, TEST_PASSWORD)
         alice.connect()
 
-        // The deleted device is rejected and forgotten; the next send finds the new primary.
-        assertEquals(SubmissionStatus.REJECTED, sendText(bob, alice, "to the deleted device").recipients.single().status)
+        // The old device is invalid and the mismatch names the new primary, all in this one send.
         val report = sendText(bob, alice, "after reset")
         assertEquals(listOf(alice.deviceId), report.recipients.map { it.deviceId })
+        assertEquals(listOf(alice.deviceId), bob.devices.devicesOf(alice.userId!!))
         assertEquals(SubmissionStatus.ACCEPTED, report.recipients.single().status)
         alice.awaitContent("after reset")
         assertEquals(listOf(alice.userId), changes.users)
