@@ -1,11 +1,15 @@
 package scenarios
 
 import dev.barrelmaker.obscura.kit.AuthState
+import dev.barrelmaker.obscura.kit.NoOpLogger
 import dev.barrelmaker.obscura.kit.ObscuraClient
 import dev.barrelmaker.obscura.kit.ObscuraConfig
+import dev.barrelmaker.obscura.kit.ObscuraLogger
 import dev.barrelmaker.obscura.kit.persistence.SessionStorage
 import dev.barrelmaker.obscura.kit.stores.FriendStatus
 import dev.barrelmaker.obscura.kit.stores.InboxRecord
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -48,6 +52,25 @@ suspend fun registerAndConnect(prefix: String, client: ObscuraClient = newClient
     assertEquals(AuthState.AUTHENTICATED, client.authState.value)
     client.connect()
     return client
+}
+
+/**
+ * Link a new device to [primary]'s account the way a user does: the new device shows its code, the
+ * primary approves the code string, the new device completes and connects.
+ */
+suspend fun linkDevice(primary: ObscuraClient, deviceName: String, client: ObscuraClient = newClient(deviceName = deviceName)): ObscuraClient =
+    coroutineScope {
+        val request = client.beginLink(primary.username!!, TEST_PASSWORD, deviceName)
+        val completed = async { client.completeLink(request) }
+        primary.approveLink(request.code)
+        completed.await()
+        client
+    }
+
+/** Records identity changes; everything else is dropped. */
+class IdentityChanges : ObscuraLogger by NoOpLogger {
+    val users: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+    override fun identityChanged(userId: String) { users += userId }
 }
 
 /** Poll [condition] until it holds or [timeoutMs] passes. */

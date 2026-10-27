@@ -29,6 +29,7 @@ class AuthTests {
         assertEquals(setOf("token", "refreshToken", "userId", "deviceId", "username"), storage.data!!.keys)
         assertEquals(client.deviceId, storage.data!!["deviceId"])
 
+        assertTrue(client.isPrimary())
         val userId = client.userId
         val deviceId = client.deviceId
         assertEquals(LoginScenario.EXISTING_DEVICE, client.login(username, TEST_PASSWORD))
@@ -37,13 +38,13 @@ class AuthTests {
     }
 
     @Test
-    fun `login without a local device leaves the client logged out`() = runBlocking {
+    fun `login without a local device to an account with devices requires linking and stays logged out`() = runBlocking {
         requireServer()
         val username = uniqueName("login_out")
         newClient().register(username, TEST_PASSWORD)
 
         val fresh = newClient()
-        assertEquals(LoginScenario.NEW_DEVICE, fresh.login(username, TEST_PASSWORD))
+        assertEquals(LoginScenario.LINK_REQUIRED, fresh.login(username, TEST_PASSWORD))
         assertEquals(LoginScenario.INVALID_CREDENTIALS, fresh.login(username, TEST_PASSWORD + "x"))
         assertEquals(LoginScenario.INVALID_CREDENTIALS, fresh.login(uniqueName("login_none"), TEST_PASSWORD))
         assertEquals(AuthState.LOGGED_OUT, fresh.authState.value)
@@ -51,17 +52,21 @@ class AuthTests {
     }
 
     @Test
-    fun `loginAndProvision adds an authenticated second device`() = runBlocking {
+    fun `a linked device is an authenticated second device of the account and not primary`() = runBlocking {
         requireServer()
-        val first = registerAndConnect("lap")
-        val second = newClient(deviceName = "Second")
-
-        second.loginAndProvision(first.username!!, TEST_PASSWORD)
-        second.connect()
+        val first = registerAndConnect("link")
+        val second = linkDevice(first, "Second")
 
         assertEquals(AuthState.AUTHENTICATED, second.authState.value)
+        assertEquals(ConnectionState.CONNECTED, second.connectionState.value)
         assertEquals(first.userId, second.userId)
         assertNotEquals(first.deviceId, second.deviceId)
+        assertFalse(second.isPrimary())
+        assertTrue(first.isPrimary())
+        assertEquals(setOf(first.deviceId to true, second.deviceId to false),
+            second.devices().map { it.deviceId to it.isPrimary }.toSet())
+        assertEquals(listOf(second.deviceId), second.devices().filter { it.isThisDevice }.map { it.deviceId })
+        assertEquals(LoginScenario.EXISTING_DEVICE, second.login(first.username!!, TEST_PASSWORD))
         first.disconnect(); second.disconnect()
     }
 
@@ -123,16 +128,23 @@ class AuthTests {
     }
 
     @Test
-    fun `after a wipe the account needs a new device`() = runBlocking {
+    fun `a lost primary means a reset, after which the next device is a new primary`() = runBlocking {
         requireServer()
         val client = registerAndConnect("wipe")
         val username = client.username!!
+        val oldIdentity = client.signalStore.identityKeyPair.publicKey
 
         client.wipeDevice()
 
         assertEquals(AuthState.LOGGED_OUT, client.authState.value)
-        assertEquals(LoginScenario.NEW_DEVICE, client.login(username, TEST_PASSWORD))
-        client.loginAndProvision(username, TEST_PASSWORD)
+        assertEquals(LoginScenario.LINK_REQUIRED, client.login(username, TEST_PASSWORD))
+        client.resetAccount(username, TEST_PASSWORD)
+        assertEquals(LoginScenario.NO_DEVICES, client.login(username, TEST_PASSWORD))
+        client.provisionPrimary(username, TEST_PASSWORD)
         assertEquals(AuthState.AUTHENTICATED, client.authState.value)
+        assertTrue(client.isPrimary())
+        assertNotEquals(oldIdentity, client.signalStore.identityKeyPair.publicKey)
+        client.connect()
+        client.disconnect()
     }
 }
