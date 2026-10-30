@@ -253,12 +253,20 @@ struct SignalKeys {
                                       privateKey: privateKey, signature: signature)
     }
 
-    func deviceRequest(name: String, linkSessionId: String?) -> CreateDeviceRequest {
+    func accountRequest(username: String, password: String, name: String) -> AccountProvisionRequest {
+        let keys = Self.upload(signedPreKey: signedPreKey, preKeys: preKeys)
+        return AccountProvisionRequest(
+            username: username, password: password, name: name,
+            identityKey: Data(identity.publicKey.serialize()).base64EncodedString(),
+            registrationId: Int(registrationId), signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys)
+    }
+
+    func deviceRequest(name: String, linkSessionId: String) -> CreateDeviceRequest {
         let keys = Self.upload(signedPreKey: signedPreKey, preKeys: preKeys)
         return CreateDeviceRequest(
-            name: name, identityKey: Data(identity.publicKey.serialize()).base64EncodedString(),
-            registrationId: Int(registrationId), signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys,
-            linkSessionId: linkSessionId)
+            linkSessionId: linkSessionId, name: name,
+            identityKey: Data(identity.publicKey.serialize()).base64EncodedString(),
+            registrationId: Int(registrationId), signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys)
     }
 
     static func upload(signedPreKey: SignedPreKeyRecord, preKeys: [PreKeyRecord]) -> PreKeysUpload {

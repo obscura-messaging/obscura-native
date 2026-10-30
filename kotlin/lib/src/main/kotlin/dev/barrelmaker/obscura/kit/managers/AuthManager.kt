@@ -6,7 +6,9 @@ import dev.barrelmaker.obscura.kit.ObscuraError
 import dev.barrelmaker.obscura.kit.ObscuraLogger
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.network.APIClient
+import dev.barrelmaker.obscura.kit.network.AuthResponse
 import dev.barrelmaker.obscura.kit.network.Jwt
+import dev.barrelmaker.obscura.kit.network.LinkSession
 import dev.barrelmaker.obscura.kit.network.isUuid
 import dev.barrelmaker.obscura.kit.persistence.SessionStorage
 import dev.barrelmaker.obscura.kit.stores.DeviceStore
@@ -78,10 +80,13 @@ internal class AuthManager(
     @Volatile var credentials: Credentials? = null
         private set
 
+    private data class CachedLinkSession(val username: String, val password: String, val session: LinkSession)
+
     private val lock = Any()
     private var refreshInFlight: Deferred<TokenStatus>? = null
     private var refreshLoop: Job? = null
     private var generation = 0L
+    private var pendingLinkSession: CachedLinkSession? = null
     // Written only inside the single in-flight refresh.
     @Volatile private var refreshFailures = 0
 
@@ -91,42 +96,60 @@ internal class AuthManager(
     suspend fun register(username: String, password: String) {
         validateLogin(username, password)
         requireUnprovisioned()
-        provision(api.registerUser(username, password), username, deviceName, newIdentityKeys(), linkSessionId = null)
+        val keys = newIdentityKeys()
+        install(api.registerUser(username, password, deviceName, keys.toDeviceKeys()), username, keys, isPrimary = true)
     }
 
-    /** For [LoginScenario.NO_DEVICES]: this device becomes the primary, with a new identity. */
-    suspend fun provisionPrimary(username: String, password: String) {
+    /**
+     * Resets the account and provisions this device as its new primary on the server. The caller
+     * wipes old local data via [beforeInstall] once the server has accepted the reset, before the
+     * new primary keys and session are installed.
+     */
+    suspend fun resetAccount(username: String, password: String, beforeInstall: suspend () -> Unit) {
+        validateLogin(username, password)
+        val keys = newIdentityKeys()
+        val response = api.resetAccount(username, password, deviceName, keys.toDeviceKeys())
+        val (deviceId, refreshToken, userId) = validateProvisionResponse(response, expectedUserId = null)
+        beforeInstall()
+        commitInstall(response.token, refreshToken, userId, deviceId, username, keys, isPrimary = true)
+    }
+
+    /** Consumes the link session cached by [login], or creates a new one if none is cached. */
+    suspend fun takeOrCreateLinkSession(username: String, password: String): LinkSession {
         validateLogin(username, password)
         requireUnprovisioned()
-        provision(api.login(username, password, null).token, username, deviceName, newIdentityKeys(), linkSessionId = null)
+        val now = System.currentTimeMillis() / 1000
+        synchronized(lock) {
+            val cached = pendingLinkSession
+            pendingLinkSession = null
+            if (cached != null && cached.username == username && cached.password == password && cached.session.expiresAt > now + 30) {
+                return cached.session
+            }
+        }
+        return api.createLinkSession(username, password)
     }
 
-    /** A user-scoped token for linking this unprovisioned device. Never persisted. */
-    suspend fun userToken(username: String, password: String): String {
-        validateLogin(username, password)
-        requireUnprovisioned()
-        return api.login(username, password, null).token
-    }
-
-    suspend fun resetAccount(username: String, password: String) {
-        validateLogin(username, password)
-        api.resetAccount(username, password)
-    }
-
-    /** Without a stored device, a user-scoped token lists the account's devices to choose link or provision. */
+    /** Without a stored device, creates a link session to verify credentials and prepare for [beginLink]. */
     suspend fun login(username: String, password: String): LoginScenario {
         validateLogin(username, password)
         val localDeviceId = devices.getIdentity()
+        if (localDeviceId == null) {
+            val session = try {
+                api.createLinkSession(username, password)
+            } catch (e: ObscuraError.Http) {
+                if (e.status in REJECTION_STATUSES) return LoginScenario.INVALID_CREDENTIALS
+                throw e
+            }
+            synchronized(lock) { pendingLinkSession = CachedLinkSession(username, password, session) }
+            return LoginScenario.LINK_REQUIRED
+        }
         val response = try {
             api.login(username, password, localDeviceId)
         } catch (e: ObscuraError.Http) {
             if (e.status in REJECTION_STATUSES) return LoginScenario.INVALID_CREDENTIALS
+            if (e.status == 409) return LoginScenario.DEVICE_MISMATCH
             throw e
         }
-        if (localDeviceId == null) {
-            return if (api.fetchOwnDevices(response.token).isEmpty()) LoginScenario.NO_DEVICES else LoginScenario.LINK_REQUIRED
-        }
-        // The server answers a device id that is not the account's with a user-scoped token.
         if (response.deviceId != localDeviceId || !signalStore.hasIdentity()) return LoginScenario.DEVICE_MISMATCH
         val refreshToken = response.refreshToken ?: throw ObscuraError.ProtocolViolation("Device login returned no refresh token")
         start(Credentials(response.token, refreshToken, Jwt.userId(response.token), localDeviceId, username))
@@ -134,31 +157,60 @@ internal class AuthManager(
     }
 
     /**
-     * Create this device on the server, then store its keys, identity, own directory entry and
-     * [persist]'s writes in one transaction and start the session. A failure before the server
-     * accepts the device stores nothing. A device created without [linkSessionId] is the primary.
+     * Create this linked device on the server, then store its keys, identity, own directory entry
+     * and [persist]'s writes in one transaction and start the session. A failure before the server
+     * accepts the device stores nothing.
      */
-    suspend fun provision(
-        userToken: String,
+    suspend fun provisionLinked(
+        expectedUserId: String,
         username: String,
         name: String,
         keys: ProvisioningKeys,
-        linkSessionId: String?,
+        linkSessionId: String,
         persist: () -> Unit = {},
     ) {
-        val response = api.provisionDevice(userToken, name, keys.toDeviceKeys(), linkSessionId)
+        val response = api.provisionDevice(name, keys.toDeviceKeys(), linkSessionId)
+        install(response, username, keys, isPrimary = false, expectedUserId = expectedUserId, persist = persist)
+    }
+
+    private suspend fun install(
+        response: AuthResponse,
+        username: String,
+        keys: ProvisioningKeys,
+        isPrimary: Boolean,
+        expectedUserId: String? = null,
+        persist: () -> Unit = {},
+    ) {
+        val (deviceId, refreshToken, userId) = validateProvisionResponse(response, expectedUserId)
+        commitInstall(response.token, refreshToken, userId, deviceId, username, keys, isPrimary, persist)
+    }
+
+    private fun validateProvisionResponse(response: AuthResponse, expectedUserId: String?): Triple<String, String, String> {
         val deviceId = response.deviceId?.takeIf(::isUuid) ?: throw ObscuraError.ProtocolViolation("Provisioning returned no valid device id")
         val refreshToken = response.refreshToken ?: throw ObscuraError.ProtocolViolation("Provisioning returned no refresh token")
         val userId = Jwt.userId(response.token)
-        if (userId != Jwt.userId(userToken)) throw ObscuraError.ProtocolViolation("Provisioning returned another account")
+        if (expectedUserId != null && userId != expectedUserId) throw ObscuraError.ProtocolViolation("Provisioning returned another account")
+        return Triple(deviceId, refreshToken, userId)
+    }
+
+    private suspend fun commitInstall(
+        token: String,
+        refreshToken: String,
+        userId: String,
+        deviceId: String,
+        username: String,
+        keys: ProvisioningKeys,
+        isPrimary: Boolean,
+        persist: () -> Unit = {},
+    ) {
         withContext(Dispatchers.IO) {
             signalStore.transaction {
                 SignalKeyUtils.install(signalStore, keys)
-                devices.storeLocalInTransaction(userId, LocalDevice(deviceId, primaryDeviceId = deviceId.takeIf { linkSessionId == null }))
+                devices.storeLocalInTransaction(userId, LocalDevice(deviceId, primaryDeviceId = deviceId.takeIf { isPrimary }))
                 persist()
             }
         }
-        start(Credentials(response.token, refreshToken, userId, deviceId, username))
+        start(Credentials(token, refreshToken, userId, deviceId, username))
     }
 
     private fun newIdentityKeys() = SignalKeyUtils.generateProvisioningKeys(IdentityKeyPair.generate())
@@ -191,6 +243,7 @@ internal class AuthManager(
         ) return null
         val previous = credentials
         generation++
+        pendingLinkSession = null
         refreshLoop?.cancel()
         refreshLoop = null
         if (expected == null) refreshInFlight?.cancel()
@@ -258,6 +311,7 @@ internal class AuthManager(
         synchronized(lock) {
             stored("save") { storage.save(new.toMap()) }
             generation++
+            pendingLinkSession = null
             refreshInFlight?.cancel()
             refreshInFlight = null
             credentials = new

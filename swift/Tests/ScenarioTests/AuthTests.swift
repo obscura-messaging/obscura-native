@@ -73,17 +73,12 @@ final class AuthTests: XCTestCase {
         await laptop.client.disconnect()
     }
 
-    func testAResetAccountHasNoDevicesAndItsNextPrimaryHasANewIdentity() async throws {
+    func testAResetAccountProvisionsANewPrimaryWithANewIdentity() async throws {
         let alice = try await TestUser.register()
         let oldIdentity = try alice.client.signalStore.identityKeyPair(context: NullContext()).serialize()
 
         try await alice.client.resetAccount(alice.username, TestServer.password)
 
-        XCTAssertEqual(alice.client.authState, .loggedOut)
-        XCTAssertFalse(try alice.client.signalStore.hasIdentity())
-        let scenario = try await alice.client.login(alice.username, TestServer.password)
-        XCTAssertEqual(scenario, .noDevices)
-        try await alice.client.provisionPrimary(alice.username, TestServer.password)
         XCTAssertEqual(alice.client.authState, .authenticated)
         let isPrimary = try await alice.client.isPrimary
         XCTAssertTrue(isPrimary)

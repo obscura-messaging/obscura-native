@@ -12,10 +12,8 @@ public enum AuthState: String, Sendable {
 public enum LoginScenario: Sendable {
     /// Authenticated as the stored local device.
     case existingDevice
-    /// No local device, and the account has devices: link this device with `beginLink`.
+    /// No local device: link this device with `beginLink`.
     case linkRequired
-    /// No local device, and the account has none (new or reset): call `provisionPrimary`.
-    case noDevices
     /// The stored local device no longer belongs to the account (unlinked or reset): call `wipeDevice`,
     /// then log in again.
     case deviceMismatch
@@ -81,6 +79,7 @@ public actor ObscuraClient {
     var session: Session?
     var sender: MessageSender?
     var typingSentAt: [String: Date] = [:]
+    var pendingLinkSession: (username: String, password: String, session: LinkSessionResponse)?
 
     var sessionGeneration = 0
     var refreshTask: Task<TokenStatus, Error>?
@@ -172,43 +171,46 @@ public actor ObscuraClient {
     /// Creates the account and provisions this device as its primary.
     public func register(_ username: String, _ password: String) async throws {
         try await requireUnprovisionedDevice()
-        let account = try await api.registerUser(username, password)
-        try await provisionPrimary(username: username, userToken: account.token)
+        let keys = try SignalKeys.generate()
+        let response = try await api.registerUser(keys.accountRequest(username: username, password: password, name: deviceName))
+        try await installPrimary(try session(response, username: username), keys: keys)
     }
 
     /// Only `.existingDevice` changes the client's state.
     public func login(_ username: String, _ password: String) async throws -> LoginScenario {
-        let localDeviceId = try await directory.localDeviceId()
-        let usable = try localDeviceId != nil && signalStore.hasIdentity()
+        guard let localDeviceId = try await directory.localDeviceId() else {
+            let linkSession: LinkSessionResponse
+            do {
+                linkSession = try await api.createLinkSession(username, password)
+            } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
+                return .invalidCredentials
+            }
+            pendingLinkSession = (username, password, linkSession)
+            return .linkRequired
+        }
+        let usable = try signalStore.hasIdentity()
         let response: AuthResponse
         do {
-            response = try await api.login(username, password, deviceId: usable ? localDeviceId : nil)
+            response = try await api.login(username, password, deviceId: localDeviceId)
         } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
             return .invalidCredentials
+        } catch ObscuraError.http(status: 409, _) {
+            return .deviceMismatch
         }
-        if let localDeviceId {
-            // The server answers a device that is not the account's with a user-scoped token, not an error.
-            guard usable, APIClient.deviceId(response.token) == localDeviceId else { return .deviceMismatch }
-            try begin(session(response, username: username))
-            return .existingDevice
-        }
-        return try await api.listDevices(bearer: response.token).isEmpty ? .noDevices : .linkRequired
+        guard usable, APIClient.deviceId(response.token) == localDeviceId else { return .deviceMismatch }
+        try begin(session(response, username: username))
+        return .existingDevice
     }
 
-    /// For `.noDevices`: provisions this device as the primary of an account without devices, with a new
-    /// identity.
-    public func provisionPrimary(_ username: String, _ password: String) async throws {
-        try await requireUnprovisionedDevice()
-        let account = try await api.login(username, password, deviceId: nil)
-        try await provisionPrimary(username: username, userToken: account.token)
-    }
-
-    /// Deletes every device of the account and its identity on the server, then this device's local
-    /// data. The next device provisioned, with `provisionPrimary`, is the new primary.
+    /// Deletes every device of the account and its identity on the server, wipes this device's local
+    /// data, and provisions this device as the new primary with a new identity.
     public func resetAccount(_ username: String, _ password: String) async throws {
-        try await api.resetAccount(username, password)
+        let keys = try SignalKeys.generate()
+        let response = try await api.resetAccount(keys.accountRequest(username: username, password: password, name: deviceName))
+        let newSession = try session(response, username: username)
         try await signOut(revoking: false)
         try await ObscuraDatabase.wipe(db)
+        try await installPrimary(newSession, keys: keys)
     }
 
     func requireUnprovisionedDevice() async throws {
@@ -222,10 +224,7 @@ public actor ObscuraClient {
         guard try await directory.isPrimary() else { throw ObscuraError.notPrimary }
     }
 
-    private func provisionPrimary(username: String, userToken: String) async throws {
-        let keys = try SignalKeys.generate()
-        let response = try await api.createDevice(keys.deviceRequest(name: deviceName, linkSessionId: nil), bearer: userToken)
-        let session = try session(response, username: username)
+    private func installPrimary(_ session: Session, keys: SignalKeys) async throws {
         try await db.write { db in
             try PersistentSignalStore.install(keys, in: db)
             try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: session.deviceId, in: db)
@@ -320,6 +319,7 @@ public actor ObscuraClient {
 
     private func stopSessionWork() {
         sessionGeneration += 1
+        pendingLinkSession = nil
         disconnect()
         refreshTask?.cancel()
         refreshTask = nil

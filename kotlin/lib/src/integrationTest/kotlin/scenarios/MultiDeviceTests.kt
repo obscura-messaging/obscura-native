@@ -163,8 +163,6 @@ class MultiDeviceTests {
 
         val username = alice.username!!
         alice.resetAccount(username, TEST_PASSWORD)
-        assertEquals(LoginScenario.NO_DEVICES, alice.login(username, TEST_PASSWORD))
-        alice.provisionPrimary(username, TEST_PASSWORD)
         alice.connect()
 
         // The old device is invalid and the mismatch names the new primary, all in this one send.

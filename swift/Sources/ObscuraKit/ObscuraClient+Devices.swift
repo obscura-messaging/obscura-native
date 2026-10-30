@@ -2,7 +2,7 @@ import Foundation
 import LibSignalClient
 
 /// A link in progress on the new device. The app shows `code` as a QR code for the primary to scan.
-/// The ephemeral private key and the short-lived account token live only in this value.
+/// The ephemeral private key lives only in this value.
 public struct LinkRequest: Sendable {
     public let code: String
     let sessionId: String
@@ -10,7 +10,6 @@ public struct LinkRequest: Sendable {
     let username: String
     let userId: String
     let deviceName: String
-    let userToken: String
     let privateKey: Data
 }
 
@@ -40,19 +39,25 @@ extension ObscuraClient {
             throw ObscuraError.invalidArgument("deviceName must not be blank")
         }
         try await requireUnprovisionedDevice()
-        let account = try await api.login(username, password, deviceId: nil)
-        guard let userId = APIClient.userId(account.token) else {
-            throw ObscuraError.protocolViolation("account token lacks a user id")
-        }
-        let session = try await api.createLinkSession(bearer: account.token)
+        let session = try await takeOrCreateLinkSession(username, password)
         let privateKey = PrivateKey.generate()
         var code = Obscura_Client_V1_LinkCode()
         code.sessionID = session.id
         code.ephemeralPublicKey = Data(privateKey.publicKey.serialize())
         code.deviceName = deviceName
         return LinkRequest(code: try LinkCrypto.encode(code), sessionId: session.id, expiresAt: session.expiresAt,
-                           username: username, userId: userId, deviceName: deviceName, userToken: account.token,
+                           username: username, userId: session.userId, deviceName: deviceName,
                            privateKey: Data(privateKey.serialize()))
+    }
+
+    private func takeOrCreateLinkSession(_ username: String, _ password: String) async throws -> LinkSessionResponse {
+        let cached = pendingLinkSession
+        pendingLinkSession = nil
+        if let cached, cached.username == username, cached.password == password,
+           TimeInterval(cached.session.expiresAt) > Date().timeIntervalSince1970 + 30 {
+            return cached.session
+        }
+        return try await api.createLinkSession(username, password)
     }
 
     /// Waits for the primary's approval, then provisions this device with the account identity, its
@@ -61,8 +66,7 @@ extension ObscuraClient {
         try await requireUnprovisionedDevice()
         let contents = try Self.open(try await awaitApproval(request), privateKey: request.privateKey, userId: request.userId)
         let keys = try SignalKeys.generate(identity: contents.identity)
-        let response = try await api.createDevice(keys.deviceRequest(name: request.deviceName, linkSessionId: request.sessionId),
-                                                  bearer: request.userToken)
+        let response = try await api.createDevice(keys.deviceRequest(name: request.deviceName, linkSessionId: request.sessionId))
         let session = try session(response, username: request.username)
         try await db.write { db in
             try PersistentSignalStore.install(keys, in: db)
@@ -83,7 +87,7 @@ extension ObscuraClient {
         while Date().timeIntervalSince1970 < TimeInterval(request.expiresAt) {
             try Task.checkCancellation()
             do {
-                if let body = try await api.awaitLinkSession(request.sessionId, bearer: request.userToken) {
+                if let body = try await api.awaitLinkSession(request.sessionId) {
                     return body
                 }
             } catch ObscuraError.http(status: 404, body: _) {

@@ -139,21 +139,21 @@ final class ServerContractTests: XCTestCase {
     }
 
     func testDeletingTheFinalWarmPeerDeviceReturnsAUserLevelRejection() async throws {
-        let (alice, bob) = try await TestUser.friends()
+        let alice = try await TestUser.register()
         addTeardownBlock { try await alice.client.logout() }
-        let warm = try await alice.send("warm", to: [bob])
-        XCTAssertEqual(warm.recipients.map(\.status), [.accepted])
-        _ = try await bob.waitForEntry("warm")
-        // The primary cannot be deleted on its own; a reset deletes every device of the account.
-        try await bob.client.resetAccount(bob.username, TestServer.password)
+        try await alice.client.connect()
+        let missingUserId = UUID().uuidString.lowercased()
+        try await alice.client.directory.add(userId: missingUserId, deviceIds: [UUID().uuidString.lowercased()])
 
-        let report = try await alice.send("after-final-device-deletion", to: [bob])
+        let report = try await alice.client.send(
+            to: [missingUserId], modelKey: "contract", entryId: "after-final-device-deletion",
+            sentAt: 1, payload: Data("x".utf8), acceptedDeviceIds: [])
         XCTAssertEqual(report.recipients.count, 1, "removed targets must not turn a rejected user into an empty report")
-        XCTAssertEqual(report.recipients.first?.userId, bob.userId)
+        XCTAssertEqual(report.recipients.first?.userId, missingUserId)
         XCTAssertNil(report.recipients.first?.deviceId)
         XCTAssertEqual(report.recipients.first?.status, .rejected)
         XCTAssertNotNil(report.recipients.first?.error)
-        let listed = try await alice.client.directory.deviceIds(of: bob.userId)
+        let listed = try await alice.client.directory.deviceIds(of: missingUserId)
         XCTAssertEqual(listed, [])
         await alice.client.disconnect()
     }

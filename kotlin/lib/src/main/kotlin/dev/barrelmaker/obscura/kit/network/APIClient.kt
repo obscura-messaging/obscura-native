@@ -37,7 +37,7 @@ internal class APIClient(
     private sealed interface Auth {
         data object None : Auth
 
-        /** A token that is not this device's session: user-scoped, or a session being ended. */
+        /** An explicit bearer token, such as a session being ended. */
         class Token(val value: String) : Auth
 
         data object Session : Auth
@@ -56,28 +56,25 @@ internal class APIClient(
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    /** Returns a user-scoped token. */
-    suspend fun registerUser(username: String, password: String): String = AuthResponse.from(
-        json("POST", "/v1/users", credentials(username, password), Auth.None)
-    ).token
+    /** Creates the account and provisions its primary device. */
+    suspend fun registerUser(username: String, password: String, name: String, keys: DeviceKeys): AuthResponse = AuthResponse.from(
+        json("POST", "/v1/users", keys.toJson().put("username", username).put("password", password).put("name", name), Auth.None)
+    )
 
-    /** Device-scoped when [deviceId] belongs to the user, otherwise user-scoped. */
-    suspend fun login(username: String, password: String, deviceId: String?): AuthResponse {
-        val body = credentials(username, password)
-        if (deviceId != null) body.put("deviceId", deviceId)
-        return AuthResponse.from(json("POST", "/v1/sessions", body, Auth.None))
-    }
+    /** Authenticates [deviceId] for [username]. */
+    suspend fun login(username: String, password: String, deviceId: String): AuthResponse = AuthResponse.from(
+        json("POST", "/v1/sessions", credentials(username, password).put("deviceId", deviceId), Auth.None)
+    )
 
-    suspend fun resetAccount(username: String, password: String) {
-        send("POST", "/v1/account/reset", credentials(username, password).body(), Auth.None)
-    }
+    /** Resets the account and provisions a new primary device. */
+    suspend fun resetAccount(username: String, password: String, name: String, keys: DeviceKeys): AuthResponse = AuthResponse.from(
+        json("POST", "/v1/account/reset", keys.toJson().put("username", username).put("password", password).put("name", name), Auth.None)
+    )
 
-    /** Creates a device for the user that [userToken] belongs to; [linkSessionId] when the account has devices. */
-    suspend fun provisionDevice(userToken: String, name: String, keys: DeviceKeys, linkSessionId: String?): AuthResponse {
-        val body = keys.toJson().put("name", name)
-        if (linkSessionId != null) body.put("linkSessionId", linkSessionId)
-        return AuthResponse.from(json("POST", "/v1/devices", body, Auth.Token(userToken)))
-    }
+    /** Provisions a linked device authorized by an approved [linkSessionId]. */
+    suspend fun provisionDevice(name: String, keys: DeviceKeys, linkSessionId: String): AuthResponse = AuthResponse.from(
+        json("POST", "/v1/devices", keys.toJson().put("name", name).put("linkSessionId", linkSessionId), Auth.None)
+    )
 
     suspend fun refreshSession(refreshToken: String): AuthResponse = AuthResponse.from(
         json("POST", "/v1/sessions/refresh", JSONObject().put("refreshToken", refreshToken), Auth.None)
@@ -104,10 +101,9 @@ internal class APIClient(
         JSONObject(String(send("GET", "/v1/users/${enc(userId)}/devices/${enc(deviceId)}", null, Auth.Session)))
     }
 
-    /** The account's devices, on this device's session or a [userToken]. */
-    suspend fun fetchOwnDevices(userToken: String? = null): List<OwnDevice> = parse("/v1/devices") {
-        val auth = userToken?.let(Auth::Token) ?: Auth.Session
-        val devices = JSONObject(String(send("GET", "/v1/devices", null, auth))).getJSONArray("devices")
+    /** The account's devices on this device's session. */
+    suspend fun fetchOwnDevices(): List<OwnDevice> = parse("/v1/devices") {
+        val devices = JSONObject(String(send("GET", "/v1/devices", null, Auth.Session))).getJSONArray("devices")
         (0 until devices.length()).map { i ->
             val d = devices.getJSONObject(i)
             OwnDevice(d.getString("deviceId"), if (d.isNull("name")) null else d.getString("name"), d.optBoolean("isPrimary"))
@@ -122,20 +118,22 @@ internal class APIClient(
         send("DELETE", "/v1/devices/${enc(deviceId)}", null, Auth.Session)
     }
 
-    suspend fun createLinkSession(userToken: String): LinkSession = json("POST", "/v1/link-sessions", JSONObject(), Auth.Token(userToken)).let {
-        val id = it.optString("id")
-        val expiresAt = it.optLong("expiresAt")
-        if (id.isBlank() || expiresAt <= 0) throw ObscuraError.ProtocolViolation("Invalid link session")
-        LinkSession(id, expiresAt)
-    }
+    suspend fun createLinkSession(username: String, password: String): LinkSession =
+        json("POST", "/v1/link-sessions", credentials(username, password), Auth.None).let {
+            val id = it.optString("id")
+            val userId = it.optString("userId")
+            val expiresAt = it.optLong("expiresAt")
+            if (id.isBlank() || !isUuid(userId) || expiresAt <= 0) throw ObscuraError.ProtocolViolation("Invalid link session")
+            LinkSession(id, userId, expiresAt)
+        }
 
     suspend fun approveLinkSession(id: String, body: ByteArray) {
         send("PUT", "/v1/link-sessions/${enc(id)}", body.toRequestBody(OCTET), Auth.Session)
     }
 
     /** The approved body, or null when the session is not approved yet. */
-    suspend fun awaitLinkSession(userToken: String, id: String): ByteArray? {
-        val (status, bytes) = exchange("GET", "/v1/link-sessions/${enc(id)}", null, Auth.Token(userToken))
+    suspend fun awaitLinkSession(id: String): ByteArray? {
+        val (status, bytes) = exchange("GET", "/v1/link-sessions/${enc(id)}", null, Auth.None)
         return if (status == 204) null else bytes
     }
 

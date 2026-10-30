@@ -25,11 +25,11 @@ class ApiTypesTest {
     }
 
     @Test
-    fun `an auth response has a refresh token and device id only when device-scoped`() {
-        val user = AuthResponse.from(JSONObject("""{"token":"t","expiresAt":1}"""))
-        val device = AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1,"deviceId":"d"}"""))
-        assertEquals(AuthResponse("t", null, null), user)
-        assertEquals(AuthResponse("t", "r", "d"), device)
+    fun `an auth response parses token, refreshToken and deviceId`() {
+        val partial = AuthResponse.from(JSONObject("""{"token":"t","expiresAt":1}"""))
+        val full = AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1,"deviceId":"d"}"""))
+        assertEquals(AuthResponse("t", null, null), partial)
+        assertEquals(AuthResponse("t", "r", "d"), full)
     }
 
     @Test

@@ -62,7 +62,6 @@ when (client.login(username, password)) {
         showQrCode(request.code)                // the primary calls approveLink(code)
         client.completeLink(request)            // suspends until approved; connects
     }
-    LoginScenario.NO_DEVICES -> client.provisionPrimary(username, password)
     LoginScenario.DEVICE_MISMATCH -> client.wipeDevice() // then log in again
     LoginScenario.INVALID_CREDENTIALS -> showLoginError()
 }
@@ -70,7 +69,7 @@ client.approveLink(code)        // primary only
 client.devices()                // List<DeviceInfo>
 client.unlinkDevice(deviceId)
 client.isPrimary()              // Boolean
-client.resetAccount(username, password) // then provisionPrimary
+client.resetAccount(username, password) // resets account and provisions this device as primary
 client.restorePersistedSession() // Boolean
 client.connect()                // suspends until open
 client.disconnect()             // non-suspending

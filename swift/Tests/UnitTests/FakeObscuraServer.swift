@@ -131,10 +131,12 @@ final class FakeObscuraServer: @unchecked Sendable {
         }
         if request.httpMethod == "POST", path == "/v1/account/reset" {
             return lock.withLock {
-                let request = try! JSONSerialization.jsonObject(with: body) as! [String: String]
-                guard let userId = accounts[request["username"]!] else { return (401, Data()) }
+                let request = try! JSONSerialization.jsonObject(with: body) as! [String: Any]
+                guard let username = request["username"] as? String, let userId = accounts[username] else { return (401, Data()) }
                 devices = devices.filter { $0.value.userId != userId }
-                return (200, Data())
+                let newDeviceId = UUID().uuidString.lowercased()
+                let response = ["token": jwt(userId: userId, deviceId: newDeviceId), "refreshToken": "rt", "deviceId": newDeviceId]
+                return (200, try! JSONSerialization.data(withJSONObject: response))
             }
         }
         return (404, Data())
@@ -144,19 +146,18 @@ final class FakeObscuraServer: @unchecked Sendable {
         order.compactMap { devices[$0] }.filter { $0.userId == userId }
     }
 
-    /// A user-scoped token names only its user.
     private func caller(_ token: String) -> String? {
-        if let device = devices[APIClient.deviceId(token) ?? token] { return device.userId }
-        return APIClient.deviceId(token) == nil ? APIClient.userId(token) : nil
+        devices[APIClient.deviceId(token) ?? token]?.userId
     }
 
     private func login(_ body: Data) -> (Int, Data) {
         lock.withLock {
             let request = try! JSONSerialization.jsonObject(with: body) as! [String: String]
             guard let userId = accounts[request["username"]!] else { return (401, Data()) }
-            let deviceId = request["deviceId"].flatMap { devices[$0]?.userId == userId ? $0 : nil }
-            var response = ["token": jwt(userId: userId, deviceId: deviceId)]
-            response["refreshToken"] = deviceId.map { _ in "rt" }
+            guard let deviceId = request["deviceId"], devices[deviceId]?.userId == userId else {
+                return (409, Data(#"{"error":"Device does not belong to this account"}"#.utf8))
+            }
+            let response = ["token": jwt(userId: userId, deviceId: deviceId), "refreshToken": "rt", "deviceId": deviceId]
             return (200, try! JSONSerialization.data(withJSONObject: response))
         }
     }
@@ -166,10 +167,12 @@ final class FakeObscuraServer: @unchecked Sendable {
             let id = String(request.url!.path.dropFirst("/v1/link-sessions".count).drop { $0 == "/" })
             switch request.httpMethod {
             case "POST":
+                let payload = try! JSONSerialization.jsonObject(with: body) as! [String: String]
+                guard let userId = accounts[payload["username"]!] else { return (401, Data()) }
                 let id = UUID().uuidString
-                linkSessions[id] = (APIClient.userId(token)!, nil)
+                linkSessions[id] = (userId, nil)
                 return (201, try! JSONSerialization.data(withJSONObject: [
-                    "id": id, "expiresAt": Int(Date().timeIntervalSince1970) + 600,
+                    "id": id, "userId": userId, "expiresAt": Int(Date().timeIntervalSince1970) + 600,
                 ]))
             case "PUT":
                 guard let session = linkSessions[id] else { return (404, Data()) }

@@ -42,10 +42,6 @@ final class LinkingTests: XCTestCase {
         XCTAssertEqual(fresh.authState, .loggedOut)
 
         let carol = UUID().uuidString.lowercased()
-        server.account("carol", userId: carol)
-        let noDevices = try await fresh.login("carol", "password")
-        XCTAssertEqual(noDevices, .noDevices)
-
         let other = try await server.register(carol)
         let foreign = try makeClient(apiURL: FakeObscuraServer.baseURL, database: other.db)
         let mismatch = try await foreign.login("alice", "password")
@@ -53,22 +49,25 @@ final class LinkingTests: XCTestCase {
         XCTAssertEqual(foreign.authState, .loggedOut)
     }
 
-    func testAResetAccountIsWipedLocallyAndSignedOut() async throws {
+    func testAResetAccountWipesOldDataAndProvisionsANewPrimary() async throws {
         let storage = MemorySessionStorage()
         let client = try makeClient(apiURL: FakeObscuraServer.baseURL, database: phone.db, storage: storage)
         _ = try await client.login("alice", "password")
+        let oldIdentity = try client.signalStore.identityKeyPair(context: NullContext()).serialize()
         try await client.entries.put(model: "m", entry: StoredEntry(id: "e", data: "x", sentAt: 1, authorDeviceId: "d",
                                                                      localMetadata: nil))
 
         try await client.resetAccount("alice", "password")
 
-        XCTAssertEqual(client.authState, .loggedOut)
-        XCTAssertNil(storage.session)
-        XCTAssertFalse(try client.signalStore.hasIdentity())
+        XCTAssertEqual(client.authState, .authenticated)
+        XCTAssertNotNil(storage.session)
+        let isPrimary = try await client.isPrimary
+        XCTAssertTrue(isPrimary)
+        let newIdentity = try client.signalStore.identityKeyPair(context: NullContext()).serialize()
+        XCTAssertNotEqual(newIdentity, oldIdentity)
         let entries = try await client.entries.all(model: "m")
         XCTAssertEqual(entries, [])
-        let outcome = try await client.login("alice", "password")
-        XCTAssertEqual(outcome, .noDevices)
+        try await client.logout()
     }
 
     // MARK: - Primary
@@ -182,7 +181,7 @@ final class LinkingTests: XCTestCase {
 
         var expired = try await client.beginLink("alice", "password", deviceName: "d")
         expired = LinkRequest(code: expired.code, sessionId: "unknown", expiresAt: expired.expiresAt, username: "alice",
-                              userId: expired.userId, deviceName: "d", userToken: expired.userToken, privateKey: expired.privateKey)
+                              userId: expired.userId, deviceName: "d", privateKey: expired.privateKey)
         await assertThrows(.linkFailed("link session expired or unknown")) { try await client.completeLink(expired) }
 
         let refused = try await client.beginLink("alice", "password", deviceName: "d")

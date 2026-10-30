@@ -114,11 +114,9 @@ class ServerContractTests {
     @Test
     fun `a recipient whose every device is gone is rejected and forgotten`(): Unit = runBlocking {
         val alice = registerAndConnect("deleted_sender")
-        val bob = registerAndConnect("deleted_target")
         try {
-            sendAndVerify(alice, bob, "establish")
-            val userId = bob.userId!!
-            bob.resetAccount(bob.username!!, TEST_PASSWORD)
+            val userId = UUID.randomUUID().toString()
+            alice.devices.add(userId, listOf(UUID.randomUUID().toString()))
             suspend fun gone(text: String) = alice.send(listOf(userId), "directMessage", text, 1, text.toByteArray(), emptySet()).recipients
             val results = gone("not deliverable")
             assertEquals(1, results.size)
@@ -128,7 +126,7 @@ class ServerContractTests {
             assertEquals("No devices found", results.single().error)
             assertTrue(alice.devices.devicesOf(userId).isEmpty())
             assertEquals(SubmissionStatus.REJECTED, gone("no devices").single().status)
-        } finally { alice.logout(); bob.logout() }
+        } finally { alice.logout() }
     }
 
     @Test
@@ -213,7 +211,10 @@ class ServerContractTests {
             assertEquals(AuthState.LOGGED_OUT, first.authState.value)
             assertEquals(LoginScenario.EXISTING_DEVICE, first.login(firstName, TEST_PASSWORD))
             first.logout()
-            first.api.resetAccount(firstName, TEST_PASSWORD)
+            val resetKeys = dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.generateProvisioningKeys(
+                org.signal.libsignal.protocol.IdentityKeyPair.generate()
+            )
+            first.api.resetAccount(firstName, TEST_PASSWORD, "replacement", resetKeys.toDeviceKeys())
             assertEquals(LoginScenario.DEVICE_MISMATCH, first.login(firstName, TEST_PASSWORD))
             assertEquals(AuthState.LOGGED_OUT, first.authState.value)
         } finally { first.logout(); second.logout() }

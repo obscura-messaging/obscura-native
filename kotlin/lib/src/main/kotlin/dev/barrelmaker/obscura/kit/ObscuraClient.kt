@@ -16,7 +16,6 @@ import dev.barrelmaker.obscura.kit.managers.TokenStatus
 import dev.barrelmaker.obscura.kit.messaging.Messenger
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.network.GatewayConnection
-import dev.barrelmaker.obscura.kit.network.Jwt
 import dev.barrelmaker.obscura.kit.network.OwnDevice
 import dev.barrelmaker.obscura.kit.persistence.SessionStorage
 import dev.barrelmaker.obscura.kit.stores.DeviceStore
@@ -158,16 +157,12 @@ class ObscuraClient(
 
     suspend fun login(username: String, password: String): LoginScenario = auth.login(username, password)
 
-    /** After [LoginScenario.NO_DEVICES]: this device becomes the primary with a new identity. */
-    suspend fun provisionPrimary(username: String, password: String) = auth.provisionPrimary(username, password)
-
     /**
-     * Deletes every device of the account on the server, then all local data. Peers see the next
-     * primary's new identity as an identity change. Call [provisionPrimary] next.
+     * Deletes every device of the account on the server, wipes all local data, and provisions this
+     * device as the new primary with a new identity. Peers see the new identity as an identity change.
      */
     suspend fun resetAccount(username: String, password: String) {
-        auth.resetAccount(username, password)
-        wipeDevice(revoke = false)
+        auth.resetAccount(username, password) { wipeDevice(revoke = false) }
     }
 
     /** Whether this device is the account's primary. False before provisioning. */
@@ -176,15 +171,14 @@ class ObscuraClient(
     /** Start linking this unprovisioned device. The ephemeral key lives only in the returned request. */
     suspend fun beginLink(username: String, password: String, deviceName: String): LinkRequest {
         if (deviceName.isBlank()) throw ObscuraError.InvalidArgument("deviceName must not be blank")
-        val userToken = auth.userToken(username, password)
-        val session = api.createLinkSession(userToken)
+        val session = auth.takeOrCreateLinkSession(username, password)
         val ephemeral = Curve.generateKeyPair()
         val code = LinkCode.newBuilder()
             .setSessionId(session.id)
             .setEphemeralPublicKey(ByteString.copyFrom(ephemeral.publicKey.serialize()))
             .setDeviceName(deviceName)
             .build()
-        return LinkRequest(LinkCrypto.encodeCode(code), session.id, session.expiresAt, ephemeral, userToken, username, deviceName)
+        return LinkRequest(LinkCrypto.encodeCode(code), session.id, session.userId, session.expiresAt, ephemeral, username, deviceName)
     }
 
     /**
@@ -197,7 +191,7 @@ class ObscuraClient(
         } catch (e: InvalidProtocolBufferException) {
             throw ObscuraError.ProtocolViolation("Invalid link bundle", e)
         }
-        if (bundle.userId != Jwt.userId(request.userToken)) throw ObscuraError.ProtocolViolation("Link bundle is for another account")
+        if (bundle.userId != request.userId) throw ObscuraError.ProtocolViolation("Link bundle is for another account")
         val identity = try {
             IdentityKeyPair(bundle.identityKeyPair.toByteArray())
         } catch (e: Exception) {
@@ -206,8 +200,8 @@ class ObscuraClient(
         val friendList = FriendList(bundle.friendListVersion, bundle.friendsList.map {
             WireCodec.decodeFriend(it) ?: throw ObscuraError.ProtocolViolation("Invalid friend in link bundle")
         })
-        auth.provision(
-            request.userToken, request.username, request.deviceName,
+        auth.provisionLinked(
+            request.userId, request.username, request.deviceName,
             SignalKeyUtils.generateProvisioningKeys(identity), request.sessionId,
         ) { friends.replaceInTransaction(friendList) }
         if (bundle.hasHistory()) importHistory(bundle.history)
@@ -217,7 +211,7 @@ class ObscuraClient(
     private suspend fun awaitApproval(request: LinkRequest): ByteArray {
         while (System.currentTimeMillis() / 1000 < request.expiresAt) {
             val body = try {
-                api.awaitLinkSession(request.userToken, request.sessionId)
+                api.awaitLinkSession(request.sessionId)
             } catch (e: ObscuraError.Http) {
                 if (e.status == 404) throw ObscuraError.LinkFailed("Link session expired or unknown", e)
                 throw e

@@ -64,7 +64,6 @@ let client = try ObscuraClient(
 let restored = await client.restorePersistedSession()
 let scenario = try await client.login(username, password)
 try await client.register(username, password)
-try await client.provisionPrimary(username, password)
 try await client.resetAccount(username, password)
 let request = try await client.beginLink(username, password, deviceName: deviceName)
 try await client.completeLink(request)

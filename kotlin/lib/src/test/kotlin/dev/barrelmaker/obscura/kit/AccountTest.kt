@@ -46,14 +46,26 @@ class AccountTest {
                 account.requests.add(request)
                 val path = request.url.encodedPath
                 return when {
-                    path == "/v1/sessions" -> json(JSONObject().put("token", userToken)
-                        .apply { account.loginDeviceId?.let { put("refreshToken", "rt").put("deviceId", it) } })
-                    path == "/v1/account/reset" -> MockResponse.Builder().build()
+                    path == "/v1/users" && request.method == "POST" ->
+                        MockResponse.Builder().code(201).body(
+                            JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", SELF_DEVICE_ID).toString()
+                        ).build()
+                    path == "/v1/sessions" -> {
+                        val reqDeviceId = JSONObject(request.body!!.utf8()).optString("deviceId")
+                        if (account.loginDeviceId != null && reqDeviceId == account.loginDeviceId) {
+                            json(JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", account.loginDeviceId))
+                        } else {
+                            MockResponse.Builder().code(409).body("""{"error":"Device does not belong to this account"}""").build()
+                        }
+                    }
+                    path == "/v1/account/reset" ->
+                        json(JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", newDeviceId))
                     path == "/v1/devices" && request.method == "GET" -> json(JSONObject().put("devices",
                         account.devices.map { (id, primary) -> JSONObject().put("deviceId", id).put("isPrimary", primary) }))
-                    path == "/v1/devices" -> json(JSONObject().put("token", userToken).put("refreshToken", "rt")
-                        .put("deviceId", if (JSONObject(request.body!!.utf8()).has("linkSessionId")) newDeviceId else SELF_DEVICE_ID))
-                    path == "/v1/link-sessions" -> json(JSONObject().put("id", "ls-1").put("expiresAt", System.currentTimeMillis() / 1000 + 600))
+                    path == "/v1/devices" -> json(JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", newDeviceId))
+                    path == "/v1/link-sessions" -> json(
+                        JSONObject().put("id", "ls-1").put("userId", SELF_USER_ID).put("expiresAt", System.currentTimeMillis() / 1000 + 600)
+                    )
                     path == "/v1/link-sessions/ls-1" && request.method == "PUT" && account.linkStatus != 200 ->
                         MockResponse.Builder().code(account.linkStatus).build()
                     path == "/v1/link-sessions/ls-1" && request.method == "PUT" -> {
@@ -90,18 +102,18 @@ class AccountTest {
 
     private fun requestsTo(path: String) = account.requests.filter { it.url.encodedPath == path }
 
-    @Test fun `without a stored device the account's devices decide between linking and a new primary`() = runBlocking {
+    @Test fun `without a stored device login creates a link session and reuses it on beginLink`() = runBlocking {
         val storage = MemoryStorage()
         val c = newClient(url, storage)
 
-        assertEquals(LoginScenario.NO_DEVICES, c.login("self", "password"))
-        account.devices = listOf(SELF_DEVICE_ID to true)
         assertEquals(LoginScenario.LINK_REQUIRED, c.login("self", "password"))
-
         assertEquals(AuthState.LOGGED_OUT, c.authState.value)
         assertNull(storage.data)
-        assertTrue(requestsTo("/v1/devices").all { it.headers["Authorization"] == "Bearer $userToken" })
-        assertFalse(requestsTo("/v1/sessions").any { JSONObject(it.body!!.utf8()).has("deviceId") })
+        assertEquals(1, requestsTo("/v1/link-sessions").size)
+
+        val request = c.beginLink("self", "password", "Tablet")
+        assertEquals("ls-1", LinkCrypto.decodeCode(request.code).sessionId)
+        assertEquals(1, requestsTo("/v1/link-sessions").size, "beginLink reuses the link session from login")
     }
 
     @Test fun `a stored device the account no longer has is a device mismatch`() = runBlocking {
@@ -113,16 +125,19 @@ class AccountTest {
         account.loginDeviceId = SELF_DEVICE_ID
         assertEquals(LoginScenario.EXISTING_DEVICE, c.login("self", "password"))
         assertEquals(SELF_DEVICE_ID, c.deviceId)
+        c.auth.end()
+        Unit
     }
 
-    @Test fun `provisionPrimary stores a primary with a new identity once the server accepts it`() = runBlocking {
+    @Test fun `register stores a primary with a new identity once the server accepts it`() = runBlocking {
         val storage = MemoryStorage()
         val c = newClient(url, storage)
 
-        c.provisionPrimary("self", "password")
+        c.register("self", "password")
 
-        val body = JSONObject(requestsTo("/v1/devices").single().body!!.utf8())
-        assertFalse(body.has("linkSessionId"))
+        val body = JSONObject(requestsTo("/v1/users").single().body!!.utf8())
+        assertEquals("self", body.getString("username"))
+        assertEquals("password", body.getString("password"))
         assertArrayEquals(c.signalStore.identityKeyPair.publicKey.serialize(), body.getString("identityKey").fromBase64())
         assertEquals(100, body.getJSONArray("oneTimePreKeys").length())
         assertEquals(1, body.getJSONObject("signedPreKey").getInt("keyId"))
@@ -134,21 +149,27 @@ class AccountTest {
         Unit
     }
 
-    @Test fun `resetAccount resets the account on the server, then wipes this device`() = runBlocking {
+    @Test fun `resetAccount resets the account on the server, wipes old data, and provisions a new primary`() = runBlocking {
         val storage = storedSession()
         val c = sessionClient(url, storage)
         assertTrue(c.auth.restore())
+        val oldIdentity = c.signalStore.identityKeyPair.publicKey
         c.entries.put("m", StoredEntry("e", "{}", 1, SELF_DEVICE_ID))
 
         c.resetAccount("self", "password")
 
-        assertEquals(JSONObject().put("username", "self").put("password", "password").toString(),
-            requestsTo("/v1/account/reset").single().body!!.utf8())
-        assertEquals(AuthState.LOGGED_OUT, c.authState.value)
-        assertNull(storage.data)
-        assertNull(c.devices.getIdentity())
-        assertFalse(c.signalStore.hasIdentity())
+        val body = JSONObject(requestsTo("/v1/account/reset").single().body!!.utf8())
+        assertEquals("self", body.getString("username"))
+        assertEquals("password", body.getString("password"))
+        assertArrayEquals(c.signalStore.identityKeyPair.publicKey.serialize(), body.getString("identityKey").fromBase64())
+        assertFalse(oldIdentity.serialize().contentEquals(c.signalStore.identityKeyPair.publicKey.serialize()))
+        assertEquals(AuthState.AUTHENTICATED, c.authState.value)
+        assertEquals(newDeviceId, c.deviceId)
+        assertEquals(newDeviceId, storage.data!!["deviceId"])
+        assertTrue(c.isPrimary())
         assertTrue(c.entries.all("m").isEmpty())
+        c.auth.end()
+        Unit
     }
 
     @Test fun `a linked device receives the account identity, friends and history and is not primary`() = runBlocking {

@@ -131,14 +131,13 @@ actor APIClient {
 
     // MARK: - Endpoints
 
-    func registerUser(_ username: String, _ password: String) async throws -> AuthResponse {
-        try await json("v1/users", method: "POST", body: ["username": username, "password": password], auth: .none)
+    func registerUser(_ request: AccountProvisionRequest) async throws -> AuthResponse {
+        try await json("v1/users", method: "POST", body: request, auth: .none)
     }
 
-    func login(_ username: String, _ password: String, deviceId: String?) async throws -> AuthResponse {
-        var body = ["username": username, "password": password]
-        body["deviceId"] = deviceId
-        return try await json("v1/sessions", method: "POST", body: body, auth: .none)
+    func login(_ username: String, _ password: String, deviceId: String) async throws -> AuthResponse {
+        try await json("v1/sessions", method: "POST",
+                       body: ["username": username, "password": password, "deviceId": deviceId], auth: .none)
     }
 
     func refreshSession(_ refreshToken: String) async throws -> AuthResponse {
@@ -151,15 +150,14 @@ actor APIClient {
                                auth: .bearer(token))
     }
 
-    /// Takes a user-scoped token explicitly: it is never the client's token.
-    func createDevice(_ device: CreateDeviceRequest, bearer: String) async throws -> AuthResponse {
-        try await json("v1/devices", method: "POST", body: device, auth: .bearer(bearer))
+    func createDevice(_ device: CreateDeviceRequest) async throws -> AuthResponse {
+        try await json("v1/devices", method: "POST", body: device, auth: .none)
     }
 
-    /// The account's devices. `bearer` is a user-scoped token; nil uses the device's own token.
-    func listDevices(bearer: String? = nil) async throws -> [DeviceResponse] {
+    /// The account's devices.
+    func listDevices() async throws -> [DeviceResponse] {
         struct Directory: Decodable { let devices: [DeviceResponse] }
-        let response: Directory = try await json("v1/devices", auth: bearer.map(Auth.bearer) ?? .device)
+        let response: Directory = try await json("v1/devices")
         return response.devices
     }
 
@@ -167,9 +165,8 @@ actor APIClient {
         _ = try await request("v1/devices/\(deviceId)", method: "DELETE")
     }
 
-    func resetAccount(_ username: String, _ password: String) async throws {
-        _ = try await request("v1/account/reset", method: "POST",
-                              body: encoder.encode(["username": username, "password": password]), auth: .none)
+    func resetAccount(_ request: AccountProvisionRequest) async throws -> AuthResponse {
+        try await json("v1/account/reset", method: "POST", body: request, auth: .none)
     }
 
     func uploadPreKeys(_ keys: PreKeysUpload) async throws {
@@ -186,13 +183,14 @@ actor APIClient {
         try await json("v1/users/\(userId)/devices/\(deviceId)")
     }
 
-    func createLinkSession(bearer: String) async throws -> LinkSessionResponse {
-        try await json("v1/link-sessions", method: "POST", auth: .bearer(bearer))
+    func createLinkSession(_ username: String, _ password: String) async throws -> LinkSessionResponse {
+        try await json("v1/link-sessions", method: "POST",
+                       body: ["username": username, "password": password], auth: .none)
     }
 
     /// The primary's body once the session is approved; nil if it is not approved yet.
-    func awaitLinkSession(_ id: String, bearer: String) async throws -> Data? {
-        let response = try await exchange("v1/link-sessions/\(id)", method: "GET", auth: .bearer(bearer))
+    func awaitLinkSession(_ id: String) async throws -> Data? {
+        let response = try await exchange("v1/link-sessions/\(id)", method: "GET", auth: .none)
         return response.status == 204 ? nil : response.data
     }
 

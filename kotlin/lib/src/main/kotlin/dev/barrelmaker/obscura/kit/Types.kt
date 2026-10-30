@@ -10,11 +10,8 @@ enum class LoginScenario {
     /** Authenticated as the stored local device. */
     EXISTING_DEVICE,
 
-    /** No local device and the account has devices: link this device with `beginLink`. */
+    /** No local device: link this device with `beginLink`. */
     LINK_REQUIRED,
-
-    /** No local device and the account has none (new or reset): call `provisionPrimary`. */
-    NO_DEVICES,
 
     /** The stored device no longer belongs to the account (unlinked or reset): `wipeDevice`, then log in again. */
     DEVICE_MISMATCH,
@@ -28,9 +25,9 @@ data class DeviceInfo(val deviceId: String, val name: String?, val isPrimary: Bo
 class LinkRequest internal constructor(
     val code: String,
     internal val sessionId: String,
+    internal val userId: String,
     internal val expiresAt: Long,
     internal val ephemeral: org.signal.libsignal.protocol.ecc.ECKeyPair,
-    internal val userToken: String,
     internal val username: String,
     internal val deviceName: String,
 )

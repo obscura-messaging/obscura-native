@@ -28,7 +28,6 @@ internal data class DeviceKeys(val identityKey: String, val registrationId: Int,
         .put("registrationId", registrationId)
 }
 
-/** [refreshToken] and [deviceId] are present only for a device-scoped token. */
 internal data class AuthResponse(val token: String, val refreshToken: String?, val deviceId: String?) {
     companion object {
         fun from(json: JSONObject): AuthResponse {
@@ -42,7 +41,7 @@ internal data class AuthResponse(val token: String, val refreshToken: String?, v
 /** One device of the signed-in account, from `GET /v1/devices`. */
 internal data class OwnDevice(val deviceId: String, val name: String?, val isPrimary: Boolean)
 
-internal data class LinkSession(val id: String, val expiresAt: Long)
+internal data class LinkSession(val id: String, val userId: String, val expiresAt: Long)
 
 /** The claims this kit reads from an access token. It never verifies the signature; the server does. */
 internal object Jwt {

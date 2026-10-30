@@ -22,14 +22,25 @@ struct PreKeysUpload: Encodable {
     let oneTimePreKeys: [PreKeyUpload]
 }
 
-/// `POST /v1/devices`. `linkSessionId` is required once the account has a device.
-struct CreateDeviceRequest: Encodable {
+/// `POST /v1/users` and `POST /v1/account/reset`.
+struct AccountProvisionRequest: Encodable {
+    let username: String
+    let password: String
     let name: String
     let identityKey: String
     let registrationId: Int
     let signedPreKey: SignedPreKeyUpload
     let oneTimePreKeys: [PreKeyUpload]
-    let linkSessionId: String?
+}
+
+/// `POST /v1/devices`.
+struct CreateDeviceRequest: Encodable {
+    let linkSessionId: String
+    let name: String
+    let identityKey: String
+    let registrationId: Int
+    let signedPreKey: SignedPreKeyUpload
+    let oneTimePreKeys: [PreKeyUpload]
 }
 
 struct DeviceResponse: Decodable {
@@ -40,6 +51,7 @@ struct DeviceResponse: Decodable {
 
 struct LinkSessionResponse: Decodable {
     let id: String
+    let userId: String
     let expiresAt: Int64
 }
 

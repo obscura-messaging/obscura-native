@@ -81,7 +81,6 @@ final class MultiDeviceTests: XCTestCase {
         _ = try await alice.waitForEntry("warm")
 
         try await alice.client.resetAccount(alice.username, TestServer.password)
-        try await alice.client.provisionPrimary(alice.username, TestServer.password)
         let deviceId = await alice.client.deviceId
         let newDeviceId = try XCTUnwrap(deviceId)
 
@@ -147,7 +146,6 @@ final class MultiDeviceTests: XCTestCase {
         _ = try await alice.waitForEntry("reply-before-reset")
 
         try await alice.client.resetAccount(alice.username, TestServer.password)
-        try await alice.client.provisionPrimary(alice.username, TestServer.password)
         let deviceId = await alice.client.deviceId
         let newDeviceId = try XCTUnwrap(deviceId)
         try await alice.client.connect()

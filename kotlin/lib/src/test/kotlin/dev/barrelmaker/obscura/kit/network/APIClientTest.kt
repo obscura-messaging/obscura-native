@@ -105,13 +105,13 @@ class APIClientTest {
     }
 
     @Test
-    fun `a 401 on a user-scoped or unauthenticated call never refreshes`() = runBlocking {
+    fun `a 401 on an explicit bearer or unauthenticated call never refreshes`() = runBlocking {
         val (api, refreshes) = sessionApi()
         server.enqueue(status(401))
         server.enqueue(status(401))
 
-        assertEquals(401, (runCatching { api.fetchOwnDevices(userToken = "user") }.exceptionOrNull() as ObscuraError.Http).status)
-        assertEquals(401, (runCatching { api.login("u", "p", null) }.exceptionOrNull() as ObscuraError.Http).status)
+        assertEquals(401, (runCatching { api.logout("rt", "bearer") }.exceptionOrNull() as ObscuraError.Http).status)
+        assertEquals(401, (runCatching { api.login("u", "p", "d") }.exceptionOrNull() as ObscuraError.Http).status)
         assertEquals(0, refreshes())
     }
 
@@ -132,7 +132,7 @@ class APIClientTest {
             }.apply { start() }
             val slow = APIClient("http://127.0.0.1:${listener.localPort}") { "token" }
 
-            val call = async(kotlinx.coroutines.Dispatchers.Default) { slow.awaitLinkSession("user", "ls") }
+            val call = async(kotlinx.coroutines.Dispatchers.Default) { slow.awaitLinkSession("ls") }
             assertTrue(requestRead.await(5, java.util.concurrent.TimeUnit.SECONDS))
             val started = System.currentTimeMillis()
             call.cancel()

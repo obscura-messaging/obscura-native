@@ -65,25 +65,23 @@ data. There are no compatibility migrations.
 
 | Operation / outcome | Behavior |
 |---|---|
-| `register(username, password)` | Creates the account and provisions this device as the primary with a new identity |
-| `login` -> `existingDevice` | Authenticates the stored local device |
-| `login` -> `linkRequired` | No stored local device and the account already has devices; stays logged out |
-| `login` -> `noDevices` | No stored local device and the account has none (new or reset); stays logged out |
-| `login` -> `deviceMismatch` | Stored local device no longer belongs to this account or lacks a local Signal identity; stays logged out |
-| `login` -> `invalidCredentials` | User login rejected with 401/403; stays logged out |
-| `provisionPrimary(username, password)` | After `noDevices`: logs in with a user-scoped token and provisions this device as the primary with a new identity |
-| `beginLink(username, password, deviceName)` | After `linkRequired`: opens a server link session and returns a `LinkRequest` whose `code` is shown to the primary |
+| `register(username, password)` | Creates the account and provisions this device as the primary with a new identity (`POST /v1/users`) |
+| `login` -> `existingDevice` | Authenticates the stored local device (`POST /v1/sessions` with `deviceId`) |
+| `login` -> `linkRequired` | No stored local device; verifies credentials and opens a link session (`POST /v1/link-sessions`), staying logged out |
+| `login` -> `deviceMismatch` | Stored local device no longer belongs to this account (`409` on `POST /v1/sessions`) or lacks a local Signal identity; stays logged out |
+| `login` -> `invalidCredentials` | Credentials rejected with 401/403; stays logged out |
+| `beginLink(username, password, deviceName)` | After `linkRequired`: reuses the link session from `login` (or opens a new one) and returns a `LinkRequest` whose `code` is shown to the primary |
 | `linkCodeDeviceName(code)` | Returns the `deviceName` encoded in a `LinkCode` without network I/O |
 | `approveLink(code)` | Primary only (`NOT_PRIMARY` otherwise): encrypts the account identity, versioned friend list, and `HistorySnapshot` into a `LinkEnvelope` and uploads it to the link session |
-| `completeLink(request)` | Polls the link session until approved (`LINK_FAILED` on 404, expiry, or decryption failure), provisions this device with keys signed by the account identity, imports friends and history, and connects |
-| `resetAccount(username, password)` | Deletes all devices and the account identity on the server (`POST /v1/account/reset`), then signs out without server revocation and wipes local data |
+| `completeLink(request)` | Polls `GET /v1/link-sessions/{id}` until approved (`LINK_FAILED` on 404, expiry, or decryption failure), provisions this device via `POST /v1/devices` with keys signed by the account identity, imports friends and history, and connects |
+| `resetAccount(username, password)` | Deletes all devices and replaces the account identity on the server while provisioning this device as the new primary (`POST /v1/account/reset`), wipes old local data, and installs the new primary session |
 | `isPrimary` | Whether this device is the account's primary device |
 | `devices()` | Lists the account's devices (`GET /v1/devices`), marking `isPrimary` and `isThisDevice` |
 | `unlinkDevice(deviceId)` | Primary unlinks any other device (`INVALID_ARGUMENT` for itself); a linked device unlinks only itself (`NOT_PRIMARY` for others), then signs out and wipes local data |
 | `logout()` | Disconnects, stops background work, clears credentials, storage and typing; keeps local data |
 | `wipeDevice()` | Logs out, then deletes local Signal state, friends, devices, identity, entries and inbox |
 
-Other HTTP failures throw. Registration and primary provisioning generate a new
+Other HTTP failures throw. Registration and account reset generate a new
 account identity key pair, registration id, signed prekey id 1, and 100
 one-time prekeys; linking generates a fresh registration id, signed prekey id 1,
 and 100 one-time prekeys signed by the imported account identity key pair.
@@ -111,7 +109,7 @@ prekeys, one-time prekeys, and Signal sessions.
 The first device provisioned on an account is the **primary**. Only the primary
 may link or unlink other devices or mutate the friend list (`addFriendByCode`,
 `acceptFriend`, `removeFriend`). Linked devices are never promoted: losing the
-primary requires `resetAccount` followed by `provisionPrimary`, which peers
+primary requires `resetAccount`, which peers
 observe as an account-level identity change.
 
 There is one device directory keyed by `(userId, deviceId)`, including the

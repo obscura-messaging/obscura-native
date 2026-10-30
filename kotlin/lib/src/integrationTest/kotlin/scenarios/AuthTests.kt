@@ -128,7 +128,7 @@ class AuthTests {
     }
 
     @Test
-    fun `a lost primary means a reset, after which the next device is a new primary`() = runBlocking {
+    fun `a lost primary means a reset, which provisions a new primary with a new identity`() = runBlocking {
         requireServer()
         val client = registerAndConnect("wipe")
         val username = client.username!!
@@ -139,8 +139,6 @@ class AuthTests {
         assertEquals(AuthState.LOGGED_OUT, client.authState.value)
         assertEquals(LoginScenario.LINK_REQUIRED, client.login(username, TEST_PASSWORD))
         client.resetAccount(username, TEST_PASSWORD)
-        assertEquals(LoginScenario.NO_DEVICES, client.login(username, TEST_PASSWORD))
-        client.provisionPrimary(username, TEST_PASSWORD)
         assertEquals(AuthState.AUTHENTICATED, client.authState.value)
         assertTrue(client.isPrimary())
         assertNotEquals(oldIdentity, client.signalStore.identityKeyPair.publicKey)

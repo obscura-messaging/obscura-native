@@ -52,7 +52,6 @@ final class ClientTests: XCTestCase {
     func testProvisioningOrLinkingAnExistingLocalDeviceRequiresAnExplicitWipe() async throws {
         let error = ObscuraError.invalidArgument("local device exists; wipeDevice before provisioning")
         await assertThrows(error) { try await self.client.register("new-account", "password") }
-        await assertThrows(error) { try await self.client.provisionPrimary("new-account", "password") }
         await assertThrows(error) { _ = try await self.client.beginLink("new-account", "password", deviceName: "d") }
         XCTAssertTrue(try client.signalStore.hasIdentity())
         let deviceId = try await client.directory.localDeviceId()
