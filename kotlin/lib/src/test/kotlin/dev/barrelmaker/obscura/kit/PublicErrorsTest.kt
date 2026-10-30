@@ -17,6 +17,8 @@ class PublicErrorsTest {
             ObscuraError.ConnectionFailed("connection") to "CONNECTION_FAILED",
             ObscuraError.SendFailed("send") to "SEND_FAILED",
             ObscuraError.ProtocolViolation("protocol") to "PROTOCOL_VIOLATION",
+            ObscuraError.NotPrimary() to "NOT_PRIMARY",
+            ObscuraError.LinkFailed("link") to "LINK_FAILED",
             ObscuraError.StorageFailed("storage", cause) to "STORAGE_ERROR",
         )
         errors.forEach { (error, code) -> assertEquals(code, error.code) }
@@ -28,7 +30,8 @@ class PublicErrorsTest {
         for (call in listOf<suspend () -> Unit>(
             { c.login(" ", "password") },
             { c.register("user", "") },
-            { c.loginAndProvision("", "password") },
+            { c.resetAccount("user", " ") },
+            { c.beginLink("", "password", "Tablet") },
         )) assertTrue(runCatching { call() }.exceptionOrNull() is ObscuraError.InvalidArgument)
     }
 
@@ -53,20 +56,20 @@ class PublicErrorsTest {
             val url = server.url("/").toString()
             val c = newClient(url)
             val response = """{"token":"${jwt(SELF_USER_ID, FAR_FUTURE)}","refreshToken":"rt"}"""
-            repeat(2) { server.enqueue(MockResponse.Builder().body(response).build()) }
-            val error = runCatching { c.loginAndProvision("user", "password") }.exceptionOrNull()
+            server.enqueue(MockResponse.Builder().body(response).build())
+            val error = runCatching { c.register("user", "password") }.exceptionOrNull()
             assertTrue(error is ObscuraError.ProtocolViolation)
             assertEquals(AuthState.LOGGED_OUT, c.authState.value)
             assertNull(c.devices.getIdentity())
-            assertEquals("/v1/sessions", server.takeRequest().url.encodedPath)
-            assertEquals("/v1/devices", server.takeRequest().url.encodedPath)
+            assertFalse(c.signalStore.hasIdentity())
+            assertEquals("/v1/users", server.takeRequest().url.encodedPath)
         }
     }
 
     @Test fun `provisioning cannot overwrite an existing device or Signal identity`() = runBlocking {
         val c = sessionClient("http://127.0.0.1:1", storedSession())
         val identity = c.signalStore.identityKeyPair.serialize()
-        val error = runCatching { c.loginAndProvision("user", "password") }.exceptionOrNull()
+        val error = runCatching { c.register("user", "password") }.exceptionOrNull()
         assertTrue(error is ObscuraError.InvalidArgument)
         assertEquals(SELF_DEVICE_ID, c.devices.getIdentity())
         assertArrayEquals(identity, c.signalStore.identityKeyPair.serialize())

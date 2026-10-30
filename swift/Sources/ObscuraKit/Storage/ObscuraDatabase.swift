@@ -3,7 +3,7 @@ import GRDB
 
 enum ObscuraDatabase {
     static let tables = [
-        "friends", "device_identity", "devices",
+        "friends", "friend_list_version", "device_identity", "devices",
         "signal_local_identity", "signal_identities", "signal_prekeys", "signal_signed_prekeys", "signal_sessions",
         "inbox_rows", "model_entries",
     ]
@@ -47,21 +47,27 @@ enum ObscuraDatabase {
         }
     }
 
-    /// Pre-release: installs clear app data when this schema changes.
+    /// Pre-release: installs clear app data when this schema changes. Text the kit does not control is
+    /// a BLOB of UTF-8 bytes (see `StoredText.swift`).
     static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1") { db in
             try db.execute(sql: """
                 CREATE TABLE friends (
-                    user_id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
+                    user_id BLOB PRIMARY KEY,
+                    username BLOB NOT NULL,
                     status TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE friend_list_version (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    version INTEGER NOT NULL
+                );
                 CREATE TABLE device_identity (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
-                    device_id TEXT NOT NULL
+                    device_id TEXT NOT NULL,
+                    primary_device_id TEXT
                 );
                 CREATE TABLE devices (
                     user_id TEXT NOT NULL,
@@ -74,7 +80,7 @@ enum ObscuraDatabase {
                     registration_id INTEGER NOT NULL
                 );
                 CREATE TABLE signal_identities (
-                    address TEXT PRIMARY KEY,
+                    user_id TEXT PRIMARY KEY,
                     key_data BLOB NOT NULL
                 );
                 CREATE TABLE signal_prekeys (
@@ -96,18 +102,18 @@ enum ObscuraDatabase {
                     kind TEXT NOT NULL,
                     sender_user_id TEXT NOT NULL,
                     sender_device_id TEXT,
-                    model_key TEXT,
-                    entry_id TEXT,
+                    model_key BLOB,
+                    entry_id BLOB,
                     sent_at INTEGER,
                     payload BLOB NOT NULL
                 );
                 CREATE TABLE model_entries (
-                    model_name TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    data TEXT NOT NULL,
+                    model_name BLOB NOT NULL,
+                    id BLOB NOT NULL,
+                    data BLOB NOT NULL,
                     timestamp INTEGER NOT NULL,
-                    author_device_id TEXT NOT NULL,
-                    local_metadata TEXT,
+                    author_device_id BLOB NOT NULL,
+                    local_metadata BLOB,
                     PRIMARY KEY (model_name, id)
                 );
                 """)

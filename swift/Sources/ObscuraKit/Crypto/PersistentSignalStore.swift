@@ -27,18 +27,20 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
 
     /// Replaces every Signal record with a new identity and its keys.
     func install(_ keys: SignalKeys) throws {
-        try db.write { db in
-            for table in ["signal_local_identity", "signal_identities", "signal_prekeys", "signal_signed_prekeys", "signal_sessions"] {
-                try db.execute(sql: "DELETE FROM \(table)")
-            }
-            try db.execute(sql: "INSERT INTO signal_local_identity (id, key_pair, registration_id) VALUES (1, ?, ?)",
-                           arguments: [Data(keys.identity.serialize()), keys.registrationId])
-            try db.execute(sql: "INSERT INTO signal_signed_prekeys (key_id, record) VALUES (?, ?)",
-                           arguments: [Self.signedPreKeyId, Data(keys.signedPreKey.serialize())])
-            for preKey in keys.preKeys {
-                try db.execute(sql: "INSERT INTO signal_prekeys (key_id, record) VALUES (?, ?)",
-                               arguments: [preKey.id, Data(preKey.serialize())])
-            }
+        try db.write { db in try Self.install(keys, in: db) }
+    }
+
+    static func install(_ keys: SignalKeys, in db: Database) throws {
+        for table in ["signal_local_identity", "signal_identities", "signal_prekeys", "signal_signed_prekeys", "signal_sessions"] {
+            try db.execute(sql: "DELETE FROM \(table)")
+        }
+        try db.execute(sql: "INSERT INTO signal_local_identity (id, key_pair, registration_id) VALUES (1, ?, ?)",
+                       arguments: [Data(keys.identity.serialize()), keys.registrationId])
+        try db.execute(sql: "INSERT INTO signal_signed_prekeys (key_id, record) VALUES (?, ?)",
+                       arguments: [signedPreKeyId, Data(keys.signedPreKey.serialize())])
+        for preKey in keys.preKeys {
+            try db.execute(sql: "INSERT INTO signal_prekeys (key_id, record) VALUES (?, ?)",
+                           arguments: [preKey.id, Data(preKey.serialize())])
         }
     }
 
@@ -59,9 +61,8 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
     }
 
     /// Refills with the current identity and a fresh signed prekey; earlier signed keys remain stored.
-    func addPreKeys(_ count: UInt32) throws -> DeviceKeysUpload {
+    func addPreKeys(_ count: UInt32) throws -> PreKeysUpload {
         let identity = try identityKeyPair(context: NullContext())
-        let registrationId = try localRegistrationId(context: NullContext())
         return try db.write { db in
             let highestSigned = try Int64.fetchOne(db, sql: "SELECT MAX(key_id) FROM signal_signed_prekeys") ?? 0
             guard let nextSignedId = Int32(exactly: highestSigned + 1) else {
@@ -76,13 +77,21 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
                 try db.execute(sql: "INSERT INTO signal_prekeys (key_id, record) VALUES (?, ?)",
                                arguments: [record.id, Data(record.serialize())])
             }
-            return SignalKeys.upload(identity: identity, registrationId: registrationId, signedPreKey: signedPreKey,
-                                     preKeys: records)
+            return SignalKeys.upload(signedPreKey: signedPreKey, preKeys: records)
         }
     }
 
     private static func address(_ address: ProtocolAddress) -> String {
         "\(address.name).\(address.deviceId)"
+    }
+
+    /// Trust is per account: a device address resolves to its user through the device directory.
+    private func userId(of address: ProtocolAddress, in db: Database) throws -> String {
+        guard let userId = try String.fetchOne(db, sql: "SELECT user_id FROM devices WHERE device_id = ?",
+                                               arguments: [address.name]) else {
+            throw SignalError.invalidState("device \(address.name) is not in the device directory")
+        }
+        return userId
     }
 
     /// Signal callbacks and the receive-path persistence run on the same SQLite transaction.
@@ -101,12 +110,13 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
         try read(context) { db in try Data.fetchOne(db, sql: sql, arguments: [key]) }
     }
 
+    private func write<T>(_ context: StoreContext, _ operation: (Database) throws -> T) throws -> T {
+        if let transaction = context as? TransactionContext { return try operation(transaction.database) }
+        return try db.write(operation)
+    }
+
     private func write(_ sql: String, _ arguments: StatementArguments, _ context: StoreContext) throws {
-        if let transaction = context as? TransactionContext {
-            try transaction.database.execute(sql: sql, arguments: arguments)
-        } else {
-            try db.write { db in try db.execute(sql: sql, arguments: arguments) }
-        }
+        try write(context) { db in try db.execute(sql: sql, arguments: arguments) }
     }
 
     // MARK: - IdentityKeyStore
@@ -125,15 +135,24 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
         return UInt32(id)
     }
 
-    /// Signal's policy for an unverified contact: a changed identity key is accepted and logged, not
-    /// refused, so a reinstalled peer stays reachable.
+    /// Signal's policy for an unverified contact: the first key seen for an account is trusted, and a
+    /// different one is accepted as an account reset. Then every session with the account's devices is
+    /// dropped and the change is logged. Returns whether the key changed.
     func saveIdentity(_ identity: IdentityKey, for address: ProtocolAddress, context: StoreContext) throws -> Bool {
-        let key = Self.address(address)
         let new = Data(identity.serialize())
-        let existing = try blob("SELECT key_data FROM signal_identities WHERE address = ?", key, context)
-        if let existing, !constantTimeEqual(existing, new) { logger.identityChanged(address: key) }
-        try write("INSERT OR REPLACE INTO signal_identities (address, key_data) VALUES (?, ?)", [key, new], context)
-        return existing != nil
+        let (userId, changed) = try write(context) { db -> (String, Bool) in
+            let userId = try self.userId(of: address, in: db)
+            let existing = try Data.fetchOne(db, sql: "SELECT key_data FROM signal_identities WHERE user_id = ?", arguments: [userId])
+            if let existing, constantTimeEqual(existing, new) { return (userId, false) }
+            try db.execute(sql: "INSERT OR REPLACE INTO signal_identities (user_id, key_data) VALUES (?, ?)", arguments: [userId, new])
+            guard existing != nil else { return (userId, false) }
+            try db.execute(sql: """
+                DELETE FROM signal_sessions WHERE address IN (SELECT device_id || '.\(Messenger.deviceSlot)' FROM devices WHERE user_id = ?)
+            """, arguments: [userId])
+            return (userId, true)
+        }
+        if changed { logger.identityChanged(userId: userId) }
+        return changed
     }
 
     func isTrustedIdentity(_ identity: IdentityKey, for address: ProtocolAddress, direction: Direction,
@@ -142,7 +161,10 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
     }
 
     func identity(for address: ProtocolAddress, context: StoreContext) throws -> IdentityKey? {
-        try blob("SELECT key_data FROM signal_identities WHERE address = ?", Self.address(address), context).map { try IdentityKey(bytes: $0) }
+        try read(context) { db in
+            try Data.fetchOne(db, sql: "SELECT key_data FROM signal_identities WHERE user_id = ?",
+                              arguments: [self.userId(of: address, in: db)])
+        }.map { try IdentityKey(bytes: $0) }
     }
 
     // MARK: - PreKeyStore
@@ -205,7 +227,8 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
     }
 }
 
-/// A new device's Signal identity, signed prekey and one-time prekeys.
+/// A new device's keys: the account identity (new for a primary, received for a linked device), its own
+/// registration id, signed prekey and one-time prekeys.
 struct SignalKeys {
     static let initialPreKeyCount: UInt32 = 100
 
@@ -214,9 +237,8 @@ struct SignalKeys {
     let signedPreKey: SignedPreKeyRecord
     let preKeys: [PreKeyRecord]
 
-    static func generate() throws -> SignalKeys {
-        let identity = IdentityKeyPair.generate()
-        return SignalKeys(
+    static func generate(identity: IdentityKeyPair = .generate()) throws -> SignalKeys {
+        SignalKeys(
             identity: identity,
             registrationId: UInt32.random(in: 1...16380),
             signedPreKey: try generateSignedPreKey(identity: identity, id: PersistentSignalStore.signedPreKeyId),
@@ -231,15 +253,24 @@ struct SignalKeys {
                                       privateKey: privateKey, signature: signature)
     }
 
-    func upload() -> DeviceKeysUpload {
-        Self.upload(identity: identity, registrationId: registrationId, signedPreKey: signedPreKey, preKeys: preKeys)
+    func accountRequest(username: String, password: String, name: String) -> AccountProvisionRequest {
+        let keys = Self.upload(signedPreKey: signedPreKey, preKeys: preKeys)
+        return AccountProvisionRequest(
+            username: username, password: password, name: name,
+            identityKey: Data(identity.publicKey.serialize()).base64EncodedString(),
+            registrationId: Int(registrationId), signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys)
     }
 
-    static func upload(identity: IdentityKeyPair, registrationId: UInt32, signedPreKey: SignedPreKeyRecord,
-                       preKeys: [PreKeyRecord]) -> DeviceKeysUpload {
-        DeviceKeysUpload(
+    func deviceRequest(name: String, linkSessionId: String) -> CreateDeviceRequest {
+        let keys = Self.upload(signedPreKey: signedPreKey, preKeys: preKeys)
+        return CreateDeviceRequest(
+            linkSessionId: linkSessionId, name: name,
             identityKey: Data(identity.publicKey.serialize()).base64EncodedString(),
-            registrationId: Int(registrationId),
+            registrationId: Int(registrationId), signedPreKey: keys.signedPreKey, oneTimePreKeys: keys.oneTimePreKeys)
+    }
+
+    static func upload(signedPreKey: SignedPreKeyRecord, preKeys: [PreKeyRecord]) -> PreKeysUpload {
+        PreKeysUpload(
             signedPreKey: SignedPreKeyUpload(
                 keyId: Int(signedPreKey.id),
                 publicKey: Data(signedPreKey.publicKey.serialize()).base64EncodedString(),

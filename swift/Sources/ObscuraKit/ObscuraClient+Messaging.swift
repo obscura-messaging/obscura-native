@@ -16,36 +16,14 @@ extension ObscuraClient {
 
         let (userId, sender) = try await sendContext()
         let generation = sessionGeneration
-        var recipients: [SubmissionResult] = []
-        for recipient in Self.distinct(recipientUserIds, excluding: userId) {
-            try Task.checkCancellation()
-            guard generation == sessionGeneration else { throw CancellationError() }
-            recipients += await sender.send(to: recipient, data, acceptedDeviceIds: acceptedDeviceIds)
-        }
+        let peers = Self.distinct(recipientUserIds, excluding: userId)
+        let results = await sender.send(to: peers + [userId], data, acceptedDeviceIds: acceptedDeviceIds)
         try Task.checkCancellation()
         guard generation == sessionGeneration else { throw CancellationError() }
-        let selfSync: [SubmissionResult]
-        do {
-            let deviceIds = try await ownDeviceIds()
-            do {
-                try await devices.replace(userId: userId, deviceIds: deviceIds)
-                guard generation == sessionGeneration else { throw CancellationError() }
-                selfSync = await sender.send(to: userId, data, acceptedDeviceIds: acceptedDeviceIds)
-            } catch {
-                guard generation == sessionGeneration, !Task.isCancelled, !(error is CancellationError) else {
-                    throw CancellationError()
-                }
-                selfSync = [SubmissionResult(userId: userId, deviceId: nil, status: .rejected, error: "\(error)")]
-            }
-        } catch {
-            guard generation == sessionGeneration, !Task.isCancelled, !(error is CancellationError) else {
-                throw CancellationError()
-            }
-            selfSync = [SubmissionResult(userId: userId, deviceId: nil, status: .unknown, error: "\(error)")]
-        }
-        try Task.checkCancellation()
-        guard generation == sessionGeneration else { throw CancellationError() }
-        return SendReport(recipients: recipients, selfSync: selfSync)
+        return SendReport(
+            recipients: results.filter { $0.userId != userId },
+            selfSync: results.filter { $0.userId == userId }
+        )
     }
 
     /// Every send refreshes a near-expiry token once, up front.
@@ -53,19 +31,6 @@ extension ObscuraClient {
         let session = try await requireFreshSession()
         guard let sender else { throw ObscuraError.notAuthenticated }
         return (session.userId, sender)
-    }
-
-    func refreshOwnDirectory() async throws {
-        let current = try requireSession()
-        try await devices.replace(userId: current.userId, deviceIds: ownDeviceIds())
-    }
-
-    private func ownDeviceIds() async throws -> [String] {
-        _ = try requireSession()
-        let generation = sessionGeneration
-        let deviceIds = try await api.fetchOwnDeviceIds()
-        guard generation == sessionGeneration else { throw CancellationError() }
-        return deviceIds
     }
 
     func sendControl(_ message: Obscura_Client_V1_ClientMessage, to userId: String) async throws {
@@ -79,6 +44,7 @@ extension ObscuraClient {
 
     // MARK: - Friends
 
+    /// Primary only.
     public func addFriendByCode(_ code: String) async throws {
         let decoded = try FriendCode.decode(code)
         try await befriend(decoded.userId, username: decoded.username)
@@ -91,6 +57,7 @@ extension ObscuraClient {
 
     func befriend(_ userId: String, username: String) async throws {
         let me = try requireSession()
+        try await requirePrimary()
         let existing = try await friends.friend(userId)?.status
         switch existing {
         case .accepted?: return
@@ -103,14 +70,18 @@ extension ObscuraClient {
         do {
             try await sendControl(message, to: userId)
         } catch {
-            if existing == nil { try await friends.removePendingSent(userId) }
+            if existing == nil { _ = try await friends.removePendingSent(userId) }
             throw error
         }
+        if existing == nil { try await syncFriendList() }
     }
 
+    /// Primary only.
     public func acceptFriend(_ userId: String) async throws {
+        try await requirePrimary()
         try await sendFriendAccept(to: userId)
         try await friends.updateStatus(userId, .accepted)
+        try await syncFriendList()
     }
 
     func sendFriendAccept(to userId: String) async throws {
@@ -119,9 +90,23 @@ extension ObscuraClient {
         try await sendControl(message, to: userId)
     }
 
-    /// Forgets the friend and their devices locally. Nothing is sent to them.
+    /// Primary only. Forgets the friend and their devices locally. Nothing is sent to them.
     public func removeFriend(_ userId: String) async throws {
+        try await requirePrimary()
         try await friends.remove(userId)
+        try await syncFriendList()
+    }
+
+    /// Sends the whole friend list to this account's other devices. Delivery failures are logged: the
+    /// next change sends the whole list again.
+    func syncFriendList() async throws {
+        let (userId, sender) = try await sendContext()
+        var message = Obscura_Client_V1_ClientMessage()
+        message.friendListSync = try await friends.listSync()
+        let results = await sender.send(to: userId, try message.serializedData(), acceptedDeviceIds: [])
+        for result in results where result.status != .accepted {
+            logger.log("friend list sync to \(result.deviceId ?? userId) \(result.status.rawValue): \(result.error ?? "")")
+        }
     }
 
     public func getFriends() async throws -> [Friend] {
@@ -147,12 +132,11 @@ extension ObscuraClient {
         let data = try message.serializedData()
 
         let (userId, sender) = try await sendContext()
-        for recipient in Self.distinct(recipientUserIds, excluding: userId) {
-            do {
-                try await sender.sendOrThrow(to: recipient, data)
-            } catch {
-                logger.log("typing signal to \(recipient) failed: \(error)")
-            }
+        let peers = Self.distinct(recipientUserIds, excluding: userId)
+        let results = await sender.send(to: peers, data, acceptedDeviceIds: [])
+        for recipient in peers where !results.contains(where: { $0.userId == recipient && $0.status == .accepted }) {
+            let errors = results.filter { $0.userId == recipient }.map { $0.error ?? $0.status.rawValue }.joined(separator: "; ")
+            logger.log("typing signal to \(recipient) failed: \(errors)")
         }
     }
 
@@ -178,7 +162,7 @@ extension ObscuraClient {
         let generation = sessionGeneration
         let ciphertext = try await api.fetchAttachment(id)
         guard generation == sessionGeneration, !Task.isCancelled else { throw CancellationError() }
-        return try AttachmentCrypto.decrypt(ciphertext, contentKey: contentKey, nonce: nonce)
+        return try AttachmentCrypto.open(ciphertext, key: contentKey, nonce: nonce)
     }
 
     public func registerPushToken(_ token: String) async throws {

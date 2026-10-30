@@ -62,7 +62,7 @@ final class APIClientTests: XCTestCase {
         let client = try makeClient(apiURL: "https://\(RetryProtocol.host)")
         try client.signalStore.install(SignalKeys.generate())
         let deviceId = UUID().uuidString.lowercased()
-        try await client.devices.setLocalDeviceId(deviceId)
+        try await client.db.write { try DeviceStore.setLocalDevice(deviceId, primaryDeviceId: deviceId, in: $0) }
 
         let scenario = try await client.login("known-account", "incorrect-password")
 
@@ -75,8 +75,8 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(json["deviceId"], deviceId)
     }
 
-    func testMessageRetriesKeepTheSameBodySubmissionIDsAndIdempotencyKey() async throws {
-        RetryProtocol.responses.withLock { $0 = [(429, "0"), (503, "0"), (200, nil)] }
+    func testMessageRetriesKeepTheSameBodyAndIdempotencyKeyAndEachSubmissionGetsAFreshKey() async throws {
+        RetryProtocol.responses.withLock { $0 = [(429, "0"), (503, "0"), (200, nil), (200, nil)] }
         let api = try APIClient(baseURL: "https://\(RetryProtocol.host)")
         var submission = Obscura_V1_SendMessageRequest.Submission()
         submission.submissionID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
@@ -87,15 +87,16 @@ final class APIClientTests: XCTestCase {
         let body = try message.serializedData()
 
         _ = try await api.sendMessage(body)
+        _ = try await api.sendMessage(body)
 
         let requests = RetryProtocol.requests.withLock { $0 }
-        XCTAssertEqual(requests.count, 3)
+        XCTAssertEqual(requests.count, 4)
         XCTAssertTrue(requests.allSatisfy { $0.httpBody == body })
         let keys = requests.compactMap { $0.value(forHTTPHeaderField: "Idempotency-Key") }
-        XCTAssertEqual(keys.count, 3)
-        XCTAssertEqual(Set(keys).count, 1)
-        XCTAssertEqual(keys.first?.count, 32, "Rust UUID parsing accepts the compact 32-hex representation")
-        XCTAssertTrue(keys.allSatisfy { $0.allSatisfy(\.isHexDigit) })
+        XCTAssertEqual(keys.count, 4)
+        XCTAssertEqual(Set(keys.prefix(3)).count, 1, "retries of one submission keep its key")
+        XCTAssertNotEqual(keys[3], keys[0], "a new submission gets a new key")
+        XCTAssertTrue(keys.allSatisfy { UUID(uuidString: $0) != nil })
     }
 
     func testCleartextIsRefusedExceptOnLoopback() {

@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS ModelEntry (
     PRIMARY KEY (model_name, entry_id)
 );
 
+selectAll:
+SELECT * FROM ModelEntry ORDER BY model_name, entry_id;
+
 selectByModel:
 SELECT * FROM ModelEntry WHERE model_name = ?;
 

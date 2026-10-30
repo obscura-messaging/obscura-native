@@ -29,9 +29,10 @@ Wire mappings live in each kit's `WireCodec` and are checked against
 [`wire.json`](../protocol/conformance/wire.json). `AppEntry` encoding
 preserves model, id, timestamp and data; byte-canonical encoding is not
 required. Typing maps only STARTED/STOPPED; unspecified states are ignored.
+The device-link envelope derivation and link code encoding are checked against
+[`link.json`](../protocol/conformance/link.json).
 
-Device linking, approval codes, takeover, device announcements, and
-friendship export/import do not exist.
+Takeover and device announcements do not exist.
 
 ## Construction and persistence
 
@@ -58,85 +59,105 @@ than throwing; cancellation still cancels.
 Before the first public release, schema changes can require clearing app
 data. There are no compatibility migrations.
 
-## Login
+## Login, linking, and account reset
 
 `AuthState` is `loggedOut` or `authenticated`.
 
 | Operation / outcome | Behavior |
 |---|---|
-| `register(username, password)` | Creates the account and this device, persists the session, authenticates |
-| `login` -> `existingDevice` | Authenticates the stored local device |
-| `login` -> `newDevice` | No stored device; stays logged out |
-| `login` -> `deviceMismatch` | Stored device does not belong to this account or is no longer usable; stays logged out |
-| `login` -> `invalidCredentials` | User login rejected with 401/403; stays logged out |
-| `loginAndProvision(username, password)` | Authenticates the account and provisions an independent device |
+| `register(username, password)` | Creates the account and provisions this device as the primary with a new identity (`POST /v1/users`) |
+| `login` -> `existingDevice` | Authenticates the stored local device (`POST /v1/sessions` with `deviceId`) |
+| `login` -> `linkRequired` | No stored local device; verifies credentials and opens a link session (`POST /v1/link-sessions`), staying logged out |
+| `login` -> `deviceMismatch` | Stored local device no longer belongs to this account (`409` on `POST /v1/sessions`) or lacks a local Signal identity; stays logged out |
+| `login` -> `invalidCredentials` | Credentials rejected with 401/403; stays logged out |
+| `beginLink(username, password, deviceName)` | After `linkRequired`: reuses the link session from `login` (or opens a new one) and returns a `LinkRequest` whose `code` is shown to the primary |
+| `linkCodeDeviceName(code)` | Returns the `deviceName` encoded in a `LinkCode` without network I/O |
+| `approveLink(code)` | Primary only (`NOT_PRIMARY` otherwise): encrypts the account identity, versioned friend list, and `HistorySnapshot` into a `LinkEnvelope` and uploads it to the link session |
+| `completeLink(request)` | Polls `GET /v1/link-sessions/{id}` until approved (`LINK_FAILED` on 404, expiry, or decryption failure), provisions this device via `POST /v1/devices` with keys signed by the account identity, imports friends and history, and connects |
+| `resetAccount(username, password)` | Deletes all devices and replaces the account identity on the server while provisioning this device as the new primary (`POST /v1/account/reset`), wipes old local data, and installs the new primary session |
+| `isPrimary` | Whether this device is the account's primary device |
+| `devices()` | Lists the account's devices (`GET /v1/devices`), marking `isPrimary` and `isThisDevice` |
+| `unlinkDevice(deviceId)` | Primary unlinks any other device (`INVALID_ARGUMENT` for itself); a linked device unlinks only itself (`NOT_PRIMARY` for others), then signs out and wipes local data |
 | `logout()` | Disconnects, stops background work, clears credentials, storage and typing; keeps local data |
 | `wipeDevice()` | Logs out, then deletes local Signal state, friends, devices, identity, entries and inbox |
 
-Other HTTP failures throw. The app calls `loginAndProvision` after
-`newDevice`; after `deviceMismatch` it wipes first. Registration and
-provisioning share one key-generation path: an identity, signed prekey id 1,
-and 100 one-time prekeys.
+Other HTTP failures throw. Registration and account reset generate a new
+account identity key pair, registration id, signed prekey id 1, and 100
+one-time prekeys; linking generates a fresh registration id, signed prekey id 1,
+and 100 one-time prekeys signed by the imported account identity key pair.
 
-Logout revokes the refresh token best-effort; failure is logged. Durable
-clears and wipes are not best-effort.
+Logout revokes the refresh token best-effort; failure is logged. Unlinking this
+device or resetting the account skips server refresh-token revocation because
+the server already deleted the device. Durable clears and wipes are not
+best-effort.
 
 **Token refresh** is internal. Concurrent callers share one in-flight
-request. A 401/403 or missing refresh token rejects the session; network and
-server failures keep it. Background refresh runs at 80% of remaining token
-lifetime, at least 5 s, with failure backoff from 5 s doubling to 5 min.
-A completed refresh from a superseded session must not restore credentials,
-overwrite storage, or sign out a newer session.
-Attachment upload/download, push registration, and prekey refill join this
-refresh path before making authenticated HTTP requests.
+request. A 401 on any authenticated session request triggers this shared
+refresh: if the refresh is rejected (401/403 or missing refresh token), the
+device signs out and throws `NOT_AUTHENTICATED`; if it succeeds, the request is
+retried once; network and 5xx failures keep the session. Background refresh
+runs at 80% of remaining token lifetime, at least 5 s, with failure backoff
+from 5 s doubling to 5 min. A completed refresh from a superseded session must
+not restore credentials, overwrite storage, or sign out a newer session.
 
-## Devices and sessions
+## Multi-device accounts, trust, and complete delivery
 
-Several devices may sign in independently at the same time. Each installation
-has its own Signal identity, device id, database, and friend graph. Signing
-into a new installation does not transfer keys, friendships, or history.
-Self-sync sends subsequent writes; it is not a historical backfill.
+Each account has one Signal identity key pair shared by all its devices (up to
+the server limit). Each device has its own device UUID, registration id, signed
+prekeys, one-time prekeys, and Signal sessions.
+
+The first device provisioned on an account is the **primary**. Only the primary
+may link or unlink other devices or mutate the friend list (`addFriendByCode`,
+`acceptFriend`, `removeFriend`). Linked devices are never promoted: losing the
+primary requires `resetAccount`, which peers
+observe as an account-level identity change.
 
 There is one device directory keyed by `(userId, deviceId)`, including the
 account's own devices. No parallel device list lives in a friend row or
 in-memory cache.
 
-**Discovery:**
+**Discovery and complete delivery:**
 
-- The existing `GET /v1/devices` endpoint lists the signed-in account's
-  devices without consuming prekeys. The kit refreshes this list on connect
-  and once per self-sync send.
+- Every `POST /v1/messages` request names its target users in
+  `recipient_user_ids` (batching peer recipients and the sender's own `userId`
+  for self-sync into one request per round), even for a user with no
+  submissions.
+- When the directory has no devices for a target user, the kit fetches all of
+  that user's bundles (`GET /v1/users/{id}`). Otherwise it fetches bundles only
+  for target devices missing a Signal session, one device at a time
+  (`GET /v1/users/{id}/devices/{deviceId}`), so existing devices do not lose
+  one-time prekeys.
+- Processing a bundle over an established session would restart its ratchet and
+  must not happen.
+- All bundles for a user must carry the same account identity key and valid
+  signed-prekey signatures (`PROTOCOL_VIOLATION` otherwise).
+- If the server rejects a user's submissions with `ERROR_CODE_DEVICE_MISMATCH`,
+  the kit adds `missing_device_ids` to the directory, establishes missing
+  sessions, and retries only the mismatched users with a new `Idempotency-Key`
+  (up to 3 rounds). Users whose device sets were complete are settled in the
+  first round. Devices rejected with `ERROR_CODE_INVALID_DEVICE` are removed
+  from the directory.
+- When all known targets of a user are in `acceptedDeviceIds`, the kit sends
+  one probe request with no submissions (`recipient_user_ids: [userId]`) to
+  check whether a new device was linked since.
 - A successfully decrypted inbound envelope teaches the directory its
-  server-stamped sender user/device pair. This write precedes acknowledgement.
-  Failed decrypts and payload fields cannot teach device ownership.
-- Peer bundles are fetched only for an empty directory, a target missing a
-  Signal session, or a server `INVALID_DEVICE` result. A refresh replaces the
-  user's list with the server's list, excluding unusable bundles; 404 means
-  no devices.
+  server-stamped `(senderUserId, senderDeviceId)` pair before acknowledgement.
 
-A silent new peer installation is not proactively discovered. It becomes
-known through authenticated incoming traffic or the next necessary bundle
-refresh. There is no periodic bundle fetch or replacement announcement
-protocol.
+Peer identity is trusted per account (`userId`). When a peer's bundle or
+prekey message presents a new identity key (after `resetAccount`), the kit
+replaces the stored key for that user, deletes all Signal sessions with that
+user's devices, and notifies `identityChanged(userId)`.
 
-Fetching a user's bundles consumes a one-time prekey on each of their
-devices. Every outgoing message uses the same `MessageSender` path, which:
+**Friend authority and sync:**
 
-1. Uses stored devices and existing sessions.
-2. Fetches at most once in a send attempt; after `INVALID_DEVICE`, retries
-   newly discovered targets and drops removed targets.
-3. Builds only missing sessions. Processing a bundle over an established
-   session would restart it and must not happen.
-4. Excludes the sending device and serializes concurrent sends to one user.
-
-A changed identity key is accepted, persisted, and reported through the
-logger, as for an unverified Signal contact. Device ids are never replaced
-by registration ids.
-
-`removeFriend(userId)` removes the local relationship and its device
-directory entry, sends nothing, and leaves application entries alone.
-Names in friend requests/codes are local display labels, not
-server-verified identity.
+Only the primary processes `addFriendByCode`, `acceptFriend`, `removeFriend`,
+and incoming `FRIEND_REQUEST` / `FRIEND_ACCEPT` messages. After every friend
+list change, the primary increments the local friend-list version and sends a
+full `FRIEND_LIST_SYNC` to its own account's linked devices. Linked devices
+apply `FRIEND_LIST_SYNC` only when sent by their account's primary with a
+strictly higher version. `removeFriend(userId)` removes the local relationship
+and its device directory entries, sends nothing to the peer, and leaves
+application entries alone.
 
 ## Connection and HTTP
 
@@ -210,13 +231,14 @@ transaction.
 | `APP_ENTRY` | Inbox opaque `data`, model, id and timestamp |
 | `FRIEND_REQUEST`, `FRIEND_ACCEPT` | Kit-internal friend transition |
 | `TYPING_SIGNAL` | Ephemeral, no inbox row |
+| `FRIEND_LIST_SYNC` | Kit-internal: replaces the friend list if sent by the account's primary with a newer version, otherwise ignored |
 | Unknown/unset arm | Inbox the whole serialized message as `UNKNOWN` |
 
 A request from an unknown sender becomes pending-received. Crossed
 requests accept the friendship. Other requests do not relabel known
 peers. A request from an already accepted account gets an idempotent
-accept reply without changing that relationship, so an independent new
-installation can explicitly re-add the peer. An accept promotes only a
+accept reply without changing that relationship, so a peer that reset
+its account can explicitly re-add the peer. An accept promotes only a
 pending-sent relationship.
 
 Outgoing requests are recorded as pending-sent before submission, so a fast
@@ -274,8 +296,9 @@ is a no-op. Durable deletion failures propagate.
 returns `SendReport { recipients, selfSync }`.
 
 The kit never infers or broadens recipients. Duplicates and the sender's
-own user id are excluded from peer recipients. It sends separately to the
-sender's other devices and never writes a local entry.
+own user id are excluded from peer recipients. Peer recipients and the
+sender's own user id (for self-sync) are batched into one `POST /v1/messages`
+request per round, and the kit never writes a local entry.
 
 Each result has user id, nullable device id, status
 (`accepted`, `rejected`, `unknown`), and optional error.
@@ -322,7 +345,7 @@ Both kits use these deliberate error codes:
 
 `NOT_AUTHENTICATED`, `INVALID_ARGUMENT`, `INVALID_FRIEND_CODE`,
 `HTTP_ERROR`, `CONNECTION_FAILED`, `SEND_FAILED`, `PROTOCOL_VIOLATION`,
-`STORAGE_ERROR`.
+`STORAGE_ERROR`, `NOT_PRIMARY`, `LINK_FAILED`.
 
 HTTP errors retain status/body; other classified errors retain useful
 details. Underlying database, filesystem and cryptographic failures

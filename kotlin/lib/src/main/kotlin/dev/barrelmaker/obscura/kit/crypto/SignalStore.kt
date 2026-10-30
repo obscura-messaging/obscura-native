@@ -13,18 +13,20 @@ import org.signal.libsignal.protocol.state.PreKeyRecord
 import org.signal.libsignal.protocol.state.SessionRecord
 import org.signal.libsignal.protocol.state.SignalProtocolStore
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord
-import org.signal.libsignal.protocol.util.KeyHelper
 import java.security.MessageDigest
 import java.util.UUID
 
-/** All libsignal store interfaces over SQLite. The server has no Kyber prekeys. */
+/**
+ * All libsignal store interfaces over SQLite. The server has no Kyber prekeys. Peer identities are
+ * trusted per account: an address `<deviceUuid>.1` resolves to its user through the device directory.
+ */
 internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStore {
     private val queries = db.signalKeyQueries
 
     @Volatile private var localIdentity: Pair<IdentityKeyPair, Int>? =
         queries.selectLocalIdentity().executeAsOneOrNull()?.let { IdentityKeyPair(it.identity_key_pair) to it.registration_id.toInt() }
 
-    /** Called with the address whose identity key changed (a peer reinstalled or re-keyed). */
+    /** Called with the user whose account identity key changed (an account reset). */
     var onIdentityChanged: (String) -> Unit = {}
 
     fun hasIdentity(): Boolean = localIdentity != null && queries.selectLocalIdentity().executeAsOneOrNull() != null
@@ -32,11 +34,10 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     /** Keep ratchet changes and the corresponding durable receive writes in the same transaction. */
     internal fun <T> transaction(block: () -> T): T = db.transactionWithResult { block() }
 
-    fun generateIdentity(): Pair<IdentityKeyPair, Int> {
-        val identity = IdentityKeyPair.generate() to KeyHelper.generateRegistrationId(false)
-        queries.insertLocalIdentity(identity.first.serialize(), identity.second.toLong())
-        localIdentity = identity
-        return identity
+    /** Joins an enclosing transaction; the identity is in use only once that commits. */
+    fun installIdentity(identity: IdentityKeyPair, registrationId: Int) = db.transaction {
+        queries.insertLocalIdentity(identity.serialize(), registrationId.toLong())
+        afterCommit { localIdentity = identity to registrationId }
     }
 
     /** Delete every key, session and identity, this device's included. */
@@ -55,14 +56,21 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     override fun getIdentityKeyPair(): IdentityKeyPair = checkNotNull(localIdentity) { "Identity not initialized" }.first
     override fun getLocalRegistrationId(): Int = checkNotNull(localIdentity) { "Identity not initialized" }.second
 
+    /**
+     * A key that differs from the account's stored one replaces it for the whole account: every
+     * session with the user's devices is dropped, as after an account reset.
+     */
     override fun saveIdentity(address: SignalProtocolAddress, identityKey: IdentityKey): IdentityKeyStore.IdentityChange {
-        val key = address.key()
-        val existing = queries.selectIdentityByAddress(key).executeAsOneOrNull()
-        queries.insertIdentity(key, identityKey.serialize())
-        if (existing == null || MessageDigest.isEqual(existing, identityKey.serialize())) {
-            return IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED
+        val userId = userOf(address)
+        val changed = db.transactionWithResult {
+            val existing = queries.selectIdentityByUser(userId).executeAsOneOrNull()
+            if (existing != null && MessageDigest.isEqual(existing, identityKey.serialize())) return@transactionWithResult false
+            queries.insertIdentity(userId, identityKey.serialize())
+            if (existing != null) queries.deleteSessionsOfUser(userId)
+            existing != null
         }
-        onIdentityChanged(key)
+        if (!changed) return IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED
+        onIdentityChanged(userId)
         return IdentityKeyStore.IdentityChange.REPLACED_EXISTING
     }
 
@@ -75,7 +83,12 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     ): Boolean = true
 
     override fun getIdentity(address: SignalProtocolAddress): IdentityKey? =
-        queries.selectIdentityByAddress(address.key()).executeAsOneOrNull()?.let(::IdentityKey)
+        db.deviceQueries.selectUser(address.name).executeAsOneOrNull()
+            ?.let { queries.selectIdentityByUser(it).executeAsOneOrNull() }?.let(::IdentityKey)
+
+    private fun userOf(address: SignalProtocolAddress): String =
+        db.deviceQueries.selectUser(address.name).executeAsOneOrNull()
+            ?: throw IllegalStateException("Device ${address.name} is not in the directory")
 
     override fun loadPreKey(preKeyId: Int): PreKeyRecord =
         queries.selectPreKey(preKeyId.toLong()).executeAsOneOrNull()?.let(::PreKeyRecord)

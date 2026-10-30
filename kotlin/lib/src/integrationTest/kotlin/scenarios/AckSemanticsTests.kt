@@ -29,7 +29,7 @@ class AckSemanticsTests {
         override fun ackFailed(envelopeId: String, reason: String) {}
         override fun tokenRefreshFailed(attempt: Int, reason: String) {}
         override fun preKeyReplenishFailed(reason: String) {}
-        override fun identityChanged(address: String) {}
+        override fun identityChanged(userId: String) {}
         override fun databaseError(store: String, operation: String, reason: String) {}
     }
 

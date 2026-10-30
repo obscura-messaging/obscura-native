@@ -3,107 +3,91 @@ package scenarios
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
+import dev.barrelmaker.obscura.kit.generateIdentity
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.signal.libsignal.protocol.*
 import org.signal.libsignal.protocol.ecc.Curve
 import org.signal.libsignal.protocol.state.*
-import org.signal.libsignal.protocol.util.KeyHelper
 
 class SignalStoreTests {
 
     private lateinit var store: SignalStore
+    private lateinit var db: ObscuraDatabase
 
     @BeforeEach
     fun setup() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ObscuraDatabase.Schema.create(driver)
-        val db = ObscuraDatabase(driver)
+        db = ObscuraDatabase(driver)
+        db.deviceQueries.insert("alice-user", "alice-phone")
+        db.deviceQueries.insert("alice-user", "alice-tablet")
+        db.deviceQueries.insert("bob-user", "bob-phone")
         store = SignalStore(db)
     }
 
     @Test
-    fun `generateIdentity creates and persists keypair`() {
+    fun `an installed identity is used and survives a reload`() {
         val (keyPair, regId) = store.generateIdentity()
-        assertNotNull(keyPair)
         assertTrue(regId > 0, "Registration ID should be positive")
         assertEquals(keyPair, store.getIdentityKeyPair())
         assertEquals(regId, store.getLocalRegistrationId())
+
+        val reloaded = SignalStore(db)
+        assertArrayEquals(keyPair.serialize(), reloaded.getIdentityKeyPair().serialize())
+        assertEquals(regId, reloaded.getLocalRegistrationId())
     }
 
     @Test
-    fun `Identity survives store reload`() {
-        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
-        ObscuraDatabase.Schema.create(driver)
-        val db = ObscuraDatabase(driver)
-
-        val store1 = SignalStore(db)
-        val (keyPair, regId) = store1.generateIdentity()
-
-        val store2 = SignalStore(db)
-        assertEquals(keyPair.serialize().toList(), store2.getIdentityKeyPair().serialize().toList(),
-            "Identity keypair should survive store reload")
-        assertEquals(regId, store2.getLocalRegistrationId())
-    }
-
-    @Test
-    fun `saveIdentity TOFU — first save returns NEW_OR_UNCHANGED (not replaced)`() {
-        store.generateIdentity()
+    fun `the first identity of an account is trusted on first use`() {
         val remoteKey = IdentityKeyPair.generate()
-        val address = SignalProtocolAddress("alice-user-id", 1)
-        val change = store.saveIdentity(address, remoteKey.publicKey)
-        assertEquals(IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED, change,
-            "First identity save should return NEW_OR_UNCHANGED (TOFU, not a replacement)")
+        val change = store.saveIdentity(SignalProtocolAddress("alice-phone", 1), remoteKey.publicKey)
+        assertEquals(IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED, change)
     }
 
     @Test
-    fun `saveIdentity — same key returns true but no change callback`() {
-        store.generateIdentity()
-        var callbackFired = false
-        store.onIdentityChanged = { callbackFired = true }
+    fun `identity is per account, so every device of the user resolves to it`() {
+        val key = IdentityKeyPair.generate()
+        var changes = 0
+        store.onIdentityChanged = { changes++ }
 
-        val remoteKey = IdentityKeyPair.generate()
-        val address = SignalProtocolAddress("alice", 1)
-        store.saveIdentity(address, remoteKey.publicKey)
-        store.saveIdentity(address, remoteKey.publicKey)
+        store.saveIdentity(SignalProtocolAddress("alice-phone", 1), key.publicKey)
+        assertEquals(IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED,
+            store.saveIdentity(SignalProtocolAddress("alice-tablet", 1), key.publicKey))
 
-        assertFalse(callbackFired, "Re-saving same key should NOT fire identity changed callback")
+        assertEquals(key.publicKey, store.getIdentity(SignalProtocolAddress("alice-tablet", 1)))
+        assertNull(store.getIdentity(SignalProtocolAddress("bob-phone", 1)))
+        assertEquals(0, changes)
     }
 
     @Test
-    fun `saveIdentity — different key fires onIdentityChanged`() {
-        store.generateIdentity()
-        var changedAddress: String? = null
-        store.onIdentityChanged = { changedAddress = it }
-
+    fun `a changed account identity is trusted, saved, reported by user and drops all of the user's sessions`() {
         val key1 = IdentityKeyPair.generate()
         val key2 = IdentityKeyPair.generate()
-        val address = SignalProtocolAddress("alice", 1)
-
-        store.saveIdentity(address, key1.publicKey)
-        store.saveIdentity(address, key2.publicKey)
-
-        assertEquals("alice.1", changedAddress,
-            "Identity change callback should fire with correct address")
-    }
-
-    @Test
-    fun `a changed identity is trusted, saved and reported`() {
-        store.generateIdentity()
-        val key1 = IdentityKeyPair.generate()
-        val key2 = IdentityKeyPair.generate()
-        val address = SignalProtocolAddress("alice", 1)
         val changes = mutableListOf<String>()
         store.onIdentityChanged = { changes += it }
+        store.saveIdentity(SignalProtocolAddress("alice-phone", 1), key1.publicKey)
+        for (device in listOf("alice-phone", "alice-tablet", "bob-phone")) store.storeSession(SignalProtocolAddress(device, 1), SessionRecord())
 
-        store.saveIdentity(address, key1.publicKey)
-        assertTrue(store.isTrustedIdentity(address, key2.publicKey, IdentityKeyStore.Direction.SENDING))
-        assertTrue(store.isTrustedIdentity(address, key2.publicKey, IdentityKeyStore.Direction.RECEIVING))
-        store.saveIdentity(address, key2.publicKey)
+        assertTrue(store.isTrustedIdentity(SignalProtocolAddress("alice-tablet", 1), key2.publicKey, IdentityKeyStore.Direction.SENDING))
+        assertTrue(store.isTrustedIdentity(SignalProtocolAddress("alice-tablet", 1), key2.publicKey, IdentityKeyStore.Direction.RECEIVING))
+        assertEquals(IdentityKeyStore.IdentityChange.REPLACED_EXISTING,
+            store.saveIdentity(SignalProtocolAddress("alice-tablet", 1), key2.publicKey))
 
-        assertEquals(key2.publicKey, store.getIdentity(address))
-        assertEquals(listOf("alice.1"), changes)
+        assertEquals(key2.publicKey, store.getIdentity(SignalProtocolAddress("alice-phone", 1)))
+        assertEquals(listOf("alice-user"), changes)
+        assertFalse(store.containsSession(SignalProtocolAddress("alice-phone", 1)))
+        assertFalse(store.containsSession(SignalProtocolAddress("alice-tablet", 1)))
+        assertTrue(store.containsSession(SignalProtocolAddress("bob-phone", 1)))
+    }
+
+    @Test
+    fun `a device outside the directory has no identity and cannot save one`() {
+        assertNull(store.getIdentity(SignalProtocolAddress("stranger", 1)))
+        assertThrows(IllegalStateException::class.java) {
+            store.saveIdentity(SignalProtocolAddress("stranger", 1), IdentityKeyPair.generate().publicKey)
+        }
     }
 
     @Test

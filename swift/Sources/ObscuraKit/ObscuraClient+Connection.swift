@@ -2,10 +2,15 @@ import Foundation
 import GRDB
 import LibSignalClient
 
-private enum PersistedContent: Sendable {
+enum PersistedContent: Sendable, Equatable {
     case handled
     case inboxed(modelKey: String?)
+    /// The primary's friend list changed: its other devices get the new list.
+    case friendsChanged
+    /// Needs a network reply or in-memory state, outside the transaction.
     case control(Obscura_Client_V1_ClientMessage)
+    /// Acknowledged without effect, for the logged reason.
+    case ignored(String)
     case malformed(String)
 }
 
@@ -48,7 +53,7 @@ extension ObscuraClient {
         do {
             guard try await freshToken() != .rejected else { throw ObscuraError.notAuthenticated }
             guard generation == connectionGeneration else { throw CancellationError() }
-            try await refreshOwnDirectory()
+            try await listOwnDevices()
             guard generation == connectionGeneration else { throw CancellationError() }
             let socket = try await GatewaySocket.open(gatewayURL(ticket: api.fetchGatewayTicket()), logger: logger)
             guard generation == connectionGeneration, session != nil else {
@@ -155,49 +160,20 @@ extension ObscuraClient {
             return
         }
         let content: PersistedContent
+        let selfUserId = session?.userId
         do {
             let encrypted = try Obscura_Client_V1_EncryptedMessage(serializedBytes: envelope.message)
-            content = try await messenger.decryptAndPersist(senderDeviceUuid: senderDeviceId, encrypted) { plaintext, db in
+            content = try await messenger.decryptAndPersist(senderUserId: senderUserId, senderDeviceUuid: senderDeviceId,
+                                                            encrypted) { plaintext, db in
                 try Task.checkCancellation()
-                try DeviceStore.add(userId: senderUserId, deviceId: senderDeviceId, in: db)
                 let message: Obscura_Client_V1_ClientMessage
                 do {
                     message = try Obscura_Client_V1_ClientMessage(serializedBytes: plaintext)
                 } catch {
                     return .malformed("\(error)")
                 }
-                switch message.payload {
-                case .appEntry(let entry)?:
-                    let inserted = try InboxStore.put(InboxInsert(
-                        envelopeId: envelopeId, kind: "APP_ENTRY", senderUserId: senderUserId,
-                        senderDeviceId: senderDeviceId, modelKey: entry.model, entryId: entry.id,
-                        sentAt: Self.clampFuture(entry.timestamp), payload: entry.data), in: db)
-                    return .inboxed(modelKey: inserted ? entry.model : nil)
-                case nil:
-                    _ = try InboxStore.put(InboxInsert(
-                        envelopeId: envelopeId, kind: "UNKNOWN", senderUserId: senderUserId,
-                        senderDeviceId: senderDeviceId, modelKey: nil, entryId: nil, sentAt: nil,
-                        payload: message.serializedData()), in: db)
-                    return .inboxed(modelKey: nil)
-                case .friendRequest(let request)?:
-                    switch try FriendStore.friend(senderUserId, in: db)?.status {
-                    case nil:
-                        try FriendStore.add(senderUserId, username: request.username, status: .pendingReceived, in: db)
-                        return .handled
-                    case .pendingReceived?:
-                        return .handled
-                    case .accepted?, .pendingSent?:
-                        return .control(message)
-                    }
-                case .friendAccept?:
-                    if try FriendStore.friend(senderUserId, in: db)?.status == .pendingSent {
-                        try FriendStore.updateStatus(senderUserId, .accepted, in: db)
-                        return .handled
-                    }
-                    return .control(message)
-                default:
-                    return .control(message)
-                }
+                return try Self.persist(message, envelopeId: envelopeId, senderUserId: senderUserId,
+                                        senderDeviceId: senderDeviceId, selfUserId: selfUserId, in: db)
             }
         } catch is CancellationError {
             return
@@ -220,13 +196,21 @@ extension ObscuraClient {
             break
         case .inboxed(let modelKey):
             if let modelKey { messageContinuation.yield(modelKey) }
+        case .friendsChanged:
+            do {
+                try await syncFriendList()
+            } catch {
+                logger.log("friend list sync failed: \(error)")
+            }
         case .control(let message):
             do {
-                _ = try await route(message, envelopeId: envelopeId, senderUserId: senderUserId, senderDeviceId: senderDeviceId)
+                try await control(message, senderUserId: senderUserId, senderDeviceId: senderDeviceId)
             } catch {
                 logger.databaseError(store: "receive", operation: WireCodec.messageKind(message.payload), reason: "\(error)")
                 return
             }
+        case .ignored(let reason):
+            logger.log("ignored a message from \(senderUserId) device \(senderDeviceId): \(reason)")
         case .malformed(let reason):
             // Its ratchet step is committed and it can never parse, so it is acked and dropped.
             logger.log("dropped an unparseable client message from \(senderUserId): \(reason)")
@@ -236,34 +220,73 @@ extension ObscuraClient {
         await ack(envelope.id, envelopeId, acknowledge)
     }
 
+    /// The durable part of handling a decrypted message, in the decrypt's transaction. Friend requests
+    /// and accepts change only the primary's list; a linked device takes the list only from its
+    /// account's primary, and only a newer version.
+    static func persist(_ message: Obscura_Client_V1_ClientMessage, envelopeId: String, senderUserId: String,
+                        senderDeviceId: String, selfUserId: String?, in db: Database) throws -> PersistedContent {
+        switch message.payload {
+        case .appEntry(let entry)?:
+            let inserted = try InboxStore.put(InboxInsert(
+                envelopeId: envelopeId, kind: "APP_ENTRY", senderUserId: senderUserId,
+                senderDeviceId: senderDeviceId, modelKey: entry.model, entryId: entry.id,
+                sentAt: clampFuture(entry.timestamp), payload: entry.data), in: db)
+            return .inboxed(modelKey: inserted ? entry.model : nil)
+        case nil:
+            // An arm this kit does not know. Inboxed whole rather than destroyed.
+            _ = try InboxStore.put(InboxInsert(
+                envelopeId: envelopeId, kind: "UNKNOWN", senderUserId: senderUserId,
+                senderDeviceId: senderDeviceId, modelKey: nil, entryId: nil, sentAt: nil,
+                payload: message.serializedData()), in: db)
+            return .inboxed(modelKey: nil)
+        case .friendRequest(let request)?:
+            guard try DeviceStore.isPrimary(in: db) else { return .ignored("friend request on a linked device") }
+            switch try FriendStore.friend(senderUserId, in: db)?.status {
+            case nil:
+                try FriendStore.add(senderUserId, username: request.username, status: .pendingReceived, in: db)
+                return .friendsChanged
+            case .pendingReceived?:
+                return .handled
+            case .accepted?, .pendingSent?:
+                return .control(message)
+            }
+        case .friendAccept?:
+            guard try DeviceStore.isPrimary(in: db) else { return .ignored("friend accept on a linked device") }
+            guard try FriendStore.friend(senderUserId, in: db)?.status == .pendingSent else { return .control(message) }
+            try FriendStore.updateStatus(senderUserId, .accepted, in: db)
+            return .friendsChanged
+        case .friendListSync(let sync)?:
+            guard senderUserId == selfUserId, try senderDeviceId == DeviceStore.primaryDeviceId(in: db),
+                  try !DeviceStore.isPrimary(in: db) else { return .ignored("friend list sync not from this account's primary") }
+            let held = try FriendStore.version(in: db)
+            guard sync.version > held else { return .ignored("friend list version \(sync.version), holding \(held)") }
+            let friends: [(userId: String, username: String, status: FriendStatus)]
+            do {
+                friends = try WireCodec.friends(sync.friends)
+            } catch {
+                return .ignored("\(error)")
+            }
+            try FriendStore.replace(friends, version: sync.version, in: db)
+            return .handled
+        case .typingSignal?:
+            return .control(message)
+        }
+    }
+
     private func ack(_ id: Data, _ envelopeId: String, _ acknowledge: @Sendable (Data) async throws -> Void) async {
         do { try await acknowledge(id) } catch { logger.ackFailed(envelopeId: envelopeId, reason: "\(error)") }
     }
 
-    /// Returns the model key of a newly inboxed `APP_ENTRY`.
-    func route(_ message: Obscura_Client_V1_ClientMessage, envelopeId: String, senderUserId: String,
-                       senderDeviceId: String) async throws -> String? {
+    private func control(_ message: Obscura_Client_V1_ClientMessage, senderUserId: String, senderDeviceId: String) async throws {
         switch message.payload {
-        case .appEntry(let entry)?:
-            let inserted = try await inbox.put(InboxInsert(
-                envelopeId: envelopeId, kind: "APP_ENTRY", senderUserId: senderUserId, senderDeviceId: senderDeviceId,
-                modelKey: entry.model, entryId: entry.id, sentAt: Self.clampFuture(entry.timestamp), payload: entry.data))
-            return inserted ? entry.model : nil
-        case nil:
-            // An arm this kit does not know. Inboxed whole rather than destroyed.
-            _ = try await inbox.put(InboxInsert(
-                envelopeId: envelopeId, kind: "UNKNOWN", senderUserId: senderUserId, senderDeviceId: senderDeviceId,
-                modelKey: nil, entryId: nil, sentAt: nil, payload: message.serializedData()))
-            return nil
         case .friendRequest(let request)?:
             try await receivedFriendRequest(from: senderUserId, username: request.username)
-            return nil
         case .friendAccept?:
-            try await receivedFriendAccept(from: senderUserId)
-            return nil
+            logger.log("ignoring unsolicited FRIEND_ACCEPT from \(senderUserId)")
         case .typingSignal(let signal)?:
             receivedTyping(signal, senderUserId: senderUserId, senderDeviceId: senderDeviceId)
-            return nil
+        case .appEntry?, .friendListSync?, nil:
+            throw ObscuraError.protocolViolation("\(WireCodec.messageKind(message.payload)) is not a control message")
         }
     }
 
@@ -272,24 +295,13 @@ extension ObscuraClient {
         min(sentAt, UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)
     }
 
-    /// Known requests never relabel peers. An accepted account can explicitly re-add this peer
-    /// from a new independent installation.
+    /// Known requests never relabel peers. An accepted account gets an idempotent accept reply.
     private func receivedFriendRequest(from userId: String, username: String) async throws {
         switch try await friends.friend(userId)?.status {
-        case nil: try await friends.add(userId, username: username, status: .pendingReceived)
         case .pendingSent?: try await acceptFriend(userId)
         case .accepted?: try await sendFriendAccept(to: userId)
-        case .pendingReceived?: break
+        case nil, .pendingReceived?: break
         }
-    }
-
-    /// Only a request this user sent can be accepted.
-    private func receivedFriendAccept(from userId: String) async throws {
-        guard try await friends.friend(userId)?.status == .pendingSent else {
-            logger.log("ignoring unsolicited FRIEND_ACCEPT from \(userId)")
-            return
-        }
-        try await friends.updateStatus(userId, .accepted)
     }
 
     private func receivedTyping(_ signal: Obscura_Client_V1_TypingSignal, senderUserId: String, senderDeviceId: String) {
@@ -323,7 +335,7 @@ extension ObscuraClient {
             _ = try await requireFreshSession()
             guard generation == sessionGeneration, !Task.isCancelled else { return }
             let keys = try signalStore.addPreKeys(Self.preKeyReplenishCount)
-            try await api.uploadDeviceKeys(keys)
+            try await api.uploadPreKeys(keys)
             try signalStore.retireSignedPreKeys(publishedId: keys.signedPreKey.keyId)
         } catch {
             logger.preKeyReplenishFailed(reason: "\(error)")

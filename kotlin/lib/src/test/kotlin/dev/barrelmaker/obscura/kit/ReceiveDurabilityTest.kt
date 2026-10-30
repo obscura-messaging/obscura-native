@@ -27,14 +27,14 @@ class ReceiveDurabilityTest {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ObscuraDatabase.Schema.create(driver)
         val c = ObscuraClient(ObscuraConfig("http://127.0.0.1:1", "test"), driver, storedSession())
-        val keys = SignalKeyUtils.generateDeviceKeys(c.signalStore)
-        c.devices.storeIdentity(SELF_DEVICE_ID)
+        val keys = SignalKeyUtils.generateProvisioningKeys(org.signal.libsignal.protocol.IdentityKeyPair.generate())
+        SignalKeyUtils.install(c.signalStore, keys)
+        c.storeLocalDevice()
         assertTrue(c.auth.restore())
-        val sender = SignalStore(newInMemoryDatabase()).also { it.generateIdentity() }
+        val senderDb = newInMemoryDatabase().apply { deviceQueries.insert(SELF_USER_ID, SELF_DEVICE_ID) }
+        val sender = SignalStore(senderDb).also { it.generateIdentity() }
         val messenger = Messenger(sender, APIClient("http://127.0.0.1:1") { null })
-        val bundle = keys.toJson().put("deviceId", SELF_DEVICE_ID)
-            .put("oneTimePreKey", keys.oneTimePreKeys.first().toJson())
-        messenger.establishSession(parsePeerBundles(JSONArray().put(bundle)).single())
+        messenger.establishSession(parsePeerBundles(JSONArray().put(keys.bundle(SELF_DEVICE_ID))).single())
         val message = incoming ?: ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry {
             model = "opaque"
             id = "entry"
@@ -82,7 +82,7 @@ class ReceiveDurabilityTest {
     @Test fun `successful decrypt adds stamped sender additively before persist then ack`() = runBlocking {
         val (c, driver, envelope) = fixture()
         val old = UUID.randomUUID().toString()
-        c.devices.add(peerUser, old)
+        c.devices.add(peerUser, listOf(old))
         var acks = 0
         c.receive(envelope) {
             assertEquals(1L, c.inbox.depth())

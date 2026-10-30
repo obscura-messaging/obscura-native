@@ -1,3 +1,4 @@
+import LibSignalClient
 import XCTest
 @testable import ObscuraKit
 
@@ -13,8 +14,10 @@ final class AuthTests: XCTestCase {
         XCTAssertEqual(stored["userId"], alice.userId)
         XCTAssertEqual(stored["deviceId"], alice.deviceId)
         XCTAssertEqual(stored["username"], alice.username)
-        let localDeviceId = try await alice.client.devices.localDeviceId()
+        let localDeviceId = try await alice.client.directory.localDeviceId()
         XCTAssertEqual(localDeviceId, alice.deviceId)
+        let isPrimary = try await alice.client.isPrimary
+        XCTAssertTrue(isPrimary)
     }
 
     func testLoginScenarios() async throws {
@@ -32,10 +35,10 @@ final class AuthTests: XCTestCase {
         XCTAssertEqual(userId, alice.userId)
 
         let fresh = try makeClient()
-        let newDevice = try await fresh.login(alice.username, TestServer.password)
+        let linkRequired = try await fresh.login(alice.username, TestServer.password)
         let wrongPassword = try await fresh.login(alice.username, TestServer.password + "x")
         let unknownUser = try await fresh.login(TestServer.username(), TestServer.password)
-        XCTAssertEqual(newDevice, .newDevice)
+        XCTAssertEqual(linkRequired, .linkRequired)
         XCTAssertEqual(wrongPassword, .invalidCredentials)
         XCTAssertEqual(unknownUser, .invalidCredentials)
         XCTAssertEqual(fresh.authState, .loggedOut)
@@ -49,13 +52,38 @@ final class AuthTests: XCTestCase {
         XCTAssertEqual(alice.client.authState, .loggedOut)
     }
 
-    func testLoginAndProvisionAddsAnAuthenticatedDevice() async throws {
+    func testALinkedDeviceIsAnAuthenticatedNonPrimaryDeviceOfTheAccount() async throws {
         let alice = try await TestUser.register()
-        let laptop = try await TestUser.newDevice(of: alice)
+        let laptop = try await TestUser.link(to: alice)
 
         XCTAssertEqual(laptop.client.authState, .authenticated)
+        XCTAssertEqual(laptop.client.connectionState, .connected)
         XCTAssertEqual(laptop.userId, alice.userId)
         XCTAssertNotEqual(laptop.deviceId, alice.deviceId)
+        let isPrimary = try await laptop.client.isPrimary
+        XCTAssertFalse(isPrimary)
+        let identity = try laptop.client.signalStore.identityKeyPair(context: NullContext()).serialize()
+        XCTAssertEqual(identity, try alice.client.signalStore.identityKeyPair(context: NullContext()).serialize(),
+                       "every device holds the account identity")
+        let devices = try await laptop.client.devices()
+        XCTAssertEqual(Set(devices.map(\.deviceId)), [alice.deviceId, laptop.deviceId])
+        XCTAssertEqual(devices.first { $0.isPrimary }?.deviceId, alice.deviceId)
+        XCTAssertEqual(devices.first { $0.isThisDevice }?.deviceId, laptop.deviceId)
+        XCTAssertEqual(devices.first { $0.deviceId == laptop.deviceId }?.name, "linked-device")
+        await laptop.client.disconnect()
+    }
+
+    func testAResetAccountProvisionsANewPrimaryWithANewIdentity() async throws {
+        let alice = try await TestUser.register()
+        let oldIdentity = try alice.client.signalStore.identityKeyPair(context: NullContext()).serialize()
+
+        try await alice.client.resetAccount(alice.username, TestServer.password)
+
+        XCTAssertEqual(alice.client.authState, .authenticated)
+        let isPrimary = try await alice.client.isPrimary
+        XCTAssertTrue(isPrimary)
+        let newIdentity = try alice.client.signalStore.identityKeyPair(context: NullContext()).serialize()
+        XCTAssertNotEqual(newIdentity, oldIdentity)
     }
 
     func testLogoutRevokesTheRefreshTokenAndClearsTheSession() async throws {

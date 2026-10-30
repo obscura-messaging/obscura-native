@@ -57,32 +57,41 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
                 .build()
         }
 
-    /** Preprocessing rejections are definitive; transport failures leave every result unknown. */
-    suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): List<Submitted> {
-        if (submissions.isEmpty()) return emptyList()
-        return try {
-            val request = SendMessageRequest.newBuilder().addAllMessages(submissions).build()
-            decodeSubmissionResults(userId, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val definitive = e is ObscuraError.Http && e.status in setOf(400, 413)
-            submissions.map {
-                val failure = unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName)
-                if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure
-            }
-        }
+    /**
+     * One request covering [userIds]: the server checks each user's whole device set even when it
+     * has no submission in [submissions]. Preprocessing rejections are definitive; transport
+     * failures leave every result unknown.
+     */
+    suspend fun submit(userIds: List<String>, submissions: List<UserSubmission>): SubmitOutcome = try {
+        val request = SendMessageRequest.newBuilder()
+            .addAllMessages(submissions.map { it.submission })
+            .addAllRecipientUserIds(userIds.map { UuidCodec.uuidToBytes(UUID.fromString(it)) })
+            .build()
+        decodeSubmissionResults(userIds, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        val definitive = e is ObscuraError.Http && e.status in setOf(400, 413)
+        SubmitOutcome(submissions.map { (userId, sub) ->
+            val failure = unknownSubmission(userId, sub, e.message ?: e.javaClass.simpleName)
+            if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure
+        })
     }
 
-    /** Decrypt with the session of [senderDeviceId]. A valid MAC authenticates that device. */
-    suspend fun decrypt(senderDeviceId: String, message: ByteString): ByteArray = withContext(dispatcher) {
-        decryptOnDispatcher(senderDeviceId, message)
-    }
+    suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): SubmitOutcome =
+        submit(listOf(userId), submissions.map { UserSubmission(userId, it) })
 
-    /** Never commit a receive ratchet before its synchronous durable writes succeed. */
-    suspend fun <T> decryptAndCommit(senderDeviceId: String, message: ByteString, persist: (ByteArray) -> T): T =
+    /**
+     * Never commit a receive ratchet before its synchronous durable writes succeed. [record] runs
+     * first in the same transaction: it teaches the directory the stamped sender, which identity
+     * checks during decrypt resolve through and which a failed decrypt rolls back.
+     */
+    suspend fun <T> decryptAndCommit(senderDeviceId: String, message: ByteString, record: () -> Unit, persist: (ByteArray) -> T): T =
         withContext(dispatcher) {
-            signalStore.transaction { persist(decryptOnDispatcher(senderDeviceId, message)) }
+            signalStore.transaction {
+                record()
+                persist(decryptOnDispatcher(senderDeviceId, message))
+            }
         }
 
     private fun decryptOnDispatcher(senderDeviceId: String, message: ByteString): ByteArray {

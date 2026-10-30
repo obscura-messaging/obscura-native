@@ -9,6 +9,8 @@ public enum ObscuraError: Error, Equatable, LocalizedError {
     case sendFailed(String)
     case protocolViolation(String)
     case storageFailed(String)
+    case notPrimary
+    case linkFailed(String)
 
     public var code: String {
         switch self {
@@ -20,6 +22,8 @@ public enum ObscuraError: Error, Equatable, LocalizedError {
         case .sendFailed: return "SEND_FAILED"
         case .protocolViolation: return "PROTOCOL_VIOLATION"
         case .storageFailed: return "STORAGE_ERROR"
+        case .notPrimary: return "NOT_PRIMARY"
+        case .linkFailed: return "LINK_FAILED"
         }
     }
 
@@ -33,6 +37,8 @@ public enum ObscuraError: Error, Equatable, LocalizedError {
         case .sendFailed(let reason): return "Send failed: \(reason)"
         case .protocolViolation(let reason): return "Protocol violation: \(reason)"
         case .storageFailed(let reason): return "Storage failed: \(reason)"
+        case .notPrimary: return "Only the primary device can do this"
+        case .linkFailed(let reason): return "Link failed: \(reason)"
         }
     }
 }

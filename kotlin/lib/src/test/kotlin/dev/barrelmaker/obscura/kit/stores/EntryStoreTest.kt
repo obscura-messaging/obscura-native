@@ -34,6 +34,23 @@ class EntryStoreTest {
     )
 
     @Test
+    fun `data and metadata with NUL and awkward characters round-trip exactly, through export and import too`() = runBlocking {
+        val awkward = "a\u0000b\u0000\u0000 \r\n\t\\\"' \u2028\u2029 \uFEFF é 😀 \u0001\u001F end\u0000"
+        store.put("m", entry("e", data = awkward, localMetadata = awkward))
+
+        val stored = store.get("m", listOf("e")).single()
+        assertEquals(awkward, stored.data)
+        assertEquals(awkward, stored.localMetadata)
+        assertEquals(awkward.length, stored.data.length)
+
+        val exported = store.export()
+        assertEquals(awkward, exported.single().second.data)
+        store.erase("m", listOf("e"))
+        store.import(exported)
+        assertEquals(awkward, store.all("m").single().data)
+    }
+
+    @Test
     fun `put then all returns what was written`() = runBlocking {
         store.put("directMessage", entry("dm_1"))
 

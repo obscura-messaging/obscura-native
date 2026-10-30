@@ -11,6 +11,7 @@ class PayloadDispositionTest {
         PayloadCase.FRIEND_REQUEST to PayloadDisposition.KIT_INTERNAL,
         PayloadCase.FRIEND_ACCEPT to PayloadDisposition.KIT_INTERNAL,
         PayloadCase.TYPING_SIGNAL to PayloadDisposition.DROPPABLE,
+        PayloadCase.FRIEND_LIST_SYNC to PayloadDisposition.KIT_INTERNAL,
         PayloadCase.PAYLOAD_NOT_SET to PayloadDisposition.INBOXED,
     )
 

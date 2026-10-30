@@ -8,7 +8,6 @@ import org.json.JSONObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.DynamicTest
 import org.junit.jupiter.api.TestFactory
-import java.io.File
 
 class WireConformanceTest {
 
@@ -67,19 +66,5 @@ class WireConformanceTest {
 
     private inline fun forEach(arr: org.json.JSONArray, body: (JSONObject) -> Unit) {
         for (i in 0 until arr.length()) body(arr.getJSONObject(i))
-    }
-
-    private fun loadVectors(name: String): JSONObject {
-        val candidates = listOf(
-            "../../protocol/conformance/$name",
-            "../protocol/conformance/$name",
-            "protocol/conformance/$name",
-        )
-        val file = candidates.map(::File).firstOrNull { it.exists() }
-            ?: error(
-                "conformance vector '$name' not found (looked in: ${candidates.joinToString()}). " +
-                    "Is protocol/conformance present in the repository checkout?",
-            )
-        return JSONObject(file.readText())
     }
 }

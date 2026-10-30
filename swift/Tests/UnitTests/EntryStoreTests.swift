@@ -84,6 +84,38 @@ final class EntryStoreTests: XCTestCase {
                        "the kit must not validate a shape it is forbidden to read")
     }
 
+    func testTextWithEmbeddedNULAndAwkwardCharactersRoundTripsExactlyThroughEveryPath() async throws {
+        let awkward = "opaque\0bytes?\u{1}\u{7F}\u{FFFF}\u{FEFF}\u{200D}👩‍👩‍👧\r\n\\%_'\""
+        let source = try makeStore()
+        let stored = StoredEntry(id: "id\0\(awkward)", data: awkward, sentAt: 7, authorDeviceId: "device\0x",
+                                 localMetadata: "meta\0\(awkward)")
+        let other = StoredEntry(id: "id", data: "truncated id must not collide", sentAt: 1, authorDeviceId: "d",
+                                localMetadata: nil)
+        try await source.put(model: "m\0x", entry: stored)
+        try await source.put(model: "m\0x", entry: other)
+        try await source.put(model: "m", entry: other)
+
+        let all = try await source.all(model: "m\0x")
+        XCTAssertEqual(all.first { $0.id == stored.id }, stored)
+        XCTAssertEqual(all.count, 2)
+        XCTAssertEqual(all.first { $0.id == stored.id }?.data.utf8.count, awkward.utf8.count)
+        let got = try await source.get(model: "m\0x", ids: [stored.id])
+        XCTAssertEqual(got, [stored])
+        let plain = try await source.all(model: "m")
+        XCTAssertEqual(plain, [other])
+
+        let snapshot = try await source.snapshot()
+        let target = try makeStore()
+        try await target.importSnapshot(Obscura_Client_V1_EntrySnapshot(serializedBytes: snapshot.serializedData()))
+        let imported = try await target.get(model: "m\0x", ids: [stored.id])
+        XCTAssertEqual(imported, [StoredEntry(id: stored.id, data: awkward, sentAt: 7, authorDeviceId: "device\0x",
+                                              localMetadata: nil)])
+
+        try await source.erase(model: "m\0x", ids: [stored.id])
+        let left = try await source.all(model: "m\0x")
+        XCTAssertEqual(left, [other])
+    }
+
     func testUnicodeAndNestedPayloadsSurviveUnchanged() async throws {
         let store = try makeStore()
         let payload = #"{"content":"sunset 🌅","meta":{"x":0.5,"tags":["a","b"]}}"#

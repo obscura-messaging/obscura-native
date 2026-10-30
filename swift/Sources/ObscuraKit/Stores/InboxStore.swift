@@ -57,7 +57,7 @@ public actor InboxStore {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, arguments: [
             record.envelopeId, record.kind, record.senderUserId, record.senderDeviceId,
-            record.modelKey, record.entryId, record.sentAt.map { Int64(clamping: $0) }, record.payload,
+            record.modelKey?.storedText, record.entryId?.storedText, record.sentAt.map { Int64(clamping: $0) }, record.payload,
         ])
         return true
     }
@@ -71,8 +71,8 @@ public actor InboxStore {
                     kind: row["kind"],
                     senderUserId: row["sender_user_id"],
                     senderDeviceId: row["sender_device_id"],
-                    modelKey: row["model_key"],
-                    entryId: row["entry_id"],
+                    modelKey: try row.optionalText("model_key"),
+                    entryId: try row.optionalText("entry_id"),
                     // A peer kit may have stored a negative value; UInt64(_:) would trap.
                     sentAt: (row["sent_at"] as Int64?).map { UInt64(max(0, $0)) },
                     payload: row["payload"]

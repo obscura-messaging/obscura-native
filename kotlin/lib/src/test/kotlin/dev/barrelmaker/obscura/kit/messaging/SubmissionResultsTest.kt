@@ -33,12 +33,52 @@ class SubmissionResultsTest {
                 .setErrorMessage("Device not found")
         ).build()
         val decoded = decodeSubmissionResults("user", listOf(a, b), response)
-        val results = decoded.map { it.result }
+        val results = decoded.submitted.map { it.result }
         assertEquals(listOf(SubmissionStatus.REJECTED, SubmissionStatus.ACCEPTED), results.map { it.status })
-        assertEquals(listOf(true, false), decoded.map { it.deviceMissing })
+        assertEquals(listOf(SendMessageResponse.ErrorCode.ERROR_CODE_INVALID_DEVICE, null), decoded.submitted.map { it.errorCode })
+        assertNull(decoded.missingDeviceIds)
         assertEquals("Device not found", results[0].error)
         assertNull(results[1].error)
         assertEquals(UuidCodec.uuidString(b.deviceId), results[1].deviceId)
+    }
+
+    private val userId = "019f025a-0000-7de6-84b6-000000000002"
+
+    private fun mismatch(submission: SendMessageRequest.Submission, user: String = userId, vararg missing: UUID) =
+        SendMessageResponse.newBuilder()
+            .addFailedSubmissions(SendMessageResponse.FailedSubmission.newBuilder().setSubmissionId(submission.submissionId)
+                .setErrorCode(SendMessageResponse.ErrorCode.ERROR_CODE_DEVICE_MISMATCH))
+            .addDeviceMismatches(SendMessageResponse.DeviceMismatch.newBuilder().setUserId(UuidCodec.uuidToBytes(UUID.fromString(user)))
+                .addAllMissingDeviceIds(missing.map { UuidCodec.uuidToBytes(it) }))
+
+    @Test
+    fun `a device mismatch names the user's missing devices`() {
+        val a = submission()
+        val missing = UUID.randomUUID()
+        val decoded = decodeSubmissionResults(userId, listOf(a), mismatch(a, userId, missing).build())
+        assertEquals(listOf(missing.toString()), decoded.missingDeviceIds)
+        assertEquals(SendMessageResponse.ErrorCode.ERROR_CODE_DEVICE_MISMATCH, decoded.submitted.single().errorCode)
+        assertEquals(SubmissionStatus.REJECTED, decoded.submitted.single().result.status)
+    }
+
+    @Test
+    fun `a mismatch without a failed submission names devices of a user with no target`() {
+        val missing = UUID.randomUUID()
+        val decoded = decodeSubmissionResults(userId, emptyList(), mismatch(submission(), userId, missing).clearFailedSubmissions().build())
+        assertEquals(listOf(missing.toString()), decoded.missingDeviceIds)
+        assertTrue(decoded.submitted.isEmpty())
+    }
+
+    @Test
+    fun `an inconsistent or foreign device mismatch is a protocol violation`() {
+        val a = submission()
+        for (response in listOf(
+            mismatch(a, user = "019f025a-0000-7de6-84b6-000000000003").build(),
+            mismatch(a).clearDeviceMismatches().build(),
+            mismatch(a).addDeviceMismatches(mismatch(a).build().getDeviceMismatches(0)).build(),
+        )) assertThrows(dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation::class.java) {
+            decodeSubmissionResults(userId, listOf(a), response)
+        }
     }
 
     @Test
@@ -76,12 +116,12 @@ class SubmissionResultsTest {
                 401 to SubmissionStatus.UNKNOWN, 403 to SubmissionStatus.UNKNOWN,
             )) {
                 status = code
-                val result = messenger.submit("user", listOf(submission())).single().result
+                val result = messenger.submit(userId, listOf(submission())).submitted.single().result
                 assertEquals(expected, result.status, "HTTP $code")
                 assertTrue(result.error!!.contains(code.toString()))
             }
         } finally { server.stop(0) }
-        assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("user", listOf(submission())).single().result.status)
+        assertEquals(SubmissionStatus.UNKNOWN, messenger.submit(userId, listOf(submission())).submitted.single().result.status)
     }
 
     @Test
@@ -103,14 +143,14 @@ class SubmissionResultsTest {
         try {
             val messenger = Messenger(SignalStore(newInMemoryDatabase()),
                 APIClient("http://127.0.0.1:${server.address.port}") { "unit-test" })
-            assertEquals(SubmissionStatus.REJECTED, messenger.submit("user", listOf(a)).single().result.status)
+            assertEquals(SubmissionStatus.REJECTED, messenger.submit(userId, listOf(a)).submitted.single().result.status)
             val b = submission()
             response = byteArrayOf()
-            assertEquals(SubmissionStatus.ACCEPTED, messenger.submit("other", listOf(b)).single().result.status)
+            assertEquals(SubmissionStatus.ACCEPTED, messenger.submit(userId, listOf(b)).submitted.single().result.status)
             assertEquals(listOf(listOf(a), listOf(b)), received.map { it.messagesList })
             status = 503
             response = "unavailable".toByteArray()
-            assertEquals(SubmissionStatus.UNKNOWN, messenger.submit("other", listOf(b)).single().result.status)
+            assertEquals(SubmissionStatus.UNKNOWN, messenger.submit(userId, listOf(b)).submitted.single().result.status)
         } finally {
             server.stop(0)
         }
