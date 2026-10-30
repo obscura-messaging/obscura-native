@@ -61,15 +61,12 @@ extension ObscuraClient {
         try await requireUnprovisionedDevice()
         let contents = try Self.open(try await awaitApproval(request), privateKey: request.privateKey, userId: request.userId)
         let keys = try SignalKeys.generate(identity: contents.identity)
-        guard let primary = try await api.listDevices(bearer: request.userToken).first(where: \.isPrimary) else {
-            throw ObscuraError.linkFailed("the account has no primary device")
-        }
         let response = try await api.createDevice(keys.deviceRequest(name: request.deviceName, linkSessionId: request.sessionId),
                                                   bearer: request.userToken)
         let session = try session(response, username: request.username)
         try await db.write { db in
             try PersistentSignalStore.install(keys, in: db)
-            try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: primary.deviceId, in: db)
+            try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: nil, in: db)
             try DeviceStore.add(userId: session.userId, deviceId: session.deviceId, in: db)
             try FriendStore.replace(contents.friends, version: contents.friendListVersion, in: db)
         }

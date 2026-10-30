@@ -27,20 +27,26 @@ actor MessageSender {
         self.selfDeviceId = selfDeviceId
     }
 
-    /// Encrypts serialized `ClientMessage` bytes to `userId`'s devices and reports each one. Devices
-    /// in `acceptedDeviceIds` are reported accepted. When every known device has that evidence, a request
-    /// without submissions asks the server for devices added since; the evidence devices are sent again
-    /// only with such a device, or with any device lacking evidence, because the server takes a user's
-    /// devices all or none.
     func send(to userId: String, _ clientMessage: Data, acceptedDeviceIds: Set<String>) async -> [SubmissionResult] {
-        let previous = tails[userId]
+        await send(to: [userId], clientMessage, acceptedDeviceIds: acceptedDeviceIds)
+    }
+
+    /// Encrypts serialized `ClientMessage` bytes to `userIds`' devices in a single batched request per
+    /// round and reports each one. Users that succeed in round 1 are settled immediately; only users
+    /// whose device set mismatched retry in the next round.
+    func send(to userIds: [String], _ clientMessage: Data, acceptedDeviceIds: Set<String>) async -> [SubmissionResult] {
+        var seen: Set<String> = []
+        let users = userIds.filter { seen.insert($0).inserted }
+        if users.isEmpty { return [] }
+        let ordered = users.sorted()
+        let previousTasks = ordered.compactMap { tails[$0] }
         let task = Task {
-            _ = await previous?.value
-            return await self.attempt(userId, clientMessage, acceptedDeviceIds)
+            for previous in previousTasks { _ = await previous.value }
+            return await self.attemptBatch(users, clientMessage, acceptedDeviceIds)
         }
-        tails[userId] = task
+        for userId in ordered { tails[userId] = task }
         let results = await task.value
-        if tails[userId] == task { tails[userId] = nil }
+        for userId in ordered where tails[userId] == task { tails[userId] = nil }
         return results
     }
 
@@ -52,77 +58,106 @@ actor MessageSender {
         }
     }
 
-    private struct Round {
-        let results: [SubmissionResult]
-        /// False when the directory changed under this round; the next round re-reads it.
-        let settled: Bool
-    }
+    private func attemptBatch(_ users: [String], _ data: Data, _ accepted: Set<String>) async -> [SubmissionResult] {
+        var settled: [String: [SubmissionResult]] = [:]
+        var mismatched: [String: [SubmissionResult]] = [:]
+        var pending = users
 
-    private func attempt(_ userId: String, _ data: Data, _ accepted: Set<String>) async -> [SubmissionResult] {
-        var results: [SubmissionResult] = []
-        do {
-            for _ in 0..<Self.maxRounds {
-                let round = try await self.round(userId, data, accepted)
-                results = round.results
-                if round.settled { break }
+        for _ in 0..<Self.maxRounds {
+            if pending.isEmpty { break }
+            var nextPending: [String] = []
+            var probeUsers: [(userId: String, targets: [String])] = []
+            var targetUsers: [(userId: String, isSelf: Bool)] = []
+            var batchSubmissions: [UserSubmission] = []
+
+            for userId in pending {
+                do {
+                    var listed = try await devices.deviceIds(of: userId)
+                    if listed.isEmpty {
+                        try await establish(userId, try fetchAll(userId))
+                        listed = try await devices.deviceIds(of: userId)
+                    }
+                    let isSelf = listed.contains(selfDeviceId)
+                    let targets = listed.filter { $0 != selfDeviceId }
+                    if !targets.isEmpty, targets.allSatisfy(accepted.contains) {
+                        probeUsers.append((userId, targets))
+                        continue
+                    }
+
+                    var gone: [String] = []
+                    for deviceId in targets {
+                        guard try await !messenger.hasSession(deviceId) else { continue }
+                        do {
+                            try await establish(userId, [try await api.fetchPreKeyBundle(userId, deviceId: deviceId)])
+                        } catch ObscuraError.http(status: 404, body: _) {
+                            gone.append(deviceId)
+                        }
+                    }
+                    try await devices.remove(userId: userId, deviceIds: gone)
+
+                    let remaining = targets.filter { !gone.contains($0) }
+                    if remaining.isEmpty, !isSelf {
+                        settled[userId] = [noDevices(userId)]
+                        continue
+                    }
+                    var subs: [UserSubmission] = []
+                    for deviceId in remaining {
+                        let sub = try await messenger.prepareSubmission(deviceId: deviceId, clientMessage: data)
+                        subs.append(UserSubmission(userId: userId, submission: sub))
+                    }
+                    targetUsers.append((userId, isSelf))
+                    batchSubmissions.append(contentsOf: subs)
+                } catch {
+                    logger.sessionEstablishFailed(userId: userId, reason: "\(error)")
+                    settled[userId] = [rejected(userId, nil, error)]
+                }
             }
-        } catch {
-            logger.sessionEstablishFailed(userId: userId, reason: "\(error)")
-            return [rejected(userId, nil, error)]
+
+            let activeUsers = probeUsers.map(\.userId) + targetUsers.map(\.userId)
+            if !activeUsers.isEmpty {
+                let outcome = await messenger.submit(userIds: activeUsers, submissions: batchSubmissions)
+                for (userId, items) in Dictionary(grouping: outcome.submitted.filter { $0.failure == .invalidDevice }, by: \.result.userId) {
+                    try? await devices.remove(userId: userId, deviceIds: items.compactMap(\.result.deviceId))
+                }
+
+                for (userId, targets) in probeUsers {
+                    let missing = outcome.mismatches[userId] ?? []
+                    if missing.allSatisfy(accepted.contains) {
+                        settled[userId] = targets.map { SubmissionResult(userId: userId, deviceId: $0, status: .accepted) }
+                    } else {
+                        try? await devices.add(userId: userId, deviceIds: missing)
+                        mismatched[userId] = [rejected(userId, nil, "devices not covered: \(missing.joined(separator: ", "))")]
+                        nextPending.append(userId)
+                    }
+                }
+
+                for (userId, isSelf) in targetUsers {
+                    let kept = outcome.submitted
+                        .filter { $0.result.userId == userId && $0.failure != .invalidDevice }
+                        .map(\.result)
+                    if let missing = outcome.mismatches[userId], !missing.isEmpty {
+                        try? await devices.add(userId: userId, deviceIds: missing)
+                        let mismatch = rejected(userId, nil, "devices not covered: \(missing.joined(separator: ", "))")
+                        mismatched[userId] = kept.isEmpty ? [mismatch] : kept
+                        nextPending.append(userId)
+                    } else if kept.isEmpty {
+                        settled[userId] = isSelf ? [] : [noDevices(userId)]
+                    } else {
+                        settled[userId] = kept
+                    }
+                }
+            }
+            pending = nextPending
         }
-        return results.map { result in
+
+        for userId in pending {
+            settled[userId] = mismatched[userId] ?? [rejected(userId, nil, "sessions could not be established")]
+        }
+
+        return users.flatMap { settled[$0] ?? [] }.map { result in
             guard let deviceId = result.deviceId, accepted.contains(deviceId) else { return result }
-            return SubmissionResult(userId: userId, deviceId: deviceId, status: .accepted)
+            return SubmissionResult(userId: result.userId, deviceId: deviceId, status: .accepted)
         }
-    }
-
-    /// Every request names `userId`, so the server reports its devices this one does not target, even
-    /// when it targets none of them.
-    private func round(_ userId: String, _ data: Data, _ accepted: Set<String>) async throws -> Round {
-        var listed = try await devices.deviceIds(of: userId)
-        if listed.isEmpty {
-            try await establish(userId, try fetchAll(userId))
-            listed = try await devices.deviceIds(of: userId)
-        }
-        let isSelf = listed.contains(selfDeviceId)
-        let targets = listed.filter { $0 != selfDeviceId }
-        if !targets.isEmpty, targets.allSatisfy(accepted.contains) {
-            // Only a device added since the evidence needs the message; then completeness needs all of them.
-            let missing = await messenger.submit(userId: userId, submissions: []).missingDeviceIds
-            guard missing.allSatisfy(accepted.contains) else {
-                try await devices.add(userId: userId, deviceIds: missing)
-                return Round(results: [], settled: false)
-            }
-            return Round(results: targets.map { SubmissionResult(userId: userId, deviceId: $0, status: .accepted) },
-                         settled: true)
-        }
-
-        var gone: [String] = []
-        for deviceId in targets {
-            guard try await !messenger.hasSession(deviceId) else { continue }
-            do {
-                try await establish(userId, [try await api.fetchPreKeyBundle(userId, deviceId: deviceId)])
-            } catch ObscuraError.http(status: 404, body: _) {
-                gone.append(deviceId)
-            }
-        }
-        try await devices.remove(userId: userId, deviceIds: gone)
-
-        var submissions: [Obscura_V1_SendMessageRequest.Submission] = []
-        for deviceId in targets where !gone.contains(deviceId) {
-            submissions.append(try await messenger.prepareSubmission(deviceId: deviceId, clientMessage: data))
-        }
-        let outcome = await messenger.submit(userId: userId, submissions: submissions)
-        let invalid = outcome.submitted.filter { $0.failure == .invalidDevice }.compactMap(\.result.deviceId)
-        try await devices.remove(userId: userId, deviceIds: invalid)
-        let kept = outcome.submitted.filter { $0.failure != .invalidDevice }.map(\.result)
-        if !outcome.missingDeviceIds.isEmpty {
-            try await devices.add(userId: userId, deviceIds: outcome.missingDeviceIds)
-            let mismatch = rejected(userId, nil, "devices not covered: \(outcome.missingDeviceIds.joined(separator: ", "))")
-            return Round(results: kept.isEmpty ? [mismatch] : kept, settled: false)
-        }
-        if kept.isEmpty { return Round(results: isSelf ? [] : [noDevices(userId)], settled: true) }
-        return Round(results: kept, settled: true)
     }
 
     /// Consumes one one-time prekey on every device of `userId`. 404 means the user has no devices.

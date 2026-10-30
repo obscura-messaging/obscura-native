@@ -70,13 +70,12 @@ class OwnDevicesTest {
         Unit
     }
 
-    @Test fun `a send makes no device-list request and self sync names this account with no submission`() = runBlocking {
+    @Test fun `a send makes no device-list request and batches self sync with the recipient in one request`() = runBlocking {
         FakeObscuraServer().use { peers ->
             val peer = peers.register("019f025a-0000-7de6-84b6-000000000002")
             val c = sessionClient(url, storedSession())
             assertTrue(c.auth.restore())
             server.enqueue(MockResponse.Builder().body("[${peer.consumeBundle()}]").build())
-            server.enqueue(MockResponse.Builder().body("").build())
             server.enqueue(MockResponse.Builder().body("").build())
 
             val report = c.send(listOf(peer.userId), "m", "e", 1, byteArrayOf(1), emptySet())
@@ -84,10 +83,10 @@ class OwnDevicesTest {
             assertEquals(SubmissionStatus.ACCEPTED, report.recipients.single().status)
             assertEquals(emptyList<SubmissionResult>(), report.selfSync)
             val requests = List(server.requestCount) { server.takeRequest() }
-            assertEquals(listOf("/v1/users/${peer.userId}", "/v1/messages", "/v1/messages"), requests.map { it.url.encodedPath })
-            val selfSync = xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest.parseFrom(requests[2].body!!.toByteArray())
-            assertEquals(0, selfSync.messagesCount)
-            assertEquals(listOf(SELF_USER_ID), selfSync.recipientUserIdsList.map { dev.barrelmaker.obscura.kit.crypto.UuidCodec.uuidString(it) })
+            assertEquals(listOf("/v1/users/${peer.userId}", "/v1/messages"), requests.map { it.url.encodedPath })
+            val batched = xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest.parseFrom(requests[1].body!!.toByteArray())
+            assertEquals(1, batched.messagesCount)
+            assertEquals(listOf(peer.userId, SELF_USER_ID), batched.recipientUserIdsList.map { dev.barrelmaker.obscura.kit.crypto.UuidCodec.uuidString(it) })
             c.auth.end()
             Unit
         }

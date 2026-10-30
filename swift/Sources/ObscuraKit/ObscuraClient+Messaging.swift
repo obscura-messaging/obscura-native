@@ -16,18 +16,14 @@ extension ObscuraClient {
 
         let (userId, sender) = try await sendContext()
         let generation = sessionGeneration
-        var recipients: [SubmissionResult] = []
-        for recipient in Self.distinct(recipientUserIds, excluding: userId) {
-            try Task.checkCancellation()
-            guard generation == sessionGeneration else { throw CancellationError() }
-            recipients += await sender.send(to: recipient, data, acceptedDeviceIds: acceptedDeviceIds)
-        }
+        let peers = Self.distinct(recipientUserIds, excluding: userId)
+        let results = await sender.send(to: peers + [userId], data, acceptedDeviceIds: acceptedDeviceIds)
         try Task.checkCancellation()
         guard generation == sessionGeneration else { throw CancellationError() }
-        let selfSync = await sender.send(to: userId, data, acceptedDeviceIds: acceptedDeviceIds)
-        try Task.checkCancellation()
-        guard generation == sessionGeneration else { throw CancellationError() }
-        return SendReport(recipients: recipients, selfSync: selfSync)
+        return SendReport(
+            recipients: results.filter { $0.userId != userId },
+            selfSync: results.filter { $0.userId == userId }
+        )
     }
 
     /// Every send refreshes a near-expiry token once, up front.
@@ -136,12 +132,11 @@ extension ObscuraClient {
         let data = try message.serializedData()
 
         let (userId, sender) = try await sendContext()
-        for recipient in Self.distinct(recipientUserIds, excluding: userId) {
-            do {
-                try await sender.sendOrThrow(to: recipient, data)
-            } catch {
-                logger.log("typing signal to \(recipient) failed: \(error)")
-            }
+        let peers = Self.distinct(recipientUserIds, excluding: userId)
+        let results = await sender.send(to: peers, data, acceptedDeviceIds: [])
+        for recipient in peers where !results.contains(where: { $0.userId == recipient && $0.status == .accepted }) {
+            let errors = results.filter { $0.userId == recipient }.map { $0.error ?? $0.status.rawValue }.joined(separator: "; ")
+            logger.log("typing signal to \(recipient) failed: \(errors)")
         }
     }
 

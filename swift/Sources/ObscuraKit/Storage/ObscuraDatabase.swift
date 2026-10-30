@@ -67,7 +67,7 @@ enum ObscuraDatabase {
                 CREATE TABLE device_identity (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     device_id TEXT NOT NULL,
-                    primary_device_id TEXT NOT NULL
+                    primary_device_id TEXT
                 );
                 CREATE TABLE devices (
                     user_id TEXT NOT NULL,

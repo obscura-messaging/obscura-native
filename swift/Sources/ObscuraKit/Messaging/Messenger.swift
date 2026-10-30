@@ -99,22 +99,26 @@ actor Messenger {
         return submission
     }
 
-    /// Uploads `submissions` to one user's devices as one request. Pre-processing HTTP rejections are
+    /// Uploads `submissions` to `userIds`' devices as one batched request. Pre-processing HTTP rejections are
     /// definitive; transport, server or decoding failures leave acceptance unknown.
-    /// The request names `userId`, so it is checked for complete delivery even without submissions.
-    func submit(userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]) async -> SubmitOutcome {
-        guard let user = uuidBytes(userId) else {
-            return SubmitOutcome(submitted: submissions.map {
-                Submitted(SubmissionResult(userId: userId, deviceId: uuidString($0.deviceID), status: .rejected,
-                                           error: "user id \(userId) is not a UUID"))
-            }, missingDeviceIds: [])
+    /// The request names `userIds`, so each is checked for complete delivery even without submissions.
+    func submit(userIds: [String], submissions: [UserSubmission]) async -> SubmitOutcome {
+        var recipientBytes: [Data] = []
+        for userId in userIds {
+            guard let user = uuidBytes(userId) else {
+                return SubmitOutcome(submitted: submissions.map {
+                    Submitted(SubmissionResult(userId: $0.userId, deviceId: uuidString($0.submission.deviceID),
+                                               status: .rejected, error: "user id \(userId) is not a UUID"))
+                })
+            }
+            recipientBytes.append(user)
         }
         var request = Obscura_V1_SendMessageRequest()
-        request.messages = submissions
-        request.recipientUserIds = [user]
+        request.messages = submissions.map(\.submission)
+        request.recipientUserIds = recipientBytes
         do {
             let response = try Obscura_V1_SendMessageResponse(serializedBytes: try await api.sendMessage(request.serializedData()))
-            return try submitOutcome(userId: userId, submissions: submissions, response: response)
+            return try submitOutcome(userIds: userIds, submissions: submissions, response: response)
         } catch {
             let status: SubmissionStatus
             if let failure = error as? ObscuraError, case .http(let code, _) = failure,
@@ -124,9 +128,14 @@ actor Messenger {
                 status = .unknown
             }
             return SubmitOutcome(submitted: submissions.map {
-                Submitted(SubmissionResult(userId: userId, deviceId: uuidString($0.deviceID), status: status, error: "\(error)"))
-            }, missingDeviceIds: [])
+                Submitted(SubmissionResult(userId: $0.userId, deviceId: uuidString($0.submission.deviceID),
+                                           status: status, error: "\(error)"))
+            })
         }
+    }
+
+    func submit(userId: String, submissions: [Obscura_V1_SendMessageRequest.Submission]) async -> SubmitOutcome {
+        await submit(userIds: [userId], submissions: submissions.map { UserSubmission(userId: userId, submission: $0) })
     }
 
     /// Records the server-stamped sender device in the directory, decrypts, and persists, in one

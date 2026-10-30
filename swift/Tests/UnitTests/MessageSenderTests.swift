@@ -319,4 +319,25 @@ final class MessageSenderTests: XCTestCase {
         XCTAssertEqual(ids(tabletGot), ["after"])
         XCTAssertTrue(alice.logger.snapshot().filter { $0.hasPrefix("identity changed") }.isEmpty)
     }
+
+    func testAMultiUserSendBatchesRecipientsIntoOneRequestAndRetriesOnlyAMismatchedUser() async throws {
+        let carol = try await server.register(user())
+        _ = await send(alice, to: bob, "warm-bob")
+        _ = await send(alice, to: carol, "warm-carol")
+        _ = try await bob.receive()
+        _ = try await carol.receive()
+        let carolTablet = try await server.register(carol.userId)
+        let before = server.messageRequests()
+
+        let results = await alice.sender.send(to: [bob.userId, carol.userId], entry("batched"), acceptedDeviceIds: [])
+
+        XCTAssertEqual(byDevice(results), byDevice([accepted(bob), accepted(carol), accepted(carolTablet)]))
+        XCTAssertEqual(server.messageRequests() - before, 2, "round 1 settles bob and discovers carolTablet; round 2 retries carol only")
+        let bobGot = try await bob.receive()
+        let carolGot = try await carol.receive()
+        let tabletGot = try await carolTablet.receive()
+        XCTAssertEqual(ids(bobGot), ["batched"])
+        XCTAssertEqual(ids(carolGot), ["batched"])
+        XCTAssertEqual(ids(tabletGot), ["batched"])
+    }
 }

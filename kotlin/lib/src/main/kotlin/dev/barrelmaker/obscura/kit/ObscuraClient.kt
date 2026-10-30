@@ -706,15 +706,9 @@ class ObscuraClient(
                 data = ByteString.copyFrom(payload)
             })
         }
-        val recipients = recipientUserIds.distinct().filter { it != self.userId }
-            .flatMap { sender.send(it, message, acceptedDeviceIds) }
-        val selfSync = try {
-            sender.send(self.userId, message, acceptedDeviceIds)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            listOf(SubmissionResult(self.userId, null, SubmissionStatus.REJECTED, e.message ?: e.javaClass.simpleName))
-        }
+        val peers = recipientUserIds.distinct().filter { it != self.userId }
+        val results = sender.send(peers + self.userId, message, acceptedDeviceIds)
+        val (selfSync, recipients) = results.partition { it.userId == self.userId }
         return SendReport(recipients, selfSync)
     }
 
@@ -730,13 +724,12 @@ class ObscuraClient(
                 this.state = WireCodec.encodeTypingState(state)
             })
         }
-        for (recipient in recipientUserIds.distinct().filter { it != self.userId }) {
-            try {
-                sender.sendOrThrow(recipient, message)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                log("TYPING not delivered to $recipient: ${e.message}")
+        val peers = recipientUserIds.distinct().filter { it != self.userId }
+        val results = sender.send(peers, message)
+        for (recipient in peers) {
+            val recipientResults = results.filter { it.userId == recipient }
+            if (recipientResults.none { it.status == SubmissionStatus.ACCEPTED }) {
+                log("TYPING not delivered to $recipient: ${recipientResults.joinToString { it.error ?: it.status.name }}")
             }
         }
     }

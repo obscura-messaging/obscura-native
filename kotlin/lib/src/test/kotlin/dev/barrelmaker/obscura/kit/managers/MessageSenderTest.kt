@@ -334,4 +334,24 @@ class MessageSenderTest {
         assertEquals(emptyList<String>(), changes)
         assertEquals(listOf("first", "second"), bob.receive().map { it.message.appEntry.id })
     }
+
+    @Test
+    fun `a multi-user send batches recipients into one request and retries only a mismatched user`() = runBlocking {
+        val carol = server.register(user())
+        alice.send(bob, "warm-bob")
+        alice.send(carol, "warm-carol")
+        bob.receive(); carol.receive()
+        val carolTablet = server.register(carol.userId)
+        val before = server.requests.size
+
+        val results = alice.sender.send(listOf(bob.userId, carol.userId), entry("batched"))
+
+        assertEquals(setOf(accepted(bob), accepted(carol), accepted(carolTablet)), results.toSet())
+        assertEquals(2, server.requests.size - before, "round 1 settles bob and discovers carolTablet; round 2 retries carol only")
+        assertEquals(setOf(bob.deviceId, carol.deviceId), targetsOf(before))
+        assertEquals(setOf(carol.deviceId, carolTablet.deviceId), targetsOf(before + 1))
+        assertEquals(listOf("batched"), bob.receive().map { it.message.appEntry.id })
+        assertEquals(listOf("batched"), carol.receive().map { it.message.appEntry.id })
+        assertEquals(listOf("batched"), carolTablet.receive().map { it.message.appEntry.id })
+    }
 }

@@ -30,7 +30,7 @@ actor DeviceStore {
         try Bool.fetchOne(db, sql: "SELECT device_id = primary_device_id FROM device_identity WHERE id = 1") ?? false
     }
 
-    static func setLocalDevice(_ deviceId: String, primaryDeviceId: String, in db: Database) throws {
+    static func setLocalDevice(_ deviceId: String, primaryDeviceId: String?, in db: Database) throws {
         try db.execute(sql: "INSERT OR REPLACE INTO device_identity (id, device_id, primary_device_id) VALUES (1, ?, ?)",
                        arguments: [deviceId, primaryDeviceId])
     }

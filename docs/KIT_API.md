@@ -120,9 +120,10 @@ in-memory cache.
 
 **Discovery and complete delivery:**
 
-- Every `POST /v1/messages` request names its target user in
-  `recipient_user_ids` (including the sender's own `userId` for self-sync and
-  `FriendListSync`), even when `messages` is empty.
+- Every `POST /v1/messages` request names its target users in
+  `recipient_user_ids` (batching peer recipients and the sender's own `userId`
+  for self-sync into one request per round), even for a user with no
+  submissions.
 - When the directory has no devices for a target user, the kit fetches all of
   that user's bundles (`GET /v1/users/{id}`). Otherwise it fetches bundles only
   for target devices missing a Signal session, one device at a time
@@ -134,8 +135,10 @@ in-memory cache.
   signed-prekey signatures (`PROTOCOL_VIOLATION` otherwise).
 - If the server rejects a user's submissions with `ERROR_CODE_DEVICE_MISMATCH`,
   the kit adds `missing_device_ids` to the directory, establishes missing
-  sessions, and retries with a new `Idempotency-Key` (up to 3 rounds). Devices
-  rejected with `ERROR_CODE_INVALID_DEVICE` are removed from the directory.
+  sessions, and retries only the mismatched users with a new `Idempotency-Key`
+  (up to 3 rounds). Users whose device sets were complete are settled in the
+  first round. Devices rejected with `ERROR_CODE_INVALID_DEVICE` are removed
+  from the directory.
 - When all known targets of a user are in `acceptedDeviceIds`, the kit sends
   one probe request with no submissions (`recipient_user_ids: [userId]`) to
   check whether a new device was linked since.
@@ -295,8 +298,9 @@ is a no-op. Durable deletion failures propagate.
 returns `SendReport { recipients, selfSync }`.
 
 The kit never infers or broadens recipients. Duplicates and the sender's
-own user id are excluded from peer recipients. It sends separately to the
-sender's other devices and never writes a local entry.
+own user id are excluded from peer recipients. Peer recipients and the
+sender's own user id (for self-sync) are batched into one `POST /v1/messages`
+request per round, and the kit never writes a local entry.
 
 Each result has user id, nullable device id, status
 (`accepted`, `rejected`, `unknown`), and optional error.

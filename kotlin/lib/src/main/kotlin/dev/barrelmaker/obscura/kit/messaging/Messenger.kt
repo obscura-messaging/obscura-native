@@ -58,25 +58,28 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
         }
 
     /**
-     * One request covering [userId]: the server checks the user's whole device set even when
-     * [submissions] is empty. Preprocessing rejections are definitive; transport failures leave
-     * every result unknown.
+     * One request covering [userIds]: the server checks each user's whole device set even when it
+     * has no submission in [submissions]. Preprocessing rejections are definitive; transport
+     * failures leave every result unknown.
      */
-    suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): SubmitOutcome = try {
+    suspend fun submit(userIds: List<String>, submissions: List<UserSubmission>): SubmitOutcome = try {
         val request = SendMessageRequest.newBuilder()
-            .addAllMessages(submissions)
-            .addRecipientUserIds(UuidCodec.uuidToBytes(UUID.fromString(userId)))
+            .addAllMessages(submissions.map { it.submission })
+            .addAllRecipientUserIds(userIds.map { UuidCodec.uuidToBytes(UUID.fromString(it)) })
             .build()
-        decodeSubmissionResults(userId, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
+        decodeSubmissionResults(userIds, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         val definitive = e is ObscuraError.Http && e.status in setOf(400, 413)
-        SubmitOutcome(submissions.map {
-            val failure = unknownSubmission(userId, it, e.message ?: e.javaClass.simpleName)
+        SubmitOutcome(submissions.map { (userId, sub) ->
+            val failure = unknownSubmission(userId, sub, e.message ?: e.javaClass.simpleName)
             if (definitive) failure.copy(result = failure.result.copy(status = SubmissionStatus.REJECTED)) else failure
         })
     }
+
+    suspend fun submit(userId: String, submissions: List<SendMessageRequest.Submission>): SubmitOutcome =
+        submit(listOf(userId), submissions.map { UserSubmission(userId, it) })
 
     /**
      * Never commit a receive ratchet before its synchronous durable writes succeed. [record] runs

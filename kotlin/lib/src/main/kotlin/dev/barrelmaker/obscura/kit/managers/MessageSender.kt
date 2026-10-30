@@ -5,7 +5,8 @@ import dev.barrelmaker.obscura.kit.SubmissionResult
 import dev.barrelmaker.obscura.kit.SubmissionStatus
 import dev.barrelmaker.obscura.kit.messaging.Messenger
 import dev.barrelmaker.obscura.kit.messaging.PeerBundle
-import dev.barrelmaker.obscura.kit.messaging.SubmitOutcome
+import dev.barrelmaker.obscura.kit.messaging.Submitted
+import dev.barrelmaker.obscura.kit.messaging.UserSubmission
 import dev.barrelmaker.obscura.kit.messaging.parsePeerBundle
 import dev.barrelmaker.obscura.kit.messaging.parsePeerBundles
 import dev.barrelmaker.obscura.kit.messaging.requireConsistent
@@ -19,11 +20,13 @@ import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse.ErrorCod
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The one path every outgoing message takes to a user's devices. Each request names the user, and
- * the server queues it only when it covers all of the user's current devices, so its response, not
- * discovery, decides the targets: they start as the user's devices in [DeviceStore] (this device
- * excluded), a mismatch adds the devices the server names, and an invalid device is removed. A
- * request with no target is still sent: it is how this device learns of the account's new devices.
+ * The one path every outgoing message takes to users' devices. Each request names every target user
+ * in `recipient_user_ids`, and the server queues a user's submissions only when they cover all of
+ * that user's current devices, so its response decides the targets: they start as the user's
+ * devices in [DeviceStore] (this device excluded), a mismatch adds the devices the server names for
+ * that user (while other users in the batch are already queued and settled), and an invalid device
+ * is removed. A user with no target is still named in `recipient_user_ids`: it is how this device
+ * learns of new devices without an extra round-trip.
  *
  * Fetching a bundle consumes a one-time prekey, so bundles are fetched only for a target without a
  * session, one device at a time; a user absent from the directory is fetched whole. A bundle is
@@ -35,55 +38,127 @@ internal class MessageSender(
     private val devices: DeviceStore,
     private val selfDeviceId: () -> String?,
 ) {
-    // Sends to one user are serialized, so concurrent first contacts share one fetch.
+    // Sends to the same user are serialized in sorted userId order, so concurrent first contacts
+    // share one fetch and overlapping multi-user batches cannot deadlock.
     private val recipientLocks = ConcurrentHashMap<String, Mutex>()
 
-    /**
-     * When every known target is in [acceptedDeviceIds], a request with no submission asks the
-     * server whether the user has another device: if not, they are reported accepted; if so, the
-     * whole device set is submitted, as completeness requires. Otherwise every target is submitted
-     * and evidence devices are reported accepted. A user left with no devices and no evidence is
-     * one "No devices found" rejection.
-     */
     suspend fun send(
         userId: String,
         message: ClientMessage,
         acceptedDeviceIds: Set<String> = emptySet(),
-    ): List<SubmissionResult> = recipientLocks.computeIfAbsent(userId) { Mutex() }.withLock {
-        var mismatched: SubmitOutcome? = null
-        repeat(MAX_ROUNDS) {
-            val listed = targetsOf(userId)
-            if (listed.isNotEmpty() && listed.all { it in acceptedDeviceIds }) {
-                val probe = messenger.submit(userId, emptyList())
-                val missing = probe.missingDeviceIds.orEmpty()
-                if (missing.all { it in acceptedDeviceIds }) {
-                    return@withLock listed.map { SubmissionResult(userId, it, SubmissionStatus.ACCEPTED) }
+    ): List<SubmissionResult> = send(listOf(userId), message, acceptedDeviceIds)
+
+    /**
+     * Sends [message] to every device of [userIds] in a single batched request per round. Users
+     * that succeed in round 1 are settled immediately; only users whose device set mismatched retry
+     * in the next round.
+     */
+    suspend fun send(
+        userIds: List<String>,
+        message: ClientMessage,
+        acceptedDeviceIds: Set<String> = emptySet(),
+    ): List<SubmissionResult> {
+        val users = userIds.distinct()
+        if (users.isEmpty()) return emptyList()
+        return withUserLocks(users) {
+            val settled = mutableMapOf<String, List<SubmissionResult>>()
+            val mismatched = mutableMapOf<String, Pair<List<Submitted>, List<String>>>()
+            var pending = users
+
+            repeat(MAX_ROUNDS) {
+                if (pending.isEmpty()) return@repeat
+                val nextPending = mutableListOf<String>()
+                val probeUsers = linkedMapOf<String, List<String>>()
+                val targetUsers = linkedMapOf<String, List<String>>()
+                val batchSubmissions = mutableListOf<UserSubmission>()
+
+                for (userId in pending) {
+                    val listed = targetsOf(userId)
+                    if (listed.isNotEmpty() && listed.all { it in acceptedDeviceIds }) {
+                        probeUsers[userId] = listed
+                        continue
+                    }
+                    try {
+                        val targets = sessionTargets(userId)
+                        if (targets == null) {
+                            nextPending.add(userId)
+                            continue
+                        }
+                        if (devices.devicesOf(userId).isEmpty()) {
+                            settled[userId] = listOf(rejected(userId, "No devices found"))
+                            continue
+                        }
+                        val subs = targets.map { UserSubmission(userId, messenger.prepareSubmission(it, message)) }
+                        targetUsers[userId] = targets
+                        batchSubmissions.addAll(subs)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        settled[userId] = listOf(rejected(userId, e))
+                    }
                 }
-                devices.add(userId, missing)
-                mismatched = probe
-                return@repeat
+
+                val activeUsers = (probeUsers.keys + targetUsers.keys).toList()
+                if (activeUsers.isNotEmpty()) {
+                    val outcome = messenger.submit(activeUsers, batchSubmissions)
+                    outcome.submitted.filter { it.errorCode == ErrorCode.ERROR_CODE_INVALID_DEVICE }
+                        .groupBy({ it.result.userId }, { it.result.deviceId!! })
+                        .forEach { (u, invalid) -> devices.remove(u, invalid) }
+
+                    for ((userId, listed) in probeUsers) {
+                        val missing = outcome.mismatches[userId].orEmpty()
+                        if (missing.all { it in acceptedDeviceIds }) {
+                            settled[userId] = listed.map { SubmissionResult(userId, it, SubmissionStatus.ACCEPTED) }
+                        } else {
+                            devices.add(userId, missing)
+                            mismatched[userId] = emptyList<Submitted>() to missing
+                            nextPending.add(userId)
+                        }
+                    }
+
+                    for ((userId, targets) in targetUsers) {
+                        val userSubmitted = outcome.submitted.filter { it.result.userId == userId }
+                        val missing = outcome.mismatches[userId]
+                        if (missing != null) {
+                            devices.add(userId, missing)
+                            mismatched[userId] = userSubmitted to missing
+                            nextPending.add(userId)
+                        } else {
+                            settled[userId] = when {
+                                targets.none { it in acceptedDeviceIds } && devices.devicesOf(userId).isEmpty() ->
+                                    listOf(rejected(userId, "No devices found"))
+                                else -> userSubmitted.map {
+                                    if (it.result.deviceId in acceptedDeviceIds) it.result.copy(status = SubmissionStatus.ACCEPTED, error = null) else it.result
+                                }
+                            }
+                        }
+                    }
+                }
+                pending = nextPending
             }
-            val targets = catching { sessionTargets(userId) }.getOrElse { return@withLock listOf(rejected(userId, it)) }
-                ?: return@repeat
-            if (devices.devicesOf(userId).isEmpty()) return@withLock listOf(rejected(userId, "No devices found"))
-            val submissions = catching { targets.map { messenger.prepareSubmission(it, message) } }
-                .getOrElse { return@withLock listOf(rejected(userId, it)) }
-            val outcome = messenger.submit(userId, submissions)
-            devices.remove(userId, outcome.submitted.filter { it.errorCode == ErrorCode.ERROR_CODE_INVALID_DEVICE }.map { it.result.deviceId!! })
-            val missing = outcome.missingDeviceIds ?: return@withLock when {
-                targets.none { it in acceptedDeviceIds } && devices.devicesOf(userId).isEmpty() ->
-                    listOf(rejected(userId, "No devices found"))
-                else -> outcome.submitted.map {
-                    if (it.result.deviceId in acceptedDeviceIds) it.result.copy(status = SubmissionStatus.ACCEPTED, error = null) else it.result
+
+            for (userId in pending) {
+                val last = mismatched[userId]
+                if (last == null) {
+                    settled[userId] = listOf(rejected(userId, "Sessions could not be established"))
+                } else {
+                    val (submitted, missing) = last
+                    val error = "Device mismatch after $MAX_ROUNDS rounds; missing $missing"
+                    settled[userId] = submitted.map {
+                        if (it.errorCode == ErrorCode.ERROR_CODE_DEVICE_MISMATCH) it.result.copy(error = error) else it.result
+                    }.ifEmpty { listOf(rejected(userId, error)) }
                 }
             }
-            devices.add(userId, missing)
-            mismatched = outcome
+
+            users.flatMap { settled[it].orEmpty() }
         }
-        val outcome = mismatched ?: return@withLock listOf(rejected(userId, "Sessions could not be established"))
-        val error = "Device mismatch after $MAX_ROUNDS rounds; missing ${outcome.missingDeviceIds}"
-        outcome.submitted.map { if (it.errorCode == ErrorCode.ERROR_CODE_DEVICE_MISMATCH) it.result.copy(error = error) else it.result }
-            .ifEmpty { listOf(rejected(userId, error)) }
+    }
+
+    private suspend fun <T> withUserLocks(users: List<String>, block: suspend () -> T): T {
+        val locks = users.sorted().map { recipientLocks.computeIfAbsent(it) { Mutex() } }
+        suspend fun acquire(index: Int): T =
+            if (index == locks.size) block() else locks[index].withLock { acquire(index + 1) }
+        return acquire(0)
     }
 
     /** [send], failing when no device accepted. For control messages that must reach the user. */
@@ -136,15 +211,6 @@ internal class MessageSender(
         userId, null, SubmissionStatus.REJECTED,
         if (error is Throwable) error.message ?: error.javaClass.simpleName else error.toString(),
     )
-
-    /** [runCatching] that never swallows coroutine cancellation. */
-    private inline fun <T> catching(block: () -> T): Result<T> = try {
-        Result.success(block())
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Result.failure(e)
-    }
 
     private companion object {
         const val MAX_ROUNDS = 3
