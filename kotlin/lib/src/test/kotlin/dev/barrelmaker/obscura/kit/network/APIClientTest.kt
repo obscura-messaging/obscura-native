@@ -132,7 +132,7 @@ class APIClientTest {
             }.apply { start() }
             val slow = APIClient("http://127.0.0.1:${listener.localPort}") { "token" }
 
-            val call = async(kotlinx.coroutines.Dispatchers.Default) { slow.awaitLinkSession("user", "ls", waitSeconds = 25) }
+            val call = async(kotlinx.coroutines.Dispatchers.Default) { slow.awaitLinkSession("user", "ls") }
             assertTrue(requestRead.await(5, java.util.concurrent.TimeUnit.SECONDS))
             val started = System.currentTimeMillis()
             call.cancel()

@@ -143,10 +143,9 @@ class OwnDevicesTest {
         assertEquals(0, server.requestCount)
 
         server.enqueue(MockResponse.Builder().build())
-        server.enqueue(MockResponse.Builder().code(401).build())
         c.unlinkDevice(SELF_DEVICE_ID)
 
-        assertEquals(listOf("/v1/devices/$SELF_DEVICE_ID", "/v1/sessions"), paths())
+        assertEquals(listOf("/v1/devices/$SELF_DEVICE_ID"), paths())
         assertEquals(AuthState.LOGGED_OUT, c.authState.value)
         assertNull(storage.data)
         assertNull(c.devices.getIdentity())

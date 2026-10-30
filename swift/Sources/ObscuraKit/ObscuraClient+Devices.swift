@@ -30,12 +30,15 @@ struct LinkContents {
 }
 
 extension ObscuraClient {
-    static let linkWaitSeconds = 25
+    static let linkPollNanoseconds: UInt64 = 250_000_000
 
     // MARK: - Linking, new device
 
     /// For `.linkRequired`: opens a link session for this device to show to the primary.
     public func beginLink(_ username: String, _ password: String, deviceName: String) async throws -> LinkRequest {
+        guard !deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ObscuraError.invalidArgument("deviceName must not be blank")
+        }
         try await requireUnprovisionedDevice()
         let account = try await api.login(username, password, deviceId: nil)
         guard let userId = APIClient.userId(account.token) else {
@@ -80,20 +83,19 @@ extension ObscuraClient {
     }
 
     private func awaitApproval(_ request: LinkRequest) async throws -> Data {
-        while true {
+        while Date().timeIntervalSince1970 < TimeInterval(request.expiresAt) {
             try Task.checkCancellation()
             do {
-                if let body = try await api.awaitLinkSession(request.sessionId, wait: Self.linkWaitSeconds,
-                                                             bearer: request.userToken) {
+                if let body = try await api.awaitLinkSession(request.sessionId, bearer: request.userToken) {
                     return body
                 }
             } catch ObscuraError.http(status: 404, body: _) {
                 throw ObscuraError.linkFailed("link session expired or unknown")
             }
-            guard Date().timeIntervalSince1970 < TimeInterval(request.expiresAt) else {
-                throw ObscuraError.linkFailed("link session expired")
-            }
+            guard Date().timeIntervalSince1970 < TimeInterval(request.expiresAt) else { break }
+            try await Task.sleep(nanoseconds: Self.linkPollNanoseconds)
         }
+        throw ObscuraError.linkFailed("link session expired")
     }
 
     /// Decrypts and checks the primary's `LinkEnvelope`: `LINK_FAILED` if it does not decrypt,

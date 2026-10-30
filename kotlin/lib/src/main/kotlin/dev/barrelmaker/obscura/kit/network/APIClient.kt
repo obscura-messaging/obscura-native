@@ -133,10 +133,9 @@ internal class APIClient(
         send("PUT", "/v1/link-sessions/${enc(id)}", body.toRequestBody(OCTET), Auth.Session)
     }
 
-    /** The approved body, or null when the session was not approved within [waitSeconds]. */
-    suspend fun awaitLinkSession(userToken: String, id: String, waitSeconds: Int): ByteArray? {
-        val (status, bytes) = exchange("GET", "/v1/link-sessions/${enc(id)}?wait=$waitSeconds", null, Auth.Token(userToken),
-            readTimeoutSeconds = waitSeconds + 15L)
+    /** The approved body, or null when the session is not approved yet. */
+    suspend fun awaitLinkSession(userToken: String, id: String): ByteArray? {
+        val (status, bytes) = exchange("GET", "/v1/link-sessions/${enc(id)}", null, Auth.Token(userToken))
         return if (status == 204) null else bytes
     }
 
@@ -182,9 +181,7 @@ internal class APIClient(
         body: RequestBody?,
         auth: Auth,
         vararg headers: Pair<String, String>,
-        readTimeoutSeconds: Long? = null,
     ): Pair<Int, ByteArray> {
-        val client = readTimeoutSeconds?.let { http.newBuilder().readTimeout(it, TimeUnit.SECONDS).build() } ?: http
         var retries = 0
         var refreshed = false
         while (true) {
@@ -197,7 +194,7 @@ internal class APIClient(
                 if (bearer != null) header("Authorization", "Bearer $bearer")
                 headers.forEach { (name, value) -> header(name, value) }
             }.build()
-            val (status, bytes, retryAfter) = execute(client, request)
+            val (status, bytes, retryAfter) = execute(http, request)
             if (status in 200..299) return status to bytes
             if (status == 401 && auth == Auth.Session && !refreshed) {
                 refreshed = true

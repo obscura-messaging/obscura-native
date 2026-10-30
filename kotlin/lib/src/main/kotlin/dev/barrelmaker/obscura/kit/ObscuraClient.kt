@@ -44,6 +44,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -166,7 +167,7 @@ class ObscuraClient(
      */
     suspend fun resetAccount(username: String, password: String) {
         auth.resetAccount(username, password)
-        wipeDevice()
+        wipeDevice(revoke = false)
     }
 
     /** Whether this device is the account's primary. False before provisioning. */
@@ -216,12 +217,13 @@ class ObscuraClient(
     private suspend fun awaitApproval(request: LinkRequest): ByteArray {
         while (System.currentTimeMillis() / 1000 < request.expiresAt) {
             val body = try {
-                api.awaitLinkSession(request.userToken, request.sessionId, LINK_WAIT_S)
+                api.awaitLinkSession(request.userToken, request.sessionId)
             } catch (e: ObscuraError.Http) {
                 if (e.status == 404) throw ObscuraError.LinkFailed("Link session expired or unknown", e)
                 throw e
             }
             if (body != null) return body
+            delay(LINK_POLL_MS)
         }
         throw ObscuraError.LinkFailed("Link session expired")
     }
@@ -295,7 +297,7 @@ class ObscuraClient(
                 throw ObscuraError.InvalidArgument("The primary device cannot unlink itself; reset the account instead")
             deviceId == self.deviceId -> {
                 api.deleteDevice(deviceId)
-                wipeDevice()
+                wipeDevice(revoke = false)
             }
             !primary -> throw ObscuraError.NotPrimary()
             else -> {
@@ -332,8 +334,10 @@ class ObscuraClient(
     suspend fun logout() = endSession(revoke = true)
 
     /** [logout], then delete every piece of local kit data. */
-    suspend fun wipeDevice() {
-        logout()
+    suspend fun wipeDevice() = wipeDevice(revoke = true)
+
+    private suspend fun wipeDevice(revoke: Boolean) {
+        endSession(revoke = revoke)
         withContext(Dispatchers.IO) {
             db.transaction {
                 sqlDriver.pragma("PRAGMA secure_delete = ON")
@@ -859,7 +863,7 @@ class ObscuraClient(
         private const val PREKEY_REPLENISH_COUNT = 50
         private const val PUSH_IDLE_MS = 500L
         private const val PUSH_RECENT_ACTIVITY_MS = 10_000L
-        private const val LINK_WAIT_S = 25
+        private const val LINK_POLL_MS = 250L
     }
 }
 

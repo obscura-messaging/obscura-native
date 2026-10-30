@@ -61,21 +61,20 @@ actor APIClient {
         return min(max(seconds, 1), 10)
     }
 
-    private func request(_ path: String, method: String = "GET", query: [URLQueryItem] = [], body: Data? = nil,
+    private func request(_ path: String, method: String = "GET", body: Data? = nil,
                          contentType: String = "application/json", headers: [String: String] = [:],
                          auth: Auth = .device) async throws -> Data {
-        try await exchange(path, method: method, query: query, body: body, contentType: contentType, headers: headers,
+        try await exchange(path, method: method, body: body, contentType: contentType, headers: headers,
                            auth: auth).data
     }
 
-    private func exchange(_ path: String, method: String, query: [URLQueryItem] = [], body: Data? = nil,
+    private func exchange(_ path: String, method: String, body: Data? = nil,
                           contentType: String = "application/json", headers: [String: String] = [:],
                           auth: Auth = .device) async throws -> (data: Data, status: Int) {
-        guard var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false) else {
+        guard let components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false),
+              let url = components.url else {
             throw ObscuraError.invalidArgument("path \(path)")
         }
-        if !query.isEmpty { components.queryItems = query }
-        guard let url = components.url else { throw ObscuraError.invalidArgument("path \(path)") }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
@@ -191,10 +190,9 @@ actor APIClient {
         try await json("v1/link-sessions", method: "POST", auth: .bearer(bearer))
     }
 
-    /// The primary's body once the session is approved; nil if it was not approved within `wait` seconds.
-    func awaitLinkSession(_ id: String, wait: Int, bearer: String) async throws -> Data? {
-        let response = try await exchange("v1/link-sessions/\(id)", method: "GET",
-                                          query: [URLQueryItem(name: "wait", value: "\(wait)")], auth: .bearer(bearer))
+    /// The primary's body once the session is approved; nil if it is not approved yet.
+    func awaitLinkSession(_ id: String, bearer: String) async throws -> Data? {
+        let response = try await exchange("v1/link-sessions/\(id)", method: "GET", auth: .bearer(bearer))
         return response.status == 204 ? nil : response.data
     }
 
