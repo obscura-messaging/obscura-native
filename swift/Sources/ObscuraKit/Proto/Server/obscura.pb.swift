@@ -30,10 +30,7 @@ nonisolated struct Obscura_V1_SendMessageRequest: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  var messages: [Obscura_V1_SendMessageRequest.Submission] = []
-
-  /// Users whose current devices this request intends to cover, even with no submission for them (16 bytes each).
-  var recipientUserIds: [Data] = []
+  var recipients: [Obscura_V1_SendMessageRequest.Recipient] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -42,14 +39,27 @@ nonisolated struct Obscura_V1_SendMessageRequest: Sendable {
     // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
     // methods supported on all messages.
 
-    /// Client-generated UUID (16 bytes)
-    var submissionID: Data = Data()
-
     /// UUID of the target device (16 bytes)
     var deviceID: Data = Data()
 
     /// The encrypted message payload
     var message: Data = Data()
+
+    var unknownFields = SwiftProtobuf.UnknownStorage()
+
+    init() {}
+  }
+
+  nonisolated struct Recipient: Sendable {
+    // SwiftProtobuf.Message conformance is added in an extension below. See the
+    // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+    // methods supported on all messages.
+
+    /// UUID of the target user (16 bytes)
+    var userID: Data = Data()
+
+    /// May be empty to check whether the user has devices
+    var submissions: [Obscura_V1_SendMessageRequest.Submission] = []
 
     var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -64,93 +74,15 @@ nonisolated struct Obscura_V1_SendMessageResponse: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// If empty, all submissions in the batch were successfully queued.
-  var failedSubmissions: [Obscura_V1_SendMessageResponse.FailedSubmission] = []
+  /// Targeted device IDs that do not belong to their recipient user (unlinked or unknown; 16 bytes each).
+  var invalidDeviceIds: [Data] = []
 
-  /// One entry per target user rejected for an incomplete device set.
+  /// One entry per recipient user rejected for an incomplete device set.
   var deviceMismatches: [Obscura_V1_SendMessageResponse.DeviceMismatch] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  nonisolated enum ErrorCode: SwiftProtobuf.Enum, Swift.CaseIterable {
-    typealias RawValue = Int
-    case unspecified // = 0
-
-    /// Device not found in database
-    case invalidDevice // = 1
-
-    /// Device ID bytes are invalid (expected 16)
-    case malformedDeviceID // = 2
-
-    /// Submission ID bytes are invalid (expected 16)
-    case malformedSubmissionID // = 3
-
-    /// Message payload is missing
-    case messageMissing // = 4
-
-    /// The target user's device set is not covered exactly; see device_mismatches
-    case deviceMismatch // = 5
-    case UNRECOGNIZED(Int)
-
-    init() {
-      self = .unspecified
-    }
-
-    init?(rawValue: Int) {
-      switch rawValue {
-      case 0: self = .unspecified
-      case 1: self = .invalidDevice
-      case 2: self = .malformedDeviceID
-      case 3: self = .malformedSubmissionID
-      case 4: self = .messageMissing
-      case 5: self = .deviceMismatch
-      default: self = .UNRECOGNIZED(rawValue)
-      }
-    }
-
-    var rawValue: Int {
-      switch self {
-      case .unspecified: return 0
-      case .invalidDevice: return 1
-      case .malformedDeviceID: return 2
-      case .malformedSubmissionID: return 3
-      case .messageMissing: return 4
-      case .deviceMismatch: return 5
-      case .UNRECOGNIZED(let i): return i
-      }
-    }
-
-    // The compiler won't synthesize support with the UNRECOGNIZED case.
-    static let allCases: [Obscura_V1_SendMessageResponse.ErrorCode] = [
-      .unspecified,
-      .invalidDevice,
-      .malformedDeviceID,
-      .malformedSubmissionID,
-      .messageMissing,
-      .deviceMismatch,
-    ]
-
-  }
-
-  nonisolated struct FailedSubmission: Sendable {
-    // SwiftProtobuf.Message conformance is added in an extension below. See the
-    // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-    // methods supported on all messages.
-
-    /// Echoed back to the client (16 bytes)
-    var submissionID: Data = Data()
-
-    var errorCode: Obscura_V1_SendMessageResponse.ErrorCode = .unspecified
-
-    /// Optional human-readable context
-    var errorMessage: String = String()
-
-    var unknownFields = SwiftProtobuf.UnknownStorage()
-
-    init() {}
-  }
-
-  /// A target user whose submissions were all rejected with ERROR_CODE_DEVICE_MISMATCH.
+  /// A recipient user whose submissions were all rejected because its current device set was not covered.
   nonisolated struct DeviceMismatch: Sendable {
     // SwiftProtobuf.Message conformance is added in an extension below. See the
     // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -303,34 +235,26 @@ fileprivate nonisolated let _protobuf_package = "obscura.v1"
 
 nonisolated extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SendMessageRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}messages\0\u{3}recipient_user_ids\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}recipients\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.messages) }()
-      case 2: try { try decoder.decodeRepeatedBytesField(value: &self.recipientUserIds) }()
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.recipients) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.messages.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.messages, fieldNumber: 1)
-    }
-    if !self.recipientUserIds.isEmpty {
-      try visitor.visitRepeatedBytesField(value: self.recipientUserIds, fieldNumber: 2)
+    if !self.recipients.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.recipients, fieldNumber: 1)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Obscura_V1_SendMessageRequest, rhs: Obscura_V1_SendMessageRequest) -> Bool {
-    if lhs.messages != rhs.messages {return false}
-    if lhs.recipientUserIds != rhs.recipientUserIds {return false}
+    if lhs.recipients != rhs.recipients {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -338,37 +262,29 @@ nonisolated extension Obscura_V1_SendMessageRequest: SwiftProtobuf.Message, Swif
 
 nonisolated extension Obscura_V1_SendMessageRequest.Submission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = Obscura_V1_SendMessageRequest.protoMessageName + ".Submission"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}submission_id\0\u{3}device_id\0\u{1}message\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}device_id\0\u{1}message\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularBytesField(value: &self.submissionID) }()
-      case 2: try { try decoder.decodeSingularBytesField(value: &self.deviceID) }()
-      case 3: try { try decoder.decodeSingularBytesField(value: &self.message) }()
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.deviceID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.message) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.submissionID.isEmpty {
-      try visitor.visitSingularBytesField(value: self.submissionID, fieldNumber: 1)
-    }
     if !self.deviceID.isEmpty {
-      try visitor.visitSingularBytesField(value: self.deviceID, fieldNumber: 2)
+      try visitor.visitSingularBytesField(value: self.deviceID, fieldNumber: 1)
     }
     if !self.message.isEmpty {
-      try visitor.visitSingularBytesField(value: self.message, fieldNumber: 3)
+      try visitor.visitSingularBytesField(value: self.message, fieldNumber: 2)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Obscura_V1_SendMessageRequest.Submission, rhs: Obscura_V1_SendMessageRequest.Submission) -> Bool {
-    if lhs.submissionID != rhs.submissionID {return false}
     if lhs.deviceID != rhs.deviceID {return false}
     if lhs.message != rhs.message {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
@@ -376,17 +292,46 @@ nonisolated extension Obscura_V1_SendMessageRequest.Submission: SwiftProtobuf.Me
   }
 }
 
-nonisolated extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = _protobuf_package + ".SendMessageResponse"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}failed_submissions\0\u{3}device_mismatches\0")
+nonisolated extension Obscura_V1_SendMessageRequest.Recipient: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = Obscura_V1_SendMessageRequest.protoMessageName + ".Recipient"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}submissions\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.failedSubmissions) }()
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.userID) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.submissions) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.userID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.userID, fieldNumber: 1)
+    }
+    if !self.submissions.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.submissions, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Obscura_V1_SendMessageRequest.Recipient, rhs: Obscura_V1_SendMessageRequest.Recipient) -> Bool {
+    if lhs.userID != rhs.userID {return false}
+    if lhs.submissions != rhs.submissions {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".SendMessageResponse"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}invalid_device_ids\0\u{3}device_mismatches\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedBytesField(value: &self.invalidDeviceIds) }()
       case 2: try { try decoder.decodeRepeatedMessageField(value: &self.deviceMismatches) }()
       default: break
       }
@@ -394,8 +339,8 @@ nonisolated extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, Swi
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.failedSubmissions.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.failedSubmissions, fieldNumber: 1)
+    if !self.invalidDeviceIds.isEmpty {
+      try visitor.visitRepeatedBytesField(value: self.invalidDeviceIds, fieldNumber: 1)
     }
     if !self.deviceMismatches.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.deviceMismatches, fieldNumber: 2)
@@ -404,52 +349,8 @@ nonisolated extension Obscura_V1_SendMessageResponse: SwiftProtobuf.Message, Swi
   }
 
   static func ==(lhs: Obscura_V1_SendMessageResponse, rhs: Obscura_V1_SendMessageResponse) -> Bool {
-    if lhs.failedSubmissions != rhs.failedSubmissions {return false}
+    if lhs.invalidDeviceIds != rhs.invalidDeviceIds {return false}
     if lhs.deviceMismatches != rhs.deviceMismatches {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension Obscura_V1_SendMessageResponse.ErrorCode: SwiftProtobuf._ProtoNameProviding {
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ERROR_CODE_UNSPECIFIED\0\u{1}ERROR_CODE_INVALID_DEVICE\0\u{1}ERROR_CODE_MALFORMED_DEVICE_ID\0\u{1}ERROR_CODE_MALFORMED_SUBMISSION_ID\0\u{1}ERROR_CODE_MESSAGE_MISSING\0\u{1}ERROR_CODE_DEVICE_MISMATCH\0")
-}
-
-nonisolated extension Obscura_V1_SendMessageResponse.FailedSubmission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  static let protoMessageName: String = Obscura_V1_SendMessageResponse.protoMessageName + ".FailedSubmission"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}submission_id\0\u{3}error_code\0\u{3}error_message\0")
-
-  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularBytesField(value: &self.submissionID) }()
-      case 2: try { try decoder.decodeSingularEnumField(value: &self.errorCode) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.errorMessage) }()
-      default: break
-      }
-    }
-  }
-
-  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.submissionID.isEmpty {
-      try visitor.visitSingularBytesField(value: self.submissionID, fieldNumber: 1)
-    }
-    if self.errorCode != .unspecified {
-      try visitor.visitSingularEnumField(value: self.errorCode, fieldNumber: 2)
-    }
-    if !self.errorMessage.isEmpty {
-      try visitor.visitSingularStringField(value: self.errorMessage, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  static func ==(lhs: Obscura_V1_SendMessageResponse.FailedSubmission, rhs: Obscura_V1_SendMessageResponse.FailedSubmission) -> Bool {
-    if lhs.submissionID != rhs.submissionID {return false}
-    if lhs.errorCode != rhs.errorCode {return false}
-    if lhs.errorMessage != rhs.errorMessage {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

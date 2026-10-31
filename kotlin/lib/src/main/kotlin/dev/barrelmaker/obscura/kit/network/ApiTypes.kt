@@ -1,6 +1,5 @@
 package dev.barrelmaker.obscura.kit.network
 
-import dev.barrelmaker.obscura.kit.crypto.fromBase64Url
 import dev.barrelmaker.obscura.kit.ObscuraError
 import org.json.JSONArray
 import org.json.JSONObject
@@ -28,12 +27,24 @@ internal data class DeviceKeys(val identityKey: String, val registrationId: Int,
         .put("registrationId", registrationId)
 }
 
-internal data class AuthResponse(val token: String, val refreshToken: String?, val deviceId: String?) {
+internal data class AuthResponse(
+    val token: String,
+    val refreshToken: String,
+    val expiresAt: Long,
+    val userId: String,
+    val deviceId: String,
+) {
     companion object {
         fun from(json: JSONObject): AuthResponse {
             val token = json.optString("token")
-            if (token.isBlank()) throw ObscuraError.ProtocolViolation("Missing session token")
-            return AuthResponse(token, json.optString("refreshToken").ifBlank { null }, json.optString("deviceId").ifBlank { null })
+            val refreshToken = json.optString("refreshToken")
+            val expiresAt = json.optLong("expiresAt")
+            val userId = json.optString("userId")
+            val deviceId = json.optString("deviceId")
+            if (token.isBlank() || refreshToken.isBlank() || expiresAt <= 0 || !isUuid(userId) || !isUuid(deviceId)) {
+                throw ObscuraError.ProtocolViolation("Invalid auth response")
+            }
+            return AuthResponse(token, refreshToken, expiresAt, userId, deviceId)
         }
     }
 }
@@ -42,17 +53,5 @@ internal data class AuthResponse(val token: String, val refreshToken: String?, v
 internal data class OwnDevice(val deviceId: String, val name: String?, val isPrimary: Boolean)
 
 internal data class LinkSession(val id: String, val userId: String, val expiresAt: Long)
-
-/** The claims this kit reads from an access token. It never verifies the signature; the server does. */
-internal object Jwt {
-    fun userId(token: String): String = claims(token)?.optString("sub")?.takeIf { it.isNotBlank() }
-        ?: throw ObscuraError.ProtocolViolation("Access token has no subject")
-
-    /** Expiry in epoch seconds, or null when the token has none or cannot be read. */
-    fun expiresAt(token: String): Long? = claims(token)?.optLong("exp")?.takeIf { it > 0 }
-
-    private fun claims(token: String): JSONObject? =
-        runCatching { JSONObject(String(token.split(".")[1].fromBase64Url())) }.getOrNull()
-}
 
 internal fun isUuid(value: String): Boolean = runCatching { UUID.fromString(value).toString() == value.lowercase() }.getOrDefault(false)

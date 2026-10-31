@@ -75,18 +75,18 @@ class OwnDevicesTest {
             val peer = peers.register("019f025a-0000-7de6-84b6-000000000002")
             val c = sessionClient(url, storedSession())
             assertTrue(c.auth.restore())
-            server.enqueue(MockResponse.Builder().body("[${peer.consumeBundle()}]").build())
+            server.enqueue(MockResponse.Builder().body(org.json.JSONObject().put("bundles", org.json.JSONArray().put(peer.consumeBundle())).toString()).build())
             server.enqueue(MockResponse.Builder().body("").build())
 
-            val report = c.send(listOf(peer.userId), "m", "e", 1, byteArrayOf(1), emptySet())
+            val report = c.send(listOf(peer.userId), "m", "e", 1, byteArrayOf(1))
 
             assertEquals(SubmissionStatus.ACCEPTED, report.recipients.single().status)
             assertEquals(emptyList<SubmissionResult>(), report.selfSync)
             val requests = List(server.requestCount) { server.takeRequest() }
-            assertEquals(listOf("/v1/users/${peer.userId}", "/v1/messages"), requests.map { it.url.encodedPath })
+            assertEquals(listOf("/v1/keys/${peer.userId}", "/v1/messages"), requests.map { it.url.encodedPath })
             val batched = xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest.parseFrom(requests[1].body!!.toByteArray())
-            assertEquals(1, batched.messagesCount)
-            assertEquals(listOf(peer.userId, SELF_USER_ID), batched.recipientUserIdsList.map { dev.barrelmaker.obscura.kit.crypto.UuidCodec.uuidString(it) })
+            assertEquals(1, batched.recipientsList.sumOf { it.submissionsCount })
+            assertEquals(listOf(peer.userId, SELF_USER_ID), batched.recipientsList.map { dev.barrelmaker.obscura.kit.crypto.UuidCodec.uuidString(it.userId) })
             c.auth.end()
             Unit
         }
@@ -103,7 +103,7 @@ class OwnDevicesTest {
 
         assertEquals(AuthState.LOGGED_OUT, c.authState.value)
         assertNull(storage.data)
-        assertEquals(listOf("/v1/devices", "/v1/sessions/refresh"), paths())
+        assertEquals(listOf("/v1/devices", "/v1/session/refresh"), paths())
     }
 
     @Test fun `the primary cannot unlink itself`() = runBlocking {

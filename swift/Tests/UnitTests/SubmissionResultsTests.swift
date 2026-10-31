@@ -5,7 +5,6 @@ import XCTest
 final class SubmissionResultsTests: XCTestCase {
     private func submission(_ value: UInt8) -> Obscura_V1_SendMessageRequest.Submission {
         var submission = Obscura_V1_SendMessageRequest.Submission()
-        submission.submissionID = Data(repeating: value, count: 16)
         submission.deviceID = Data(repeating: value, count: 16)
         submission.message = Data([value])
         return submission
@@ -14,16 +13,12 @@ final class SubmissionResultsTests: XCTestCase {
     func testPartialRejectionIsScopedToItsSubmission() throws {
         let a = submission(1)
         let b = submission(2)
-        var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
-        failure.submissionID = a.submissionID
-        failure.errorCode = .invalidDevice
-        failure.errorMessage = "Device not found"
         var response = Obscura_V1_SendMessageResponse()
-        response.failedSubmissions = [failure]
+        response.invalidDeviceIds = [a.deviceID]
         let outcome = try submitOutcome(userId: "user", submissions: [a, b], response: response)
         let results = outcome.submitted.map(\.result)
         XCTAssertEqual(results.map(\.status), [.rejected, .accepted])
-        XCTAssertEqual(outcome.submitted.map(\.failure), [.invalidDevice, nil])
+        XCTAssertEqual(outcome.submitted.map(\.invalidDevice), [true, false])
         XCTAssertEqual(outcome.missingDeviceIds, [])
         XCTAssertEqual(results.first?.error, "Device not found")
         XCTAssertNil(results.last?.error)
@@ -33,19 +28,15 @@ final class SubmissionResultsTests: XCTestCase {
     func testADeviceMismatchNamesTheMissingDevicesOfTheAddressedUser() throws {
         let userId = "03030303-0303-0303-0303-030303030303"
         let a = submission(1)
-        var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
-        failure.submissionID = a.submissionID
-        failure.errorCode = .deviceMismatch
         var mismatch = Obscura_V1_SendMessageResponse.DeviceMismatch()
         mismatch.userID = Data(repeating: 3, count: 16)
         mismatch.missingDeviceIds = [Data(repeating: 4, count: 16)]
         var response = Obscura_V1_SendMessageResponse()
-        response.failedSubmissions = [failure]
         response.deviceMismatches = [mismatch]
 
         let outcome = try submitOutcome(userId: userId, submissions: [a], response: response)
 
-        XCTAssertEqual(outcome.submitted.map(\.failure), [.deviceMismatch])
+        XCTAssertEqual(outcome.submitted.map(\.invalidDevice), [false])
         XCTAssertEqual(outcome.submitted.map(\.result.status), [.rejected])
         XCTAssertEqual(outcome.missingDeviceIds, ["04040404-0404-0404-0404-040404040404"])
         XCTAssertThrowsError(try submitOutcome(userId: "another-user", submissions: [a], response: response))
@@ -55,13 +46,10 @@ final class SubmissionResultsTests: XCTestCase {
 
     func testUnknownAndDuplicateResponseIDsAreNotSuccess() throws {
         let a = submission(1)
-        var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
-        failure.submissionID = submission(2).submissionID
         var response = Obscura_V1_SendMessageResponse()
-        response.failedSubmissions = [failure]
+        response.invalidDeviceIds = [submission(2).deviceID]
         XCTAssertThrowsError(try submitOutcome(userId: "user", submissions: [a], response: response))
-        failure.submissionID = a.submissionID
-        response.failedSubmissions = [failure, failure]
+        response.invalidDeviceIds = [a.deviceID, a.deviceID]
         XCTAssertThrowsError(try submitOutcome(userId: "user", submissions: [a], response: response))
     }
 
@@ -124,9 +112,8 @@ private final class SubmissionResponseProtocol: URLProtocol {
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
                                        headerFields: ["Content-Type": "application/x-protobuf"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        // Rejection for submission 1; submission 2 receives an unrelated ID and must remain uncertain.
-        client?.urlProtocol(self, didLoad: Data([0x0a, 0x14, 0x0a, 0x10] +
-            Array(repeating: UInt8(1), count: 16) + [0x10, 0x01]))
+        // Invalid device ID for device 1; submission 2 receives an unrelated ID and must remain uncertain.
+        client?.urlProtocol(self, didLoad: Data([0x0a, 0x10] + Array(repeating: UInt8(1), count: 16)))
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}

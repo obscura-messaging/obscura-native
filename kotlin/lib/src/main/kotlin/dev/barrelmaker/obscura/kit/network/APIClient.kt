@@ -63,12 +63,12 @@ internal class APIClient(
 
     /** Authenticates [deviceId] for [username]. */
     suspend fun login(username: String, password: String, deviceId: String): AuthResponse = AuthResponse.from(
-        json("POST", "/v1/sessions", credentials(username, password).put("deviceId", deviceId), Auth.None)
+        json("POST", "/v1/session", credentials(username, password).put("deviceId", deviceId), Auth.None)
     )
 
     /** Resets the account and provisions a new primary device. */
     suspend fun resetAccount(username: String, password: String, name: String, keys: DeviceKeys): AuthResponse = AuthResponse.from(
-        json("POST", "/v1/account/reset", keys.toJson().put("username", username).put("password", password).put("name", name), Auth.None)
+        json("POST", "/v1/users/reset", keys.toJson().put("username", username).put("password", password).put("name", name), Auth.None)
     )
 
     /** Provisions a linked device authorized by an approved [linkSessionId]. */
@@ -77,28 +77,28 @@ internal class APIClient(
     )
 
     suspend fun refreshSession(refreshToken: String): AuthResponse = AuthResponse.from(
-        json("POST", "/v1/sessions/refresh", JSONObject().put("refreshToken", refreshToken), Auth.None)
+        json("POST", "/v1/session/refresh", JSONObject().put("refreshToken", refreshToken), Auth.None)
     )
 
-    suspend fun logout(refreshToken: String, bearer: String) {
-        send("DELETE", "/v1/sessions", JSONObject().put("refreshToken", refreshToken).body(), Auth.Token(bearer))
+    suspend fun logout(bearer: String) {
+        send("DELETE", "/v1/session", null, Auth.Token(bearer))
     }
 
     suspend fun registerPushToken(pushToken: String) {
-        send("PUT", "/v1/push-tokens", JSONObject().put("token", pushToken).body(), Auth.Session)
+        send("PUT", "/v1/push-token", JSONObject().put("token", pushToken).body(), Auth.Session)
     }
 
     suspend fun uploadPreKeys(keys: PreKeyUpload) {
-        send("POST", "/v1/devices/keys", keys.toJson().body(), Auth.Session)
+        send("POST", "/v1/keys", keys.toJson().body(), Auth.Session)
     }
 
     /** One bundle per device of [userId]; consumes a one-time prekey on each. */
     suspend fun fetchPreKeyBundles(userId: String): JSONArray =
-        parse("/v1/users") { JSONArray(String(send("GET", "/v1/users/${enc(userId)}", null, Auth.Session))) }
+        parse("/v1/keys") { JSONObject(String(send("GET", "/v1/keys/${enc(userId)}", null, Auth.Session))).getJSONArray("bundles") }
 
     /** The bundle of one device; consumes a one-time prekey on that device only. */
-    suspend fun fetchPreKeyBundle(userId: String, deviceId: String): JSONObject = parse("/v1/users") {
-        JSONObject(String(send("GET", "/v1/users/${enc(userId)}/devices/${enc(deviceId)}", null, Auth.Session)))
+    suspend fun fetchPreKeyBundle(userId: String, deviceId: String): JSONObject = parse("/v1/keys") {
+        JSONObject(String(send("GET", "/v1/keys/${enc(userId)}/devices/${enc(deviceId)}", null, Auth.Session)))
     }
 
     /** The account's devices on this device's session. */

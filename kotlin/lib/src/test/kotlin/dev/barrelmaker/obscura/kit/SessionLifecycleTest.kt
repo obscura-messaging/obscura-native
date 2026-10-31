@@ -39,7 +39,7 @@ class SessionLifecycleTest {
     }
 
     private fun refresh(status: Int = 200) = MockResponse.Builder().code(status)
-        .body(if (status == 200) """{"token":"${jwt(SELF_USER_ID, FAR_FUTURE)}","refreshToken":"rotated"}""" else "{}")
+        .body(if (status == 200) authResponseJson(refreshToken = "rotated").toString() else "{}")
         .bodyDelay(300, TimeUnit.MILLISECONDS).build()
 
     @Test fun `wrong credentials on a local device issue exactly one password request`() = runBlocking {
@@ -67,7 +67,7 @@ class SessionLifecycleTest {
 
         assertEquals("rotated", storage.data!!["refreshToken"])
         val request = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("/v1/push-tokens", request.url.encodedPath)
+        assertEquals("/v1/push-token", request.url.encodedPath)
         assertEquals("Bearer ${c.auth.requireCredentials().token}", request.headers["Authorization"])
         assertEquals(TokenStatus.FRESH, pending.await())
         assertEquals(2, server.requestCount)

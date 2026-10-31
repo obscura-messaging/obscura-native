@@ -35,7 +35,7 @@ final class ClientTests: XCTestCase {
         await assertThrows(.notAuthenticated) { _ = try await client.friendCode() }
         await assertThrows(.notAuthenticated) { try await client.sendTyping(to: ["x"], contextId: "c", state: .started) }
         await assertThrows(.notAuthenticated) {
-            _ = try await client.send(to: ["x"], modelKey: "m", entryId: "e", sentAt: 1, payload: Data(), acceptedDeviceIds: [])
+            _ = try await client.send(to: ["x"], modelKey: "m", entryId: "e", sentAt: 1, payload: Data())
         }
         await assertThrows(.notAuthenticated) { try await client.addFriendByCode(FriendCode.encode(userId: "u", username: "n")) }
         await assertThrows(.notAuthenticated) { try await client.approveLink("code") }

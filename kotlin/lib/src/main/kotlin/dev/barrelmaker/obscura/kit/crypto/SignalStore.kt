@@ -66,7 +66,10 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
             val existing = queries.selectIdentityByUser(userId).executeAsOneOrNull()
             if (existing != null && MessageDigest.isEqual(existing, identityKey.serialize())) return@transactionWithResult false
             queries.insertIdentity(userId, identityKey.serialize())
-            if (existing != null) queries.deleteSessionsOfUser(userId)
+            if (existing != null) {
+                queries.deleteSessionsOfUser(userId)
+                db.deviceQueries.deleteOtherDevicesOfUser(userId, address.name)
+            }
             existing != null
         }
         if (!changed) return IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED

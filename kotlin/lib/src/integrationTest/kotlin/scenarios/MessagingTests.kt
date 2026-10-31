@@ -20,7 +20,7 @@ class MessagingTests {
         becomeFriends(alice, bob)
 
         val payload = """{"content":"opaque to the kit","expiresAt":123}""".toByteArray()
-        val report = alice.send(listOf(bob.userId!!), "directMessage", "dm_1", 1_700_000_000_000, payload, emptySet())
+        val report = alice.send(listOf(bob.userId!!), "directMessage", "dm_1", 1_700_000_000_000, payload)
         assertEquals(listOf(SubmissionStatus.ACCEPTED), report.recipients.map { it.status })
         assertEquals(emptyList<Any>(), report.selfSync, "a single-device sender has no other devices")
 
@@ -48,7 +48,7 @@ class MessagingTests {
         val ghost = java.util.UUID.randomUUID().toString()
 
         val report = alice.send(listOf(ghost, bob.userId!!), "story", "s1", System.currentTimeMillis(),
-            """{"content":"reaches bob anyway"}""".toByteArray(), emptySet())
+            """{"content":"reaches bob anyway"}""".toByteArray())
 
         assertEquals(SubmissionStatus.REJECTED, report.recipients.single { it.userId == ghost }.status)
         assertEquals(SubmissionStatus.ACCEPTED, report.recipients.single { it.userId == bob.userId }.status)
@@ -104,7 +104,7 @@ class MessagingTests {
 
         val attachment = alice.uploadAttachment(jpeg)
         alice.send(listOf(bob.userId!!), "story", "story_1", System.currentTimeMillis(),
-            JSONObject(mapOf("content" to "vacation", "mediaRef" to attachment.id)).toString().toByteArray(), emptySet())
+            JSONObject(mapOf("content" to "vacation", "mediaRef" to attachment.id)).toString().toByteArray())
 
         val row = bob.awaitContent("vacation")
         assertEquals("story", row.modelKey)

@@ -20,19 +20,19 @@ import org.signal.libsignal.protocol.state.PreKeyRecord
 import xyz.obscura.server.contracts.ObscuraProtocol.Envelope
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse
-import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse.ErrorCode
 import java.net.InetSocketAddress
 import java.util.Collections
 import java.util.UUID
 
 /**
  * An in-process stand-in for the bundle and message endpoints, with the real server's semantics.
- * An account's devices share its identity. `GET /v1/users/{id}` returns one bundle per device and
- * consumes a one-time prekey from each (404 when the user has none); `GET /v1/users/{id}/devices/{d}`
+ * An account's devices share its identity. `GET /v1/keys/{id}` returns one bundle per device and
+ * consumes a one-time prekey from each (404 when the user has none); `GET /v1/keys/{id}/devices/{d}`
  * consumes one from that device only. `POST /v1/messages` requires complete delivery: for each
- * user in `recipient_user_ids` or owning a target, submissions are queued only when they target
- * exactly the user's current devices (the sender's own device excluded), otherwise all fail with
- * `ERROR_CODE_DEVICE_MISMATCH` and the untargeted devices are listed, even with no submission. An unknown device or the sender itself fails with `ERROR_CODE_INVALID_DEVICE`.
+ * recipient user, submissions are queued only when they cover all of the user's current devices
+ * (the sender's own device excluded); otherwise none are queued and the untargeted devices are
+ * listed in `device_mismatches`, even with no submission. A device not belonging to its recipient
+ * user is listed in `invalid_device_ids`.
  */
 class FakeObscuraServer : AutoCloseable {
     private val devices = Collections.synchronizedMap(linkedMapOf<String, FakeDevice>())
@@ -40,7 +40,7 @@ class FakeObscuraServer : AutoCloseable {
     private val consumed = Collections.synchronizedMap(mutableMapOf<String, Int>())
     private val sendRequests = Collections.synchronizedList(mutableListOf<Pair<String, SendMessageRequest>>())
     private val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        createContext("/v1/users/") { respond(it, bundles(it.requestURI.path.removePrefix("/v1/users/").split("/"))) }
+        createContext("/v1/keys/") { respond(it, bundles(it.requestURI.path.removePrefix("/v1/keys/").split("/"))) }
         createContext("/v1/messages") { respond(it, accept(it)) }
         start()
     }
@@ -80,7 +80,7 @@ class FakeObscuraServer : AutoCloseable {
         if (owned.isEmpty()) return 404 to ByteArray(0)
         consumed.merge(userId, owned.size, Int::plus)
         val bundles = owned.map { it.consumeBundle() }
-        return 200 to (if (path.size == 1) JSONArray(bundles).toString() else bundles.single().toString()).toByteArray()
+        return 200 to (if (path.size == 1) JSONObject().put("bundles", JSONArray(bundles)).toString() else bundles.single().toString()).toByteArray()
     }
 
     private fun accept(exchange: HttpExchange): Pair<Int, ByteArray> {
@@ -88,26 +88,21 @@ class FakeObscuraServer : AutoCloseable {
         val request = SendMessageRequest.parseFrom(exchange.requestBody.readBytes())
         sendRequests.add(exchange.requestHeaders.getFirst("Idempotency-Key") to request)
         val response = SendMessageResponse.newBuilder()
-        fun fail(submission: SendMessageRequest.Submission, code: ErrorCode) = response.addFailedSubmissions(
-            SendMessageResponse.FailedSubmission.newBuilder().setSubmissionId(submission.submissionId).setErrorCode(code))
-        val valid = request.messagesList.filter { submission ->
-            val target = devices[UuidCodec.uuidString(submission.deviceId)]
-            (target != null && target !== sender).also { if (!it) fail(submission, ErrorCode.ERROR_CODE_INVALID_DEVICE) }
-        }
-        val byUser = valid.groupBy { devices.getValue(UuidCodec.uuidString(it.deviceId)!!).userId }
-        val checked = request.recipientUserIdsList.map { UuidCodec.uuidString(it)!! } + byUser.keys
-        for (userId in checked.distinct()) {
-            val submissions = byUser[userId].orEmpty()
+        for (recipient in request.recipientsList) {
+            val userId = UuidCodec.uuidString(recipient.userId)!!
             val current = devices.values.filter { it.userId == userId && it !== sender }.map { it.deviceId }.toSet()
-            val targeted = submissions.map { UuidCodec.uuidString(it.deviceId)!! }.toSet()
+            val valid = recipient.submissionsList.filter { sub ->
+                val deviceId = UuidCodec.uuidString(sub.deviceId)!!
+                (deviceId in current).also { if (!it) response.addInvalidDeviceIds(sub.deviceId) }
+            }
+            val targeted = valid.map { UuidCodec.uuidString(it.deviceId)!! }.toSet()
             if (targeted != current) {
-                submissions.forEach { fail(it, ErrorCode.ERROR_CODE_DEVICE_MISMATCH) }
                 response.addDeviceMismatches(SendMessageResponse.DeviceMismatch.newBuilder()
-                    .setUserId(UuidCodec.uuidToBytes(UUID.fromString(userId)))
+                    .setUserId(recipient.userId)
                     .addAllMissingDeviceIds((current - targeted).map { UuidCodec.uuidToBytes(UUID.fromString(it)) }))
                 continue
             }
-            for (submission in submissions) {
+            for (submission in valid) {
                 devices.getValue(UuidCodec.uuidString(submission.deviceId)!!).mailbox.add(Envelope.newBuilder()
                     .setId(UuidCodec.uuidToBytes(UUID.randomUUID()))
                     .setSenderId(UuidCodec.uuidToBytes(UUID.fromString(sender.userId)))

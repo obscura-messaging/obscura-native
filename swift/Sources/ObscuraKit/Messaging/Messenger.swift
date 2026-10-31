@@ -72,12 +72,14 @@ actor Messenger {
     /// existing session always wins.
     func establishSessions(userId: String, _ responses: [PreKeyBundleResponse]) throws {
         let bundles = try Self.verifiedBundles(responses)
-        try store.transaction { database, _ in
-            for (deviceId, _) in bundles { try DeviceStore.add(userId: userId, deviceId: deviceId, in: database) }
-        }
-        for (deviceId, bundle) in bundles where try !hasSession(deviceId) {
-            try processPreKeyBundle(bundle, for: Self.address(deviceId), sessionStore: store, identityStore: store,
-                                    context: NullContext())
+        for (deviceId, bundle) in bundles {
+            try store.transaction { database, _ in
+                try DeviceStore.add(userId: userId, deviceId: deviceId, in: database)
+            }
+            if try !hasSession(deviceId) {
+                try processPreKeyBundle(bundle, for: Self.address(deviceId), sessionStore: store, identityStore: store,
+                                        context: NullContext())
+            }
         }
     }
 
@@ -93,7 +95,6 @@ actor Messenger {
         encrypted.content = Data(ciphertext.serialize())
 
         var submission = Obscura_V1_SendMessageRequest.Submission()
-        submission.submissionID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
         submission.deviceID = deviceBytes
         submission.message = try encrypted.serializedData()
         return submission
@@ -103,19 +104,23 @@ actor Messenger {
     /// definitive; transport, server or decoding failures leave acceptance unknown.
     /// The request names `userIds`, so each is checked for complete delivery even without submissions.
     func submit(userIds: [String], submissions: [UserSubmission]) async -> SubmitOutcome {
-        var recipientBytes: [Data] = []
-        for userId in userIds {
+        let byUser = Dictionary(grouping: submissions, by: \.userId)
+        var recipients: [Obscura_V1_SendMessageRequest.Recipient] = []
+        var seen: Set<String> = []
+        for userId in userIds where seen.insert(userId).inserted {
             guard let user = uuidBytes(userId) else {
                 return SubmitOutcome(submitted: submissions.map {
                     Submitted(SubmissionResult(userId: $0.userId, deviceId: uuidString($0.submission.deviceID),
                                                status: .rejected, error: "user id \(userId) is not a UUID"))
                 })
             }
-            recipientBytes.append(user)
+            var recipient = Obscura_V1_SendMessageRequest.Recipient()
+            recipient.userID = user
+            recipient.submissions = byUser[userId]?.map(\.submission) ?? []
+            recipients.append(recipient)
         }
         var request = Obscura_V1_SendMessageRequest()
-        request.messages = submissions.map(\.submission)
-        request.recipientUserIds = recipientBytes
+        request.recipients = recipients
         do {
             let response = try Obscura_V1_SendMessageResponse(serializedBytes: try await api.sendMessage(request.serializedData()))
             return try submitOutcome(userIds: userIds, submissions: submissions, response: response)

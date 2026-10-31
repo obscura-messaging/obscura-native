@@ -26,7 +26,7 @@ class AuthTests {
 
         assertEquals(AuthState.AUTHENTICATED, client.authState.value)
         assertEquals(username, client.username)
-        assertEquals(setOf("token", "refreshToken", "userId", "deviceId", "username"), storage.data!!.keys)
+        assertEquals(setOf("token", "refreshToken", "expiresAt", "userId", "deviceId", "username"), storage.data!!.keys)
         assertEquals(client.deviceId, storage.data!!["deviceId"])
 
         assertTrue(client.isPrimary())
@@ -120,9 +120,7 @@ class AuthTests {
         assertEquals(ConnectionState.DISCONNECTED, client.connectionState.value)
         assertNull(storage.data)
         // Force a refresh by presenting an expired access token with the revoked refresh token.
-        val claims = """{"sub":"${stolen.getValue("userId")}","exp":1}"""
-        val expired = "e30.${java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(claims.toByteArray())}.sig"
-        val copy = MemoryStorage(stolen + ("token" to expired))
+        val copy = MemoryStorage(stolen + ("expiresAt" to "1"))
         assertFalse(newClient(databasePath = path, storage = copy).restorePersistedSession())
         assertNull(copy.data)
     }

@@ -5,8 +5,8 @@ extension ObscuraClient {
 
     /// Sends an entry to every device of the named users and to this user's other devices. This
     /// device gets nothing, so the app stores its own copy in `entries`.
-    public func send(to recipientUserIds: [String], modelKey: String, entryId: String, sentAt: UInt64, payload: Data,
-                     acceptedDeviceIds: Set<String>) async throws -> SendReport {
+    public func send(to recipientUserIds: [String], modelKey: String, entryId: String, sentAt: UInt64,
+                     payload: Data) async throws -> SendReport {
         var message = Obscura_Client_V1_ClientMessage()
         message.appEntry.model = modelKey
         message.appEntry.id = entryId
@@ -17,7 +17,7 @@ extension ObscuraClient {
         let (userId, sender) = try await sendContext()
         let generation = sessionGeneration
         let peers = Self.distinct(recipientUserIds, excluding: userId)
-        let results = await sender.send(to: peers + [userId], data, acceptedDeviceIds: acceptedDeviceIds)
+        let results = await sender.send(to: peers + [userId], data)
         try Task.checkCancellation()
         guard generation == sessionGeneration else { throw CancellationError() }
         return SendReport(
@@ -103,7 +103,7 @@ extension ObscuraClient {
         let (userId, sender) = try await sendContext()
         var message = Obscura_Client_V1_ClientMessage()
         message.friendListSync = try await friends.listSync()
-        let results = await sender.send(to: userId, try message.serializedData(), acceptedDeviceIds: [])
+        let results = await sender.send(to: userId, try message.serializedData())
         for result in results where result.status != .accepted {
             logger.log("friend list sync to \(result.deviceId ?? userId) \(result.status.rawValue): \(result.error ?? "")")
         }
@@ -133,7 +133,7 @@ extension ObscuraClient {
 
         let (userId, sender) = try await sendContext()
         let peers = Self.distinct(recipientUserIds, excluding: userId)
-        let results = await sender.send(to: peers, data, acceptedDeviceIds: [])
+        let results = await sender.send(to: peers, data)
         for recipient in peers where !results.contains(where: { $0.userId == recipient && $0.status == .accepted }) {
             let errors = results.filter { $0.userId == recipient }.map { $0.error ?? $0.status.rawValue }.joined(separator: "; ")
             logger.log("typing signal to \(recipient) failed: \(errors)")

@@ -23,7 +23,7 @@ final class DiscoveryTests: XCTestCase {
         let client = try await authenticatedClient(own)
 
         let report = try await client.send(to: [peer.userId], modelKey: "m", entryId: "delivered", sentAt: 1,
-                                           payload: Data(), acceptedDeviceIds: [])
+                                           payload: Data())
 
         XCTAssertEqual(report.recipients.map(\.status), [.accepted])
         XCTAssertEqual(report.selfSync, [])
@@ -88,8 +88,7 @@ final class DiscoveryTests: XCTestCase {
         let client = try await authenticatedClient(phone)
         let laptop = try await server.register(userId)
 
-        let report = try await client.send(to: [], modelKey: "m", entryId: "sync", sentAt: 1, payload: Data(),
-                                           acceptedDeviceIds: [])
+        let report = try await client.send(to: [], modelKey: "m", entryId: "sync", sentAt: 1, payload: Data())
 
         XCTAssertEqual(report.selfSync.map(\.deviceId), [laptop.deviceId])
         XCTAssertEqual(report.selfSync.map(\.status), [.accepted])
@@ -114,7 +113,7 @@ final class DiscoveryTests: XCTestCase {
         let known = try await client.directory.deviceIds(of: peerUserId)
         XCTAssertEqual(Set(known), [oldPeer.deviceId, newPeer.deviceId])
         let report = try await client.send(to: [peerUserId], modelKey: "m", entryId: "reply", sentAt: 1,
-                                           payload: Data(), acceptedDeviceIds: [oldPeer.deviceId])
+                                           payload: Data())
         XCTAssertEqual(report.recipients.map(\.status), [.accepted, .accepted])
         XCTAssertEqual(server.bundleFetches(peerUserId), 0)
         XCTAssertEqual(server.deviceBundleFetches(oldPeer.deviceId), 1, "a device that must be resent needs a session")

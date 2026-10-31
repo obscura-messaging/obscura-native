@@ -6,13 +6,12 @@ import dev.barrelmaker.obscura.kit.SubmissionStatus
 import dev.barrelmaker.obscura.kit.crypto.UuidCodec
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageRequest
 import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse
-import xyz.obscura.server.contracts.ObscuraProtocol.SendMessageResponse.ErrorCode
 
 /** One submission and the recipient user it addresses. */
 internal data class UserSubmission(val userId: String, val submission: SendMessageRequest.Submission)
 
-/** A submission's result and the server's error code when it failed. */
-internal data class Submitted(val result: SubmissionResult, val errorCode: ErrorCode? = null)
+/** A submission's result. */
+internal data class Submitted(val result: SubmissionResult, val invalidDevice: Boolean = false)
 
 /**
  * One request covering one or more users. [mismatches] maps each rejected user to the current
@@ -30,14 +29,17 @@ internal fun decodeSubmissionResults(
     submissions: List<UserSubmission>,
     response: SendMessageResponse,
 ): SubmitOutcome {
-    val ids = submissions.map { it.submission.submissionId }.toSet()
-    val failures = response.failedSubmissionsList
-    if (!failures.all { it.submissionId in ids } ||
-        failures.map { it.submissionId }.toSet().size != failures.size
-    ) throw ObscuraError.ProtocolViolation("Response contains unknown or duplicate submission IDs")
+    val targetedDevices = submissions.map { deviceIdOf(it.submission) }.toSet()
+    val invalidDevices = mutableSetOf<String>()
+    for (bytes in response.invalidDeviceIdsList) {
+        val id = UuidCodec.uuidString(bytes)
+        if (id == null || id !in targetedDevices || !invalidDevices.add(id)) {
+            throw ObscuraError.ProtocolViolation("Response contains unknown or duplicate invalid device IDs")
+        }
+    }
     val addressed = userIds.toSet()
     val mismatches = mutableMapOf<String, List<String>>()
-    // A mismatch with no failed submission is how the server names devices of a user the request targeted none of.
+    // A mismatch with no submission is how the server names devices of a user the request targeted none of.
     for (m in response.deviceMismatchesList) {
         val user = UuidCodec.uuidString(m.userId)
         if (user == null || user !in addressed || user in mismatches) {
@@ -47,19 +49,22 @@ internal fun decodeSubmissionResults(
             UuidCodec.uuidString(it) ?: throw ObscuraError.ProtocolViolation("Response contains an invalid device ID")
         }
     }
-    val byId = failures.associateBy { it.submissionId }
     val submitted = submissions.map { (userId, sub) ->
-        val failure = byId[sub.submissionId]
-        if (failure?.errorCode == ErrorCode.ERROR_CODE_DEVICE_MISMATCH && userId !in mismatches) {
-            throw ObscuraError.ProtocolViolation("Response contains an inconsistent device mismatch")
+        val deviceId = deviceIdOf(sub)
+        val isInvalid = deviceId in invalidDevices
+        val missing = mismatches[userId]
+        val error = when {
+            isInvalid -> "Device not found"
+            missing != null -> "Devices not covered: $missing"
+            else -> null
         }
         Submitted(
             SubmissionResult(
-                userId, deviceIdOf(sub),
-                if (failure == null) SubmissionStatus.ACCEPTED else SubmissionStatus.REJECTED,
-                failure?.let { f -> f.errorMessage.ifEmpty { f.errorCode.name } },
+                userId, deviceId,
+                if (error == null) SubmissionStatus.ACCEPTED else SubmissionStatus.REJECTED,
+                error,
             ),
-            failure?.errorCode,
+            invalidDevice = isInvalid,
         )
     }
     return SubmitOutcome(submitted, mismatches)

@@ -37,12 +37,15 @@ class MessageSenderTest {
     private fun entry(id: String): ClientMessage = ClientMessage.newBuilder()
         .setAppEntry(appEntry { model = "m"; this.id = id }).build()
 
-    private suspend fun FakeDevice.send(to: FakeDevice, id: String, accepted: Set<String> = emptySet()) =
-        sender.send(to.userId, entry(id), accepted)
+    private suspend fun FakeDevice.send(to: FakeDevice, id: String) =
+        sender.send(to.userId, entry(id))
 
     private fun accepted(device: FakeDevice) = SubmissionResult(device.userId, device.deviceId, ACCEPTED)
 
-    private fun targetsOf(request: Int) = server.requests[request].second.messagesList.map { UuidCodec.uuidString(it.deviceId) }.toSet()
+    private fun targetsOf(request: Int) = server.requests[request].second.recipientsList
+        .flatMap { it.submissionsList }
+        .map { UuidCodec.uuidString(it.deviceId) }
+        .toSet()
 
     @Test
     fun `a first contact fetches the user whole once and later sends reuse the session`() = runBlocking {
@@ -119,7 +122,7 @@ class MessageSenderTest {
         alice.send(alice, "note")
 
         assertEquals(listOf(listOf(bob.userId), listOf(alice.userId)),
-            server.requests.map { (_, request) -> request.recipientUserIdsList.map { UuidCodec.uuidString(it) } })
+            server.requests.map { (_, request) -> request.recipientsList.map { UuidCodec.uuidString(it.userId) } })
     }
 
     @Test
@@ -142,7 +145,7 @@ class MessageSenderTest {
 
         assertEquals(emptyList<SubmissionResult>(), alice.send(alice, "note"))
         assertEquals(0, server.prekeysConsumed(alice.userId))
-        assertEquals(0, server.requests.single().second.messagesCount)
+        assertEquals(0, server.requests.single().second.recipientsList.single().submissionsCount)
     }
 
     @Test
@@ -186,55 +189,6 @@ class MessageSenderTest {
     }
 
     @Test
-    fun `when every target has evidence an empty request confirms the user and nothing is resent`() = runBlocking {
-        alice.directory.replace(bob.userId, listOf(bob.deviceId))
-
-        assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
-        assertEquals(0, server.prekeysConsumed(bob.userId))
-        assertEquals(0, server.requests.single().second.messagesCount)
-        assertEquals(listOf(bob.userId), server.requests.single().second.recipientUserIdsList.map { UuidCodec.uuidString(it) })
-        assertEquals(emptyList<Received>(), bob.receive())
-    }
-
-    @Test
-    fun `when every target has evidence but a new device appeared the whole set is submitted`() = runBlocking {
-        alice.send(bob, "first")
-        bob.receive()
-        val bobTablet = server.register(bob.userId)
-
-        assertEquals(setOf(accepted(bob), accepted(bobTablet)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)).toSet())
-        assertEquals(0, server.requests[1].second.messagesCount)
-        assertEquals(setOf(bob.deviceId, bobTablet.deviceId), targetsOf(2))
-        assertEquals(listOf("retry"), bob.receive().map { it.message.appEntry.id })
-        assertEquals(listOf("retry"), bobTablet.receive().map { it.message.appEntry.id })
-        assertEquals(3, server.requests.size)
-    }
-
-    @Test
-    fun `evidence devices stay accepted when the empty request fails or they have since been deleted`() = runBlocking {
-        alice.directory.replace(bob.userId, listOf(bob.deviceId))
-        server.remove(bob)
-        assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
-
-        server.close()
-        assertEquals(listOf(accepted(bob)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)))
-    }
-
-    @Test
-    fun `a submitted evidence device is reported accepted even when it no longer exists`() = runBlocking {
-        val bobTablet = server.register(bob.userId)
-        alice.send(bob, "first")
-        server.remove(bob)
-        server.remove(bobTablet)
-
-        val results = alice.send(bob, "retry", accepted = setOf(bob.deviceId)).associateBy { it.deviceId }
-
-        assertEquals(accepted(bob), results[bob.deviceId])
-        assertEquals(REJECTED, results.getValue(bobTablet.deviceId).status)
-        assertEquals(emptyList<String>(), alice.directory.devicesOf(bob.userId))
-    }
-
-    @Test
     fun `a peer with no devices left is one user-level rejection in the same send`() = runBlocking {
         alice.send(bob, "first")
         server.remove(bob)
@@ -245,16 +199,6 @@ class MessageSenderTest {
         assertNull(result.deviceId)
         assertEquals("No devices found", result.error)
         assertEquals(emptyList<String>(), alice.directory.devicesOf(bob.userId))
-    }
-
-    @Test
-    fun `partial accepted evidence still submits every target, as complete delivery requires`() = runBlocking {
-        val bobTablet = server.register(bob.userId)
-        alice.send(bob, "first")
-        bob.receive(); bobTablet.receive()
-
-        assertEquals(setOf(accepted(bob), accepted(bobTablet)), alice.send(bob, "retry", accepted = setOf(bob.deviceId)).toSet())
-        assertEquals(setOf(bob.deviceId, bobTablet.deviceId), targetsOf(1))
     }
 
     @Test
@@ -314,6 +258,7 @@ class MessageSenderTest {
         assertEquals("from-new-identity", alice.receive().single().message.appEntry.id)
         assertEquals(listOf(bob.userId), changes)
         assertFalse(alice.messenger.hasSession(bob.deviceId))
+        assertEquals(listOf(bobNew.deviceId), alice.directory.devicesOf(bob.userId))
 
         assertEquals(listOf(accepted(bobNew)), alice.send(bob, "to-new-identity"))
         assertEquals("to-new-identity", bobNew.receive().single().message.appEntry.id)

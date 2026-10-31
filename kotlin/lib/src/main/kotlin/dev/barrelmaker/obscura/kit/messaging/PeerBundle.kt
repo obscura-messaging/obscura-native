@@ -12,7 +12,7 @@ import org.signal.libsignal.protocol.state.PreKeyBundle
 /** One device's prekey bundle, keyed by its device UUID. */
 internal data class PeerBundle(val deviceId: String, val bundle: PreKeyBundle)
 
-/** Parse `GET /v1/users/{userId}`. Each bundle is bound to its own device UUID; there is no fallback. */
+/** Parse `GET /v1/keys/{userId}`. Each bundle is bound to its own device UUID; there is no fallback. */
 internal fun parsePeerBundles(json: JSONArray): List<PeerBundle> =
     (0 until json.length()).map { parsePeerBundle(json.getJSONObject(it)) }.also { bundles ->
         if (bundles.map { it.deviceId }.distinct().size != bundles.size) throw ObscuraError.ProtocolViolation("Duplicate device in bundles")

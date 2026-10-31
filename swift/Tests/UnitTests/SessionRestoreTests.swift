@@ -15,18 +15,23 @@ final class SessionRestoreTests: XCTestCase {
         URLProtocol.unregisterClass(StubProtocol.self)
     }
 
-    static func jwt(exp: Int, userId: String = "u1", deviceId: String = "d1") -> String {
-        UnitTests.jwt(exp: exp, userId: userId, deviceId: deviceId)
-    }
+    static let userId = "019f025a-0000-7de6-84b6-000000000001"
+    static let deviceId = "019f025a-0000-7de6-84b6-0000000000d1"
 
-    private static let stored = ["token": jwt(exp: 1), "refreshToken": "rt", "userId": "u1", "deviceId": "d1",
-                                 "username": "alice"]
+    private static let stored = [
+        "token": "expired-token",
+        "refreshToken": "rt",
+        "expiresAt": "1",
+        "userId": userId,
+        "deviceId": deviceId,
+        "username": "alice",
+    ]
 
     private func client(_ storage: MemorySessionStorage, identity: Bool = true) throws -> ObscuraClient {
         let db = try ObscuraDatabase.inMemory()
         if identity {
             try PersistentSignalStore(db: db, logger: SilentLogger()).install(SignalKeys.generate())
-            try db.write { try DeviceStore.setLocalDevice("d1", primaryDeviceId: "d1", in: $0) }
+            try db.write { try DeviceStore.setLocalDevice(Self.deviceId, primaryDeviceId: Self.deviceId, in: $0) }
         }
         return try makeClient(apiURL: "https://\(StubProtocol.host)", database: db, storage: storage)
     }
@@ -68,21 +73,19 @@ final class SessionRestoreTests: XCTestCase {
     }
 
     func testARefreshRotatesTheStoredTokens() async throws {
-        let fresh = Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600)
-        StubProtocol.outcome = .refreshed(token: fresh, refreshToken: "rt2")
+        StubProtocol.outcome = .refreshed(token: "fresh-token", refreshToken: "rt2")
         let storage = MemorySessionStorage(Self.stored)
         let client = try client(storage)
 
         _ = await client.restorePersistedSession()
 
-        XCTAssertEqual(storage.session?["token"], fresh)
+        XCTAssertEqual(storage.session?["token"], "fresh-token")
         XCTAssertEqual(storage.session?["refreshToken"], "rt2")
-        XCTAssertEqual(Set(storage.session?.keys ?? [:].keys), ["token", "refreshToken", "userId", "deviceId", "username"])
+        XCTAssertEqual(Set(storage.session?.keys ?? [:].keys), ["token", "refreshToken", "expiresAt", "userId", "deviceId", "username"])
     }
 
     func testConcurrentRefreshesShareOneRequest() async throws {
-        let fresh = Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600)
-        StubProtocol.outcome = .refreshed(token: fresh, refreshToken: "rt2")
+        StubProtocol.outcome = .refreshed(token: "fresh-token", refreshToken: "rt2")
         StubProtocol.requests.withLock { $0 = 0 }
         let client = try client(MemorySessionStorage(Self.stored))
         _ = await client.restorePersistedSession()
@@ -197,7 +200,7 @@ final class SessionRestoreTests: XCTestCase {
         let client = try client(storage)
         try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
         storage.failing = .save
-        StubProtocol.outcome = .refreshed(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600), refreshToken: "rotated")
+        StubProtocol.outcome = .refreshed(token: "fresh-token", refreshToken: "rotated")
         do {
             _ = try await client.refresh()
             XCTFail("durable token save failure must throw")
@@ -211,7 +214,7 @@ final class SessionRestoreTests: XCTestCase {
 
     func testLateRefreshSuccessCannotResurrectLogoutOrOverwriteReplacement() async throws {
         for replace in [false, true] {
-            try await lateRefresh(.refreshed(token: Self.jwt(exp: 1234), refreshToken: "obsolete"), replace: replace)
+            try await lateRefresh(.refreshed(token: "obsolete-token", refreshToken: "obsolete"), replace: replace)
         }
     }
 
@@ -223,8 +226,7 @@ final class SessionRestoreTests: XCTestCase {
         let storage = MemorySessionStorage(Self.stored)
         let client = try client(storage)
         try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
-        StubProtocol.outcome = .refreshed(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600),
-                                         refreshToken: "obsolete")
+        StubProtocol.outcome = .refreshed(token: "obsolete-token", refreshToken: "obsolete")
         let started = expectation(description: "connect waiting for token refresh")
         StubProtocol.onRefresh.withLock { $0 = { started.fulfill() } }
         let connect = Task { try await client.connect() }
@@ -249,8 +251,7 @@ final class SessionRestoreTests: XCTestCase {
         let storage = MemorySessionStorage(Self.stored)
         let client = try client(storage)
         try await client.begin(try XCTUnwrap(Session(stored: Self.stored)))
-        StubProtocol.outcome = .refreshed(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600),
-                                         refreshToken: "obsolete")
+        StubProtocol.outcome = .refreshed(token: "obsolete-token", refreshToken: "obsolete")
         StubProtocol.requests.withLock { $0 = 0 }
         let started = expectation(description: "attachment waiting for token refresh")
         StubProtocol.onRefresh.withLock { $0 = { started.fulfill() } }
@@ -281,8 +282,9 @@ final class SessionRestoreTests: XCTestCase {
         await fulfillment(of: [started], timeout: 3)
         StubProtocol.onRefresh.withLock { $0 = nil }
         if replace {
-            try await client.begin(Session(token: Self.jwt(exp: Int(Date().timeIntervalSince1970) + 3600),
-                                            refreshToken: "replacement", userId: "u1", deviceId: "d1", username: "alice"))
+            try await client.begin(Session(token: "replacement-token", refreshToken: "replacement",
+                                            expiresAt: Int64(Date().timeIntervalSince1970) + 3600,
+                                            userId: Self.userId, deviceId: Self.deviceId, username: "alice"))
         } else {
             try await client.logout()
         }
@@ -318,11 +320,11 @@ final class StubProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         Self.requests.withLock { $0 += 1 }
-        if request.url?.path == "/v1/sessions", request.httpMethod == "DELETE" {
+        if request.url?.path == "/v1/session", request.httpMethod == "DELETE" {
             return respond(200, Data())
         }
         let outcome = Self.outcome
-        if request.url?.path == "/v1/sessions/refresh", let onRefresh = Self.onRefresh.withLock({ $0 }) {
+        if request.url?.path == "/v1/session/refresh", let onRefresh = Self.onRefresh.withLock({ $0 }) {
             Self.pending.withLock { $0 = { self.complete(outcome) } }
             onRefresh()
             return
@@ -344,10 +346,16 @@ final class StubProtocol: URLProtocol {
         case .status(let code):
             respond(code, Data("{}".utf8))
         case .refreshed(let token, let refreshToken):
-            guard request.url?.path == "/v1/sessions/refresh" else { return respond(503, Data()) }
+            guard request.url?.path == "/v1/session/refresh" else { return respond(503, Data()) }
             // Slow enough that concurrent callers overlap.
             Thread.sleep(forTimeInterval: 0.2)
-            respond(200, try! JSONSerialization.data(withJSONObject: ["token": token, "refreshToken": refreshToken]))
+            respond(200, try! JSONSerialization.data(withJSONObject: [
+                "token": token,
+                "refreshToken": refreshToken,
+                "expiresAt": Int(Date().timeIntervalSince1970) + 3600,
+                "userId": SessionRestoreTests.userId,
+                "deviceId": SessionRestoreTests.deviceId,
+            ]))
         }
     }
     override func stopLoading() {}

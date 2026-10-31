@@ -42,10 +42,8 @@ class ServerContractTests {
     // Alter only the access credential; the refresh credential is still issued by the real server.
     private fun expireAccess(client: ObscuraClient) {
         val current = client.auth.requireCredentials()
-        val claims = """{"sub":"${current.userId}","exp":1}"""
-        val expired = "e30.${Base64.getUrlEncoder().withoutPadding().encodeToString(claims.toByteArray())}.sig"
         AuthManager::class.java.getDeclaredField("credentials").apply { isAccessible = true }
-            .set(client.auth, current.copy(token = expired))
+            .set(client.auth, current.copy(token = "expired.token.sig", expiresAt = 1L))
     }
 
     @Test
@@ -117,7 +115,7 @@ class ServerContractTests {
         try {
             val userId = UUID.randomUUID().toString()
             alice.devices.add(userId, listOf(UUID.randomUUID().toString()))
-            suspend fun gone(text: String) = alice.send(listOf(userId), "directMessage", text, 1, text.toByteArray(), emptySet()).recipients
+            suspend fun gone(text: String) = alice.send(listOf(userId), "directMessage", text, 1, text.toByteArray()).recipients
             val results = gone("not deliverable")
             assertEquals(1, results.size)
             assertEquals(userId, results.single().userId)
@@ -191,7 +189,6 @@ class ServerContractTests {
             assertTrue(results.all { it.status == SubmissionStatus.REJECTED }, results.toString())
             assertTrue(results.all { it.error?.contains("413") == true })
             assertTrue(results.all { it.deviceId == bob.deviceId && it.userId == bob.userId })
-            assertEquals(101, submissions.map { UuidCodec.uuidString(it.submissionId) }.distinct().size)
         } finally { alice.logout(); bob.logout() }
     }
 

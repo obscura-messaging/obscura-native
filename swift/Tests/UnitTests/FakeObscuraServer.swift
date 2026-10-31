@@ -5,8 +5,8 @@ import LibSignalClient
 
 /// An in-process stand-in for the device, bundle and message endpoints with the real server's
 /// semantics. All devices of a user share the account identity; the first one registered is the
-/// primary. `GET /v1/users/{id}` returns one bundle per device and consumes a one-time prekey from each
-/// (404 when the user has none), `GET /v1/users/{id}/devices/{device}` consumes one from that device
+/// primary. `GET /v1/keys/{id}` returns one bundle per device and consumes a one-time prekey from each
+/// (404 when the user has none), `GET /v1/keys/{id}/devices/{device}` consumes one from that device
 /// only, and `POST /v1/messages` enforces complete delivery for every named or targeted user: a user's
 /// submissions are all rejected with `ERROR_CODE_DEVICE_MISMATCH` unless they cover the user's devices
 /// other than the sender, and
@@ -33,15 +33,23 @@ final class FakeObscuraServer: @unchecked Sendable {
     private var attachments: [String: Data] = [:]
     private var createDeviceStatus = 201
     private var tokenRejections = 0
-    private var refreshed: [String: String]?
+    private var refreshed: [String: Any]?
 
     func failDeviceList(status: Int) { lock.withLock { listStatus = status } }
     func failDeviceCreation(status: Int) { lock.withLock { createDeviceStatus = status } }
     /// Answers the next `count` token-authenticated requests with 401.
     func rejectTokens(_ count: Int) { lock.withLock { tokenRejections = count } }
     /// Lets refreshes succeed with these tokens instead of being rejected.
-    func acceptRefresh(token: String, refreshToken: String) {
-        lock.withLock { refreshed = ["token": token, "refreshToken": refreshToken] }
+    func acceptRefresh(token: String, refreshToken: String, userId: String = "u1", deviceId: String = "d1") {
+        lock.withLock {
+            refreshed = [
+                "token": token,
+                "refreshToken": refreshToken,
+                "expiresAt": Int(Date().timeIntervalSince1970) + 3600,
+                "userId": userId,
+                "deviceId": deviceId,
+            ]
+        }
     }
 
     /// Lets `username` log in (any password) as `userId`.
@@ -95,13 +103,13 @@ final class FakeObscuraServer: @unchecked Sendable {
     fileprivate func handle(_ request: URLRequest, body: Data) -> (Int, Data) {
         let path = request.url!.path
         let token = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") ?? ""
-        let callerDevice = APIClient.deviceId(token) ?? token
-        if !token.isEmpty, !path.hasPrefix("/v1/sessions"), lock.withLock({
+        let callerDevice = token
+        if !token.isEmpty, !path.hasPrefix("/v1/session"), lock.withLock({
             defer { tokenRejections = max(0, tokenRejections - 1) }
             return tokenRejections > 0
         }) { return (401, Data()) }
         if request.httpMethod == "GET", path == "/v1/devices" { return deviceList(token) }
-        if request.httpMethod == "POST", path == "/v1/sessions" { return login(body) }
+        if request.httpMethod == "POST", path == "/v1/session" { return login(body) }
         if request.httpMethod == "POST", path == "/v1/devices" { return lock.withLock { (createDeviceStatus, Data()) } }
         if path.hasPrefix("/v1/link-sessions") { return link(request, token: token, body: body) }
         if request.httpMethod == "POST", path == "/v1/attachments" {
@@ -112,30 +120,36 @@ final class FakeObscuraServer: @unchecked Sendable {
         if request.httpMethod == "GET", path.hasPrefix("/v1/attachments/") {
             return lock.withLock { attachments[String(path.dropFirst("/v1/attachments/".count))].map { (200, $0) } ?? (404, Data()) }
         }
-        if request.httpMethod == "GET", path.hasPrefix("/v1/users/") {
-            let parts = path.dropFirst("/v1/users/".count).split(separator: "/").map(String.init)
+        if request.httpMethod == "GET", path.hasPrefix("/v1/keys/") {
+            let parts = path.dropFirst("/v1/keys/".count).split(separator: "/").map(String.init)
             return parts.count == 3 ? bundle(parts[0], deviceId: parts[2]) : bundles(parts[0])
         }
         if request.httpMethod == "POST", path == "/v1/messages" {
             lock.withLock { idempotencyKeys.append(request.value(forHTTPHeaderField: "Idempotency-Key") ?? "") }
             return accept(from: callerDevice, body)
         }
-        if request.httpMethod == "DELETE", path == "/v1/sessions" { return (200, Data()) }
-        if path == "/v1/sessions/refresh" {
+        if request.httpMethod == "DELETE", path == "/v1/session" { return (204, Data()) }
+        if path == "/v1/session/refresh" {
             return lock.withLock { refreshed.map { (200, try! JSONSerialization.data(withJSONObject: $0)) } ?? (401, Data()) }
         }
         if request.httpMethod == "DELETE", path.hasPrefix("/v1/devices/") {
             return lock.withLock {
-                devices.removeValue(forKey: String(path.dropFirst("/v1/devices/".count))) == nil ? (404, Data()) : (200, Data())
+                devices.removeValue(forKey: String(path.dropFirst("/v1/devices/".count))) == nil ? (404, Data()) : (204, Data())
             }
         }
-        if request.httpMethod == "POST", path == "/v1/account/reset" {
+        if request.httpMethod == "POST", path == "/v1/users/reset" {
             return lock.withLock {
                 let request = try! JSONSerialization.jsonObject(with: body) as! [String: Any]
                 guard let username = request["username"] as? String, let userId = accounts[username] else { return (401, Data()) }
                 devices = devices.filter { $0.value.userId != userId }
                 let newDeviceId = UUID().uuidString.lowercased()
-                let response = ["token": jwt(userId: userId, deviceId: newDeviceId), "refreshToken": "rt", "deviceId": newDeviceId]
+                let response: [String: Any] = [
+                    "token": newDeviceId,
+                    "refreshToken": "rt",
+                    "expiresAt": Int(Date().timeIntervalSince1970) + 3600,
+                    "userId": userId,
+                    "deviceId": newDeviceId,
+                ]
                 return (200, try! JSONSerialization.data(withJSONObject: response))
             }
         }
@@ -147,7 +161,7 @@ final class FakeObscuraServer: @unchecked Sendable {
     }
 
     private func caller(_ token: String) -> String? {
-        devices[APIClient.deviceId(token) ?? token]?.userId
+        devices[token]?.userId
     }
 
     private func login(_ body: Data) -> (Int, Data) {
@@ -157,7 +171,13 @@ final class FakeObscuraServer: @unchecked Sendable {
             guard let deviceId = request["deviceId"], devices[deviceId]?.userId == userId else {
                 return (409, Data(#"{"error":"Device does not belong to this account"}"#.utf8))
             }
-            let response = ["token": jwt(userId: userId, deviceId: deviceId), "refreshToken": "rt", "deviceId": deviceId]
+            let response: [String: Any] = [
+                "token": deviceId,
+                "refreshToken": "rt",
+                "expiresAt": Int(Date().timeIntervalSince1970) + 3600,
+                "userId": userId,
+                "deviceId": deviceId,
+            ]
             return (200, try! JSONSerialization.data(withJSONObject: response))
         }
     }
@@ -176,10 +196,10 @@ final class FakeObscuraServer: @unchecked Sendable {
                 ]))
             case "PUT":
                 guard let session = linkSessions[id] else { return (404, Data()) }
-                guard let device = devices[APIClient.deviceId(token) ?? token], device.userId == session.userId,
+                guard let device = devices[token], device.userId == session.userId,
                       device.isPrimary else { return (403, Data()) }
                 linkSessions[id]?.body = body
-                return (200, Data())
+                return (204, Data())
             default:
                 guard let session = linkSessions[id] else { return (404, Data()) }
                 return session.body.map { (200, $0) } ?? (204, Data())
@@ -203,7 +223,7 @@ final class FakeObscuraServer: @unchecked Sendable {
             userFetches[userId, default: 0] += 1
             let owned = owned(userId)
             if owned.isEmpty { return (404, Data()) }
-            return (200, try! JSONSerialization.data(withJSONObject: owned.map { $0.consumeBundle() }))
+            return (200, try! JSONSerialization.data(withJSONObject: ["bundles": owned.map { $0.consumeBundle() }]))
         }
     }
 
@@ -220,35 +240,26 @@ final class FakeObscuraServer: @unchecked Sendable {
             let request = try! Obscura_V1_SendMessageRequest(serializedBytes: body)
             let senderUserId = devices[senderDeviceId]!.userId
             var response = Obscura_V1_SendMessageResponse()
-            func fail(_ submission: Obscura_V1_SendMessageRequest.Submission, _ code: Obscura_V1_SendMessageResponse.ErrorCode) {
-                var failure = Obscura_V1_SendMessageResponse.FailedSubmission()
-                failure.submissionID = submission.submissionID
-                failure.errorCode = code
-                response.failedSubmissions.append(failure)
-            }
-            var valid: [(FakeDevice, Obscura_V1_SendMessageRequest.Submission)] = []
-            for submission in request.messages {
-                guard let id = uuidString(submission.deviceID), id != senderDeviceId, let target = devices[id] else {
-                    fail(submission, .invalidDevice)
+            for recipient in request.recipients {
+                let userId = uuidString(recipient.userID)!
+                let current = Set(owned(userId).map(\.deviceId)).subtracting([senderDeviceId])
+                var valid: [(FakeDevice, Obscura_V1_SendMessageRequest.Submission)] = []
+                for submission in recipient.submissions {
+                    guard let id = uuidString(submission.deviceID), current.contains(id), let target = devices[id] else {
+                        response.invalidDeviceIds.append(submission.deviceID)
+                        continue
+                    }
+                    valid.append((target, submission))
+                }
+                let targeted = Set(valid.map(\.0.deviceId))
+                if targeted != current {
+                    var mismatch = Obscura_V1_SendMessageResponse.DeviceMismatch()
+                    mismatch.userID = recipient.userID
+                    mismatch.missingDeviceIds = current.subtracting(targeted).sorted().map { uuidBytes($0)! }
+                    response.deviceMismatches.append(mismatch)
                     continue
                 }
-                valid.append((target, submission))
-            }
-            var mismatched: Set<String> = []
-            for userId in Set(valid.map(\.0.userId) + request.recipientUserIds.compactMap(uuidString)) {
-                let current = Set(owned(userId).map(\.deviceId)).subtracting([senderDeviceId])
-                let targeted = Set(valid.filter { $0.0.userId == userId }.map(\.0.deviceId))
-                guard targeted != current else { continue }
-                mismatched.insert(userId)
-                var mismatch = Obscura_V1_SendMessageResponse.DeviceMismatch()
-                mismatch.userID = uuidBytes(userId)!
-                mismatch.missingDeviceIds = current.subtracting(targeted).sorted().map { uuidBytes($0)! }
-                response.deviceMismatches.append(mismatch)
-            }
-            for (target, submission) in valid {
-                if mismatched.contains(target.userId) {
-                    fail(submission, .deviceMismatch)
-                } else {
+                for (target, submission) in valid {
                     target.mailbox.append((senderUserId, senderDeviceId, submission.message))
                 }
             }

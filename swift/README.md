@@ -82,7 +82,7 @@ let username = await client.username
 
 let report = try await client.send(
     to: recipientUserIds, modelKey: modelKey, entryId: entryId,
-    sentAt: timestamp, payload: bytes, acceptedDeviceIds: acceptedDeviceIds
+    sentAt: timestamp, payload: bytes
 )
 let rows = try await client.inbox.peek(limit: 50)
 try await client.inbox.consume(rowIds)
@@ -118,7 +118,7 @@ func load() throws -> [String: String]?
 func clear() throws
 ```
 
-The dictionary keys are `token`, `refreshToken`, `userId`, `deviceId`, and
+The dictionary keys are `token`, `refreshToken`, `expiresAt`, `userId`, `deviceId`, and
 `username`. The host must implement durable storage. Session storage failures
 surface as `ObscuraError.storageFailed`, code `STORAGE_ERROR`;
 `restorePersistedSession()` reports failures through the logger and returns

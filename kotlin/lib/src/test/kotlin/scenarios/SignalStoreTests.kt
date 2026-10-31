@@ -75,7 +75,8 @@ class SignalStoreTests {
         assertEquals(IdentityKeyStore.IdentityChange.REPLACED_EXISTING,
             store.saveIdentity(SignalProtocolAddress("alice-tablet", 1), key2.publicKey))
 
-        assertEquals(key2.publicKey, store.getIdentity(SignalProtocolAddress("alice-phone", 1)))
+        assertEquals(key2.publicKey, store.getIdentity(SignalProtocolAddress("alice-tablet", 1)))
+        assertNull(store.getIdentity(SignalProtocolAddress("alice-phone", 1)))
         assertEquals(listOf("alice-user"), changes)
         assertFalse(store.containsSession(SignalProtocolAddress("alice-phone", 1)))
         assertFalse(store.containsSession(SignalProtocolAddress("alice-tablet", 1)))

@@ -7,7 +7,6 @@ import dev.barrelmaker.obscura.kit.ObscuraLogger
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
 import dev.barrelmaker.obscura.kit.network.APIClient
 import dev.barrelmaker.obscura.kit.network.AuthResponse
-import dev.barrelmaker.obscura.kit.network.Jwt
 import dev.barrelmaker.obscura.kit.network.LinkSession
 import dev.barrelmaker.obscura.kit.network.isUuid
 import dev.barrelmaker.obscura.kit.persistence.SessionStorage
@@ -40,21 +39,29 @@ internal enum class TokenStatus {
 internal data class Credentials(
     val token: String,
     val refreshToken: String,
+    val expiresAt: Long,
     val userId: String,
     val deviceId: String,
     val username: String,
 ) {
     fun toMap(): Map<String, String> = mapOf(
-        "token" to token, "refreshToken" to refreshToken, "userId" to userId, "deviceId" to deviceId, "username" to username,
+        "token" to token,
+        "refreshToken" to refreshToken,
+        "expiresAt" to expiresAt.toString(),
+        "userId" to userId,
+        "deviceId" to deviceId,
+        "username" to username,
     )
 
     companion object {
         fun from(map: Map<String, String>): Credentials? {
-            val values = listOf("token", "refreshToken", "userId", "deviceId", "username").map { map[it] }
-            if (values.any { it.isNullOrBlank() }) return null
-            val (token, refreshToken, userId, deviceId, username) = values.map { it!! }
-            if (runCatching { Jwt.userId(token) }.getOrNull() != userId || Jwt.expiresAt(token) == null) return null
-            return Credentials(token, refreshToken, userId, deviceId, username)
+            val token = map["token"]?.takeIf { it.isNotBlank() } ?: return null
+            val refreshToken = map["refreshToken"]?.takeIf { it.isNotBlank() } ?: return null
+            val expiresAt = map["expiresAt"]?.toLongOrNull()?.takeIf { it > 0 } ?: return null
+            val userId = map["userId"]?.takeIf(::isUuid) ?: return null
+            val deviceId = map["deviceId"]?.takeIf(::isUuid) ?: return null
+            val username = map["username"]?.takeIf { it.isNotBlank() } ?: return null
+            return Credentials(token, refreshToken, expiresAt, userId, deviceId, username)
         }
     }
 }
@@ -109,9 +116,8 @@ internal class AuthManager(
         validateLogin(username, password)
         val keys = newIdentityKeys()
         val response = api.resetAccount(username, password, deviceName, keys.toDeviceKeys())
-        val (deviceId, refreshToken, userId) = validateProvisionResponse(response, expectedUserId = null)
         beforeInstall()
-        commitInstall(response.token, refreshToken, userId, deviceId, username, keys, isPrimary = true)
+        commitInstall(response, username, keys, isPrimary = true)
     }
 
     /** Consumes the link session cached by [login], or creates a new one if none is cached. */
@@ -151,8 +157,7 @@ internal class AuthManager(
             throw e
         }
         if (response.deviceId != localDeviceId || !signalStore.hasIdentity()) return LoginScenario.DEVICE_MISMATCH
-        val refreshToken = response.refreshToken ?: throw ObscuraError.ProtocolViolation("Device login returned no refresh token")
-        start(Credentials(response.token, refreshToken, Jwt.userId(response.token), localDeviceId, username))
+        start(Credentials(response.token, response.refreshToken, response.expiresAt, response.userId, localDeviceId, username))
         return LoginScenario.EXISTING_DEVICE
     }
 
@@ -181,23 +186,14 @@ internal class AuthManager(
         expectedUserId: String? = null,
         persist: () -> Unit = {},
     ) {
-        val (deviceId, refreshToken, userId) = validateProvisionResponse(response, expectedUserId)
-        commitInstall(response.token, refreshToken, userId, deviceId, username, keys, isPrimary, persist)
-    }
-
-    private fun validateProvisionResponse(response: AuthResponse, expectedUserId: String?): Triple<String, String, String> {
-        val deviceId = response.deviceId?.takeIf(::isUuid) ?: throw ObscuraError.ProtocolViolation("Provisioning returned no valid device id")
-        val refreshToken = response.refreshToken ?: throw ObscuraError.ProtocolViolation("Provisioning returned no refresh token")
-        val userId = Jwt.userId(response.token)
-        if (expectedUserId != null && userId != expectedUserId) throw ObscuraError.ProtocolViolation("Provisioning returned another account")
-        return Triple(deviceId, refreshToken, userId)
+        if (expectedUserId != null && response.userId != expectedUserId) {
+            throw ObscuraError.ProtocolViolation("Provisioning returned another account")
+        }
+        commitInstall(response, username, keys, isPrimary, persist)
     }
 
     private suspend fun commitInstall(
-        token: String,
-        refreshToken: String,
-        userId: String,
-        deviceId: String,
+        response: AuthResponse,
         username: String,
         keys: ProvisioningKeys,
         isPrimary: Boolean,
@@ -206,11 +202,11 @@ internal class AuthManager(
         withContext(Dispatchers.IO) {
             signalStore.transaction {
                 SignalKeyUtils.install(signalStore, keys)
-                devices.storeLocalInTransaction(userId, LocalDevice(deviceId, primaryDeviceId = deviceId.takeIf { isPrimary }))
+                devices.storeLocalInTransaction(response.userId, LocalDevice(response.deviceId, primaryDeviceId = response.deviceId.takeIf { isPrimary }))
                 persist()
             }
         }
-        start(Credentials(token, refreshToken, userId, deviceId, username))
+        start(Credentials(response.token, response.refreshToken, response.expiresAt, response.userId, response.deviceId, username))
     }
 
     private fun newIdentityKeys() = SignalKeyUtils.generateProvisioningKeys(IdentityKeyPair.generate())
@@ -229,7 +225,7 @@ internal class AuthManager(
     /** Revoke the refresh token on the server. Best effort. */
     suspend fun revoke(current: Credentials) {
         try {
-            api.logout(current.refreshToken, current.token)
+            api.logout(current.token)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -263,7 +259,7 @@ internal class AuthManager(
         val attempt = synchronized(lock) {
             val current = credentials ?: return TokenStatus.REJECTED
             refreshInFlight?.takeIf { it.isActive }?.let { return@synchronized it }
-            if (!force && secondsUntilExpiry(current.token) > FRESHNESS_MARGIN_S) return TokenStatus.FRESH
+            if (!force && secondsUntilExpiry(current.expiresAt) > FRESHNESS_MARGIN_S) return TokenStatus.FRESH
             val version = generation
             scope.async { performRefresh(current, version) }.also { refreshInFlight = it }
         }
@@ -295,11 +291,10 @@ internal class AuthManager(
             if (generation != version || credentials != current) {
                 return@synchronized if (credentials == null) TokenStatus.REJECTED else TokenStatus.FRESH
             }
-            if (Jwt.userId(response.token) != current.userId || Jwt.expiresAt(response.token) == null ||
-                (response.deviceId != null && response.deviceId != current.deviceId)
-            ) throw ObscuraError.ProtocolViolation("Refresh returned credentials for another session")
-            val refreshToken = response.refreshToken ?: throw ObscuraError.ProtocolViolation("Refresh returned no refresh token")
-            val refreshed = current.copy(token = response.token, refreshToken = refreshToken)
+            if (response.userId != current.userId || response.deviceId != current.deviceId) {
+                throw ObscuraError.ProtocolViolation("Refresh returned credentials for another session")
+            }
+            val refreshed = current.copy(token = response.token, refreshToken = response.refreshToken, expiresAt = response.expiresAt)
             stored("save") { storage.save(refreshed.toMap()) }
             credentials = refreshed
             refreshFailures = 0
@@ -338,12 +333,12 @@ internal class AuthManager(
 
     /** 80% of the token's remaining lifetime, at least 5 s. */
     private fun refreshDelayMs(): Long {
-        val token = credentials?.token ?: return MIN_REFRESH_DELAY_MS
-        return (secondsUntilExpiry(token) * 800).coerceAtLeast(MIN_REFRESH_DELAY_MS)
+        val expiresAt = credentials?.expiresAt ?: return MIN_REFRESH_DELAY_MS
+        return (secondsUntilExpiry(expiresAt) * 800).coerceAtLeast(MIN_REFRESH_DELAY_MS)
     }
 
-    private fun secondsUntilExpiry(token: String): Long =
-        (Jwt.expiresAt(token) ?: 0L) - System.currentTimeMillis() / 1000
+    private fun secondsUntilExpiry(expiresAt: Long): Long =
+        expiresAt - System.currentTimeMillis() / 1000
 
     private fun validateLogin(username: String, password: String) {
         if (username.isBlank() || password.isBlank()) throw ObscuraError.InvalidArgument("Username and password must not be blank")

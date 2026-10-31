@@ -48,7 +48,7 @@ final class ReceiveTests: XCTestCase {
         let original = try await client.friends.friend(sender.userId)
         var message = Obscura_Client_V1_ClientMessage()
         message.friendRequest.username = "replacement"
-        _ = await sender.sender.send(to: receiver.userId, try message.serializedData(), acceptedDeviceIds: [])
+        _ = await sender.sender.send(to: receiver.userId, try message.serializedData())
         let delivery = try XCTUnwrap(server.drain(receiver).first)
         let acks = Locked(0)
         await client.receive(envelope(delivery.message, sender: sender)) { _ in acks.withLock { $0 += 1 } }
@@ -68,7 +68,7 @@ final class ReceiveTests: XCTestCase {
         message.appEntry.model = "opaque-model"
         message.appEntry.id = "entry"
         message.appEntry.data = Data([0, 255, 1])
-        let results = await sender.sender.send(to: receiver.userId, try plaintext ?? message.serializedData(), acceptedDeviceIds: [])
+        let results = await sender.sender.send(to: receiver.userId, try plaintext ?? message.serializedData())
         XCTAssertTrue(results.allSatisfy { $0.status == .accepted })
         return try XCTUnwrap(FakeObscuraServer.active?.drain(receiver).first?.message)
     }
@@ -203,7 +203,7 @@ final class ReceiveTests: XCTestCase {
         var reply = Obscura_Client_V1_ClientMessage()
         reply.appEntry.model = "ack"
         reply.appEntry.id = "reply"
-        _ = await receiver.sender.send(to: sender.userId, try reply.serializedData(), acceptedDeviceIds: [])
+        _ = await receiver.sender.send(to: sender.userId, try reply.serializedData())
         _ = try await sender.receive()
         let next = try await encrypted(sender, to: receiver)
         let encryptedMessage = try Obscura_Client_V1_EncryptedMessage(serializedBytes: next)

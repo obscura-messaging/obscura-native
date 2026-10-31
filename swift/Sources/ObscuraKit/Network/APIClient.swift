@@ -36,21 +36,6 @@ actor APIClient {
         tokenRejected.withLock { $0 = refresh }
     }
 
-    // MARK: - JWT
-
-    static func claims(_ jwt: String) -> [String: Any]? {
-        let parts = jwt.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        var base64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 { base64.append("=") }
-        guard let data = Data(base64Encoded: base64) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    }
-
-    static func userId(_ jwt: String) -> String? { claims(jwt)?["sub"] as? String }
-    static func deviceId(_ jwt: String) -> String? { claims(jwt)?["device_id"] as? String }
-    static func expiry(_ jwt: String) -> TimeInterval? { claims(jwt)?["exp"] as? TimeInterval }
-
     // MARK: - Transport
 
     static let maxRetries = 2
@@ -136,18 +121,17 @@ actor APIClient {
     }
 
     func login(_ username: String, _ password: String, deviceId: String) async throws -> AuthResponse {
-        try await json("v1/sessions", method: "POST",
+        try await json("v1/session", method: "POST",
                        body: ["username": username, "password": password, "deviceId": deviceId], auth: .none)
     }
 
     func refreshSession(_ refreshToken: String) async throws -> AuthResponse {
-        try await json("v1/sessions/refresh", method: "POST", body: ["refreshToken": refreshToken], auth: .none)
+        try await json("v1/session/refresh", method: "POST", body: ["refreshToken": refreshToken], auth: .none)
     }
 
     /// Takes the session's access token explicitly: the client has already forgotten it.
-    func logout(_ refreshToken: String, token: String) async throws {
-        _ = try await request("v1/sessions", method: "DELETE", body: encoder.encode(["refreshToken": refreshToken]),
-                               auth: .bearer(token))
+    func logout(token: String) async throws {
+        _ = try await request("v1/session", method: "DELETE", auth: .bearer(token))
     }
 
     func createDevice(_ device: CreateDeviceRequest) async throws -> AuthResponse {
@@ -166,21 +150,23 @@ actor APIClient {
     }
 
     func resetAccount(_ request: AccountProvisionRequest) async throws -> AuthResponse {
-        try await json("v1/account/reset", method: "POST", body: request, auth: .none)
+        try await json("v1/users/reset", method: "POST", body: request, auth: .none)
     }
 
     func uploadPreKeys(_ keys: PreKeysUpload) async throws {
-        try await call("v1/devices/keys", method: "POST", body: keys)
+        try await call("v1/keys", method: "POST", body: keys)
     }
 
     /// Consumes one one-time prekey on every device of `userId`.
     func fetchPreKeyBundles(_ userId: String) async throws -> [PreKeyBundleResponse] {
-        try await json("v1/users/\(userId)")
+        struct BundleList: Decodable { let bundles: [PreKeyBundleResponse] }
+        let response: BundleList = try await json("v1/keys/\(userId)")
+        return response.bundles
     }
 
     /// Consumes one one-time prekey on that device only.
     func fetchPreKeyBundle(_ userId: String, deviceId: String) async throws -> PreKeyBundleResponse {
-        try await json("v1/users/\(userId)/devices/\(deviceId)")
+        try await json("v1/keys/\(userId)/devices/\(deviceId)")
     }
 
     func createLinkSession(_ username: String, _ password: String) async throws -> LinkSessionResponse {
@@ -220,6 +206,6 @@ actor APIClient {
     }
 
     func registerPushToken(_ pushToken: String) async throws {
-        try await call("v1/push-tokens", method: "PUT", body: ["token": pushToken, "type": "apns"])
+        try await call("v1/push-token", method: "PUT", body: ["token": pushToken])
     }
 }

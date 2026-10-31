@@ -114,7 +114,7 @@ class FriendListAuthorityTest {
                 val sent = Collections.synchronizedList(mutableListOf<SendMessageRequest>())
                 server.dispatcher = object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse = when (request.url.encodedPath) {
-                        "/v1/users/$SELF_USER_ID/devices/${linkedDevice.deviceId}" ->
+                        "/v1/keys/$SELF_USER_ID/devices/${linkedDevice.deviceId}" ->
                             MockResponse.Builder().body(linkedDevice.consumeBundle().toString()).build()
                         "/v1/messages" -> {
                             sent.add(SendMessageRequest.parseFrom(request.body!!.toByteArray()))
@@ -131,7 +131,7 @@ class FriendListAuthorityTest {
                 c.removeFriend(peer)
 
                 val syncs = sent.map { request ->
-                    val submission = request.messagesList.single()
+                    val submission = request.recipientsList.single().submissionsList.single()
                     assertEquals(linkedDevice.deviceId, UuidCodec.uuidString(submission.deviceId))
                     linkedDevice.messenger.decryptAndCommit(SELF_DEVICE_ID, submission.message,
                         record = { linkedDevice.directory.addInTransaction(SELF_USER_ID, SELF_DEVICE_ID) }) { ClientMessage.parseFrom(it) }

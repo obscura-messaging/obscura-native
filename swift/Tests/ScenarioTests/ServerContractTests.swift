@@ -147,7 +147,7 @@ final class ServerContractTests: XCTestCase {
 
         let report = try await alice.client.send(
             to: [missingUserId], modelKey: "contract", entryId: "after-final-device-deletion",
-            sentAt: 1, payload: Data("x".utf8), acceptedDeviceIds: [])
+            sentAt: 1, payload: Data("x".utf8))
         XCTAssertEqual(report.recipients.count, 1, "removed targets must not turn a rejected user into an empty report")
         XCTAssertEqual(report.recipients.first?.userId, missingUserId)
         XCTAssertNil(report.recipients.first?.deviceId)
@@ -261,8 +261,8 @@ final class ServerContractTests: XCTestCase {
     private func assertRotatedSession(_ user: TestUser, storage: MemorySessionStorage, previous: String) async throws {
         let stored = try XCTUnwrap(storage.session)
         XCTAssertNotEqual(stored["refreshToken"], previous)
-        XCTAssertEqual(stored["token"].flatMap(APIClient.userId), user.userId)
-        XCTAssertEqual(stored["token"].flatMap(APIClient.deviceId), user.deviceId)
+        XCTAssertEqual(stored["userId"], user.userId)
+        XCTAssertEqual(stored["deviceId"], user.deviceId)
         let current = try await user.client.requireSession()
         XCTAssertEqual(current.stored, stored, "rotation must be persisted before the operation succeeds")
         do {
@@ -277,13 +277,8 @@ final class ServerContractTests: XCTestCase {
 private extension ObscuraClient {
     func expireAccessToken() throws {
         var current = try requireSession()
-        let parts = current.token.split(separator: ".")
-        var claims = try XCTUnwrap(APIClient.claims(current.token))
-        claims["exp"] = 1
-        let encoded = try JSONSerialization.data(withJSONObject: claims).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        current.token = "\(parts[0]).\(encoded).\(parts[2])"
+        current.token = "expired.token.sig"
+        current.expiresAt = 1
         session = current
         api.setToken(current.token)
     }

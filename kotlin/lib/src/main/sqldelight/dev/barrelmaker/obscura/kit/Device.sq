@@ -28,6 +28,9 @@ DELETE FROM Device WHERE user_id = ? AND device_id = ?;
 deleteByUser:
 DELETE FROM Device WHERE user_id = ?;
 
+deleteOtherDevicesOfUser:
+DELETE FROM Device WHERE user_id = ? AND device_id != ?;
+
 deleteAll:
 DELETE FROM Device;
 

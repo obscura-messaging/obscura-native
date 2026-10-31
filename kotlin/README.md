@@ -78,7 +78,6 @@ client.wipeDevice()
 
 val report = client.send(
     recipientUserIds, modelKey, entryId, sentAt, payload,
-    acceptedDeviceIds = emptySet(),
 )
 client.inbox.peek(50)
 client.inbox.consume(ids)
@@ -102,8 +101,8 @@ client.processPendingMessages(timeoutMs)
 Unless noted otherwise, client/store operations above are suspending
 (`friendCode` and `observeTyping` are not). `payload` is `ByteArray`;
 stored entry `data` and nullable `localMetadata` are opaque strings.
-`acceptedDeviceIds` is required. `SendReport` separates `recipients` and
-`selfSync`, each containing `SubmissionResult` values.
+`SendReport` separates `recipients` and `selfSync`, each containing
+`SubmissionResult` values.
 
 `authState` and `connectionState` are `StateFlow`s. `friendsChanged` is a
 payload-free `Flow<Unit>`; collect it and call `getFriends()`. `messageReceived`

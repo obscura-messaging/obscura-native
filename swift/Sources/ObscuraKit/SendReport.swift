@@ -29,14 +29,14 @@ struct UserSubmission: Equatable {
     let submission: Obscura_V1_SendMessageRequest.Submission
 }
 
-/// A submission's result and, when it failed, the server's error code.
+/// A submission's result.
 struct Submitted: Equatable {
     let result: SubmissionResult
-    let failure: Obscura_V1_SendMessageResponse.ErrorCode?
+    let invalidDevice: Bool
 
-    init(_ result: SubmissionResult, failure: Obscura_V1_SendMessageResponse.ErrorCode? = nil) {
+    init(_ result: SubmissionResult, invalidDevice: Bool = false) {
         self.result = result
-        self.failure = failure
+        self.invalidDevice = invalidDevice
     }
 }
 
@@ -63,11 +63,12 @@ func submitOutcome(
     submissions: [UserSubmission],
     response: Obscura_V1_SendMessageResponse
 ) throws -> SubmitOutcome {
-    let ids = Set(submissions.map(\.submission.submissionID))
-    let failures = response.failedSubmissions
-    guard failures.allSatisfy({ ids.contains($0.submissionID) }),
-          Set(failures.map(\.submissionID)).count == failures.count else {
-        throw ObscuraError.protocolViolation("unknown or duplicate submission ids in send response")
+    let targetedDevices = Set(submissions.compactMap { uuidString($0.submission.deviceID) })
+    var invalidDevices: Set<String> = []
+    for bytes in response.invalidDeviceIds {
+        guard let id = uuidString(bytes), targetedDevices.contains(id), invalidDevices.insert(id).inserted else {
+            throw ObscuraError.protocolViolation("unknown or duplicate invalid device ids in send response")
+        }
     }
     let addressed = Set(userIds)
     var mismatches: [String: [String]] = [:]
@@ -80,20 +81,26 @@ func submitOutcome(
             return id
         }
     }
-    let byId = Dictionary(uniqueKeysWithValues: failures.map { ($0.submissionID, $0) })
-    let submitted = try submissions.map { item -> Submitted in
-        let failure = byId[item.submission.submissionID]
-        if failure?.errorCode == .deviceMismatch, mismatches[item.userId] == nil {
-            throw ObscuraError.protocolViolation("device mismatch failure without a mismatch entry")
+    let submitted = submissions.map { item -> Submitted in
+        let deviceId = uuidString(item.submission.deviceID)
+        let isInvalid = deviceId.map(invalidDevices.contains) ?? false
+        let missing = mismatches[item.userId]
+        let error: String?
+        if isInvalid {
+            error = "Device not found"
+        } else if let missing {
+            error = "devices not covered: \(missing.joined(separator: ", "))"
+        } else {
+            error = nil
         }
         return Submitted(
             SubmissionResult(
                 userId: item.userId,
-                deviceId: uuidString(item.submission.deviceID),
-                status: failure == nil ? .accepted : .rejected,
-                error: failure.map { $0.errorMessage.isEmpty ? "\($0.errorCode)" : $0.errorMessage }
+                deviceId: deviceId,
+                status: error == nil ? .accepted : .rejected,
+                error: error
             ),
-            failure: failure?.errorCode
+            invalidDevice: isInvalid
         )
     }
     return SubmitOutcome(submitted: submitted, mismatches: mismatches)

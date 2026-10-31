@@ -23,27 +23,37 @@ public enum LoginScenario: Sendable {
 struct Session: Equatable, Sendable {
     var token: String
     var refreshToken: String
+    var expiresAt: Int64
     let userId: String
     let deviceId: String
     let username: String
 
-    init(token: String, refreshToken: String, userId: String, deviceId: String, username: String) {
+    init(token: String, refreshToken: String, expiresAt: Int64, userId: String, deviceId: String, username: String) {
         self.token = token
         self.refreshToken = refreshToken
+        self.expiresAt = expiresAt
         self.userId = userId
         self.deviceId = deviceId
         self.username = username
     }
 
     init?(stored: [String: String]) {
-        guard let token = stored["token"], let refreshToken = stored["refreshToken"], let userId = stored["userId"],
-              let deviceId = stored["deviceId"], let username = stored["username"],
+        guard let token = stored["token"], let refreshToken = stored["refreshToken"],
+              let expiresAtStr = stored["expiresAt"], let expiresAt = Int64(expiresAtStr), expiresAt > 0,
+              let userId = stored["userId"], let deviceId = stored["deviceId"], let username = stored["username"],
               ![token, refreshToken, userId, deviceId, username].contains("") else { return nil }
-        self.init(token: token, refreshToken: refreshToken, userId: userId, deviceId: deviceId, username: username)
+        self.init(token: token, refreshToken: refreshToken, expiresAt: expiresAt, userId: userId, deviceId: deviceId, username: username)
     }
 
     var stored: [String: String] {
-        ["token": token, "refreshToken": refreshToken, "userId": userId, "deviceId": deviceId, "username": username]
+        [
+            "token": token,
+            "refreshToken": refreshToken,
+            "expiresAt": String(expiresAt),
+            "userId": userId,
+            "deviceId": deviceId,
+            "username": username,
+        ]
     }
 }
 
@@ -197,7 +207,7 @@ public actor ObscuraClient {
         } catch ObscuraError.http(status: 409, _) {
             return .deviceMismatch
         }
-        guard usable, APIClient.deviceId(response.token) == localDeviceId else { return .deviceMismatch }
+        guard usable, response.deviceId == localDeviceId else { return .deviceMismatch }
         try begin(session(response, username: username))
         return .existingDevice
     }
@@ -234,11 +244,12 @@ public actor ObscuraClient {
     }
 
     func session(_ response: AuthResponse, username: String) throws -> Session {
-        guard let userId = APIClient.userId(response.token), let deviceId = APIClient.deviceId(response.token),
-              let refreshToken = response.refreshToken else {
-            throw ObscuraError.protocolViolation("device token lacks a user id, a device id or a refresh token")
+        guard !response.token.isEmpty, !response.refreshToken.isEmpty, response.expiresAt > 0,
+              UUID(uuidString: response.userId) != nil, UUID(uuidString: response.deviceId) != nil else {
+            throw ObscuraError.protocolViolation("invalid auth response")
         }
-        return Session(token: response.token, refreshToken: refreshToken, userId: userId, deviceId: deviceId, username: username)
+        return Session(token: response.token, refreshToken: response.refreshToken, expiresAt: response.expiresAt,
+                       userId: response.userId, deviceId: response.deviceId, username: username)
     }
 
     func begin(_ session: Session) throws {
@@ -276,7 +287,7 @@ public actor ObscuraClient {
         try storeSession { try sessionStorage.clear() }
         if revoking, let ended {
             do {
-                try await api.logout(ended.refreshToken, token: ended.token)
+                try await api.logout(token: ended.token)
             } catch {
                 logger.log("refresh token revocation failed: \(error)")
             }
@@ -292,8 +303,8 @@ public actor ObscuraClient {
             guard let stored = try storeSession({ try sessionStorage.load() }) else { return false }
             guard let restored = Session(stored: stored), try signalStore.hasIdentity(),
                   try await directory.localDeviceId() == restored.deviceId,
-                  APIClient.userId(restored.token) == restored.userId,
-                  APIClient.deviceId(restored.token) == restored.deviceId else {
+                  UUID(uuidString: restored.userId) != nil,
+                  UUID(uuidString: restored.deviceId) != nil else {
                 try storeSession { try sessionStorage.clear() }
                 return false
             }
@@ -333,7 +344,7 @@ public actor ObscuraClient {
 
     func freshToken() async throws -> TokenStatus {
         guard let session else { return .rejected }
-        if let expiry = APIClient.expiry(session.token), expiry - Date().timeIntervalSince1970 > Self.tokenExpiryMargin {
+        if TimeInterval(session.expiresAt) - Date().timeIntervalSince1970 > Self.tokenExpiryMargin {
             return .fresh
         }
         return try await refresh()
@@ -365,8 +376,12 @@ public actor ObscuraClient {
         do {
             let response = try await api.refreshSession(current.refreshToken)
             guard generation == sessionGeneration, var updated = session else { return .rejected }
+            guard response.userId == updated.userId, response.deviceId == updated.deviceId, response.expiresAt > 0 else {
+                throw ObscuraError.protocolViolation("refresh returned credentials for another session")
+            }
             updated.token = response.token
-            updated.refreshToken = response.refreshToken ?? updated.refreshToken
+            updated.refreshToken = response.refreshToken
+            updated.expiresAt = response.expiresAt
             try storeSession { try sessionStorage.save(updated.stored) }
             session = updated
             api.setToken(updated.token)
@@ -402,7 +417,7 @@ public actor ObscuraClient {
     private func nextRefreshDelay() -> TimeInterval? {
         guard let session else { return nil }
         if refreshFailures > 0 { return min(5 * pow(2, Double(min(refreshFailures - 1, 10))), 300) }
-        let remaining = (APIClient.expiry(session.token) ?? 0) - Date().timeIntervalSince1970
+        let remaining = TimeInterval(session.expiresAt) - Date().timeIntervalSince1970
         return max(remaining * 0.8, 5)
     }
 }

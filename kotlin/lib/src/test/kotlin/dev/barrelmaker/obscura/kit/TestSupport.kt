@@ -28,18 +28,34 @@ class MemoryStorage(var data: Map<String, String>? = null) : SessionStorage {
 fun newClient(apiUrl: String = "https://obscura.invalid", storage: SessionStorage = MemoryStorage()) =
     ObscuraClient(ObscuraConfig(apiUrl, deviceName = "Test"), driver = null, sessionStorage = storage)
 
-fun jwt(sub: String, exp: Long): String {
-    val encode = { s: String -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(s.toByteArray()) }
-    return "${encode("""{"alg":"none"}""")}.${encode("""{"sub":"$sub","exp":$exp}""")}.sig"
-}
-
 const val SELF_USER_ID = "019f025a-0000-7de6-84b6-000000000001"
 const val SELF_DEVICE_ID = "019f025a-0000-7de6-84b6-0000000000d1"
 const val FAR_FUTURE = 4_102_444_800L
 
-fun storedSession(token: String = jwt(SELF_USER_ID, FAR_FUTURE), refreshToken: String = "rt") = MemoryStorage(mapOf(
-    "token" to token, "refreshToken" to refreshToken, "userId" to SELF_USER_ID,
-    "deviceId" to SELF_DEVICE_ID, "username" to "self",
+fun authResponseJson(
+    token: String = "token",
+    refreshToken: String = "rt",
+    expiresAt: Long = FAR_FUTURE,
+    userId: String = SELF_USER_ID,
+    deviceId: String = SELF_DEVICE_ID,
+): JSONObject = JSONObject()
+    .put("token", token)
+    .put("refreshToken", refreshToken)
+    .put("expiresAt", expiresAt)
+    .put("userId", userId)
+    .put("deviceId", deviceId)
+
+fun storedSession(
+    token: String = "token",
+    refreshToken: String = "rt",
+    expiresAt: Long = FAR_FUTURE,
+) = MemoryStorage(mapOf(
+    "token" to token,
+    "refreshToken" to refreshToken,
+    "expiresAt" to expiresAt.toString(),
+    "userId" to SELF_USER_ID,
+    "deviceId" to SELF_DEVICE_ID,
+    "username" to "self",
 ))
 
 /** Authenticated through the stored-session path, with no server to connect to. */

@@ -110,7 +110,7 @@ class APIClientTest {
         server.enqueue(status(401))
         server.enqueue(status(401))
 
-        assertEquals(401, (runCatching { api.logout("rt", "bearer") }.exceptionOrNull() as ObscuraError.Http).status)
+        assertEquals(401, (runCatching { api.logout("bearer") }.exceptionOrNull() as ObscuraError.Http).status)
         assertEquals(401, (runCatching { api.login("u", "p", "d") }.exceptionOrNull() as ObscuraError.Http).status)
         assertEquals(0, refreshes())
     }

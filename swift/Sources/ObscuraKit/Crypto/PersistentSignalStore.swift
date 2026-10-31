@@ -149,6 +149,7 @@ final class PersistentSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeySt
             try db.execute(sql: """
                 DELETE FROM signal_sessions WHERE address IN (SELECT device_id || '.\(Messenger.deviceSlot)' FROM devices WHERE user_id = ?)
             """, arguments: [userId])
+            try db.execute(sql: "DELETE FROM devices WHERE user_id = ? AND device_id != ?", arguments: [userId, address.name])
             return (userId, true)
         }
         if changed { logger.identityChanged(userId: userId) }

@@ -55,7 +55,7 @@ class PublicErrorsTest {
             server.start()
             val url = server.url("/").toString()
             val c = newClient(url)
-            val response = """{"token":"${jwt(SELF_USER_ID, FAR_FUTURE)}","refreshToken":"rt"}"""
+            val response = """{"token":"t","refreshToken":"rt","expiresAt":$FAR_FUTURE,"userId":"$SELF_USER_ID"}"""
             server.enqueue(MockResponse.Builder().body(response).build())
             val error = runCatching { c.register("user", "password") }.exceptionOrNull()
             assertTrue(error is ObscuraError.ProtocolViolation)

@@ -27,7 +27,6 @@ import java.util.UUID
 /** Login outcomes, primary provisioning, reset and linking against a stand-in server. */
 class AccountTest {
     private val newDeviceId = "019f025a-0000-7de6-84b6-0000000000d9"
-    private val userToken = jwt(SELF_USER_ID, FAR_FUTURE)
 
     /** The server's account state for one user. */
     private class Account {
@@ -47,22 +46,20 @@ class AccountTest {
                 val path = request.url.encodedPath
                 return when {
                     path == "/v1/users" && request.method == "POST" ->
-                        MockResponse.Builder().code(201).body(
-                            JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", SELF_DEVICE_ID).toString()
-                        ).build()
-                    path == "/v1/sessions" -> {
+                        MockResponse.Builder().code(201).body(authResponseJson(deviceId = SELF_DEVICE_ID).toString()).build()
+                    path == "/v1/session" -> {
                         val reqDeviceId = JSONObject(request.body!!.utf8()).optString("deviceId")
                         if (account.loginDeviceId != null && reqDeviceId == account.loginDeviceId) {
-                            json(JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", account.loginDeviceId))
+                            json(authResponseJson(deviceId = account.loginDeviceId!!))
                         } else {
                             MockResponse.Builder().code(409).body("""{"error":"Device does not belong to this account"}""").build()
                         }
                     }
-                    path == "/v1/account/reset" ->
-                        json(JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", newDeviceId))
+                    path == "/v1/users/reset" ->
+                        json(authResponseJson(deviceId = newDeviceId))
                     path == "/v1/devices" && request.method == "GET" -> json(JSONObject().put("devices",
                         account.devices.map { (id, primary) -> JSONObject().put("deviceId", id).put("isPrimary", primary) }))
-                    path == "/v1/devices" -> json(JSONObject().put("token", userToken).put("refreshToken", "rt").put("deviceId", newDeviceId))
+                    path == "/v1/devices" -> json(authResponseJson(deviceId = newDeviceId))
                     path == "/v1/link-sessions" -> json(
                         JSONObject().put("id", "ls-1").put("userId", SELF_USER_ID).put("expiresAt", System.currentTimeMillis() / 1000 + 600)
                     )
@@ -158,7 +155,7 @@ class AccountTest {
 
         c.resetAccount("self", "password")
 
-        val body = JSONObject(requestsTo("/v1/account/reset").single().body!!.utf8())
+        val body = JSONObject(requestsTo("/v1/users/reset").single().body!!.utf8())
         assertEquals("self", body.getString("username"))
         assertEquals("password", body.getString("password"))
         assertArrayEquals(c.signalStore.identityKeyPair.publicKey.serialize(), body.getString("identityKey").fromBase64())

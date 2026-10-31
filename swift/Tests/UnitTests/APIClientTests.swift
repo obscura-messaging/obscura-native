@@ -79,11 +79,13 @@ final class APIClientTests: XCTestCase {
         RetryProtocol.responses.withLock { $0 = [(429, "0"), (503, "0"), (200, nil), (200, nil)] }
         let api = try APIClient(baseURL: "https://\(RetryProtocol.host)")
         var submission = Obscura_V1_SendMessageRequest.Submission()
-        submission.submissionID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
         submission.deviceID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
         submission.message = Data([1, 2, 3])
+        var recipient = Obscura_V1_SendMessageRequest.Recipient()
+        recipient.userID = withUnsafeBytes(of: UUID().uuid) { Data($0) }
+        recipient.submissions = [submission]
         var message = Obscura_V1_SendMessageRequest()
-        message.messages = [submission]
+        message.recipients = [recipient]
         let body = try message.serializedData()
 
         _ = try await api.sendMessage(body)

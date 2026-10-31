@@ -116,7 +116,6 @@ suspend fun sendText(
     entryId = "e_${System.currentTimeMillis()}_${(0..99999).random()}",
     sentAt = sentAt,
     payload = JSONObject(mapOf("content" to text)).toString().toByteArray(),
-    acceptedDeviceIds = emptySet(),
 )
 
 suspend fun sendAndVerify(sender: ObscuraClient, receiver: ObscuraClient, text: String): InboxRecord {

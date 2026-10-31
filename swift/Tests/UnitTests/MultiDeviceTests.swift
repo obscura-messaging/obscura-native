@@ -177,8 +177,8 @@ final class MultiDeviceTests: XCTestCase {
     }
 
     func testARejectedTokenIsRefreshedOnceAndTheRequestRetried() async throws {
-        let fresh = jwt(userId: phone.userId, deviceId: phone.deviceId)
-        server.acceptRefresh(token: fresh, refreshToken: "rotated")
+        let fresh = phone.deviceId
+        server.acceptRefresh(token: fresh, refreshToken: "rotated", userId: phone.userId, deviceId: phone.deviceId)
         server.rejectTokens(1)
 
         let devices = try await phoneClient.devices()

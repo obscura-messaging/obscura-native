@@ -61,20 +61,11 @@ func signalStoreWithIdentity() throws -> PersistentSignalStore {
     return store
 }
 
-func jwt(exp: Int = Int(Date().timeIntervalSince1970) + 3600, userId: String, deviceId: String?) -> String {
-    func encode(_ s: String) -> String {
-        Data(s.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-    let device = deviceId.map { ",\"device_id\":\"\($0)\"" } ?? ""
-    return "\(encode(#"{"alg":"none"}"#)).\(encode("{\"exp\":\(exp),\"sub\":\"\(userId)\"\(device)}")).sig"
-}
-
 /// A client signed in as `device`, on its database.
 func authenticatedClient(_ device: FakeDevice, username: String = "owner") async throws -> ObscuraClient {
     let client = try makeClient(apiURL: FakeObscuraServer.baseURL, database: device.db)
-    try await client.begin(Session(token: jwt(userId: device.userId, deviceId: device.deviceId), refreshToken: "rt",
+    try await client.begin(Session(token: device.deviceId, refreshToken: "rt",
+                                   expiresAt: Int64(Date().timeIntervalSince1970) + 3600,
                                    userId: device.userId, deviceId: device.deviceId, username: username))
     return client
 }
@@ -98,7 +89,7 @@ func clientMessage(_ build: (inout Obscura_Client_V1_ClientMessage) -> Void) -> 
 /// Sends `message` from `sender` to every device of `userId` and asserts each accepted.
 func send(_ message: Obscura_Client_V1_ClientMessage, from sender: FakeDevice, to userId: String,
           file: StaticString = #filePath, line: UInt = #line) async throws {
-    let results = await sender.sender.send(to: userId, try message.serializedData(), acceptedDeviceIds: [])
+    let results = await sender.sender.send(to: userId, try message.serializedData())
     XCTAssertTrue(!results.isEmpty && results.allSatisfy { $0.status == .accepted }, "\(results)", file: file, line: line)
 }
 

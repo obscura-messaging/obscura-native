@@ -2,7 +2,10 @@ import Foundation
 
 struct AuthResponse: Decodable {
     let token: String
-    let refreshToken: String?
+    let refreshToken: String
+    let expiresAt: Int64
+    let userId: String
+    let deviceId: String
 }
 
 struct SignedPreKeyUpload: Encodable {
@@ -16,13 +19,13 @@ struct PreKeyUpload: Encodable {
     let publicKey: String
 }
 
-/// `POST /v1/devices/keys`. The identity is the account's and cannot change there.
+/// `POST /v1/keys`. The identity is the account's and cannot change there.
 struct PreKeysUpload: Encodable {
     let signedPreKey: SignedPreKeyUpload
     let oneTimePreKeys: [PreKeyUpload]
 }
 
-/// `POST /v1/users` and `POST /v1/account/reset`.
+/// `POST /v1/users` and `POST /v1/users/reset`.
 struct AccountProvisionRequest: Encodable {
     let username: String
     let password: String

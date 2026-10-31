@@ -36,15 +36,16 @@ class FriendHandshakeTest {
                 server.dispatcher = object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         if (request.url.encodedPath != "/v1/messages") {
-                            return MockResponse.Builder().body(JSONArray().put(remote.consumeBundle()).toString()).build()
+                            return MockResponse.Builder().body(org.json.JSONObject().put("bundles", JSONArray().put(remote.consumeBundle())).toString()).build()
                         }
                         // The self sync after the acceptance covers only this account and has no submission.
-                        if (SendMessageRequest.parseFrom(request.body!!.toByteArray()).messagesCount == 0) {
+                        val parsed = SendMessageRequest.parseFrom(request.body!!.toByteArray())
+                        if (parsed.recipientsList.sumOf { it.submissionsCount } == 0) {
                             return MockResponse.Builder().body("").build()
                         }
                         runBlocking {
                             stateBeforeAcceptance.set(client.getFriends().singleOrNull()?.status)
-                            val sent = SendMessageRequest.parseFrom(request.body!!.toByteArray()).messagesList.single()
+                            val sent = parsed.recipientsList.single().submissionsList.single()
                             remote.messenger.decryptAndCommit(SELF_DEVICE_ID, sent.message,
                                 record = { remote.directory.addInTransaction(SELF_USER_ID, SELF_DEVICE_ID) }) { it }
                             val accept = ClientMessage.newBuilder().setFriendAccept(obscura.client.v1.friendAccept {}).build()

@@ -679,9 +679,8 @@ class ObscuraClient(
     }
 
     /**
-     * Send an entry to every device of [recipientUserIds] and to this user's other devices. Devices
-     * in [acceptedDeviceIds] are reported accepted without a resend. No inbox row is written here;
-     * the app stores its own copy in [entries].
+     * Send an entry to every device of [recipientUserIds] and to this user's other devices.
+     * No inbox row is written here; the app stores its own copy in [entries].
      */
     suspend fun send(
         recipientUserIds: List<String>,
@@ -689,7 +688,6 @@ class ObscuraClient(
         entryId: String,
         sentAt: Long,
         payload: ByteArray,
-        acceptedDeviceIds: Set<String>,
     ): SendReport {
         val self = requireFreshToken()
         val message = clientMessage {
@@ -701,7 +699,7 @@ class ObscuraClient(
             })
         }
         val peers = recipientUserIds.distinct().filter { it != self.userId }
-        val results = sender.send(peers + self.userId, message, acceptedDeviceIds)
+        val results = sender.send(peers + self.userId, message)
         val (selfSync, recipients) = results.partition { it.userId == self.userId }
         return SendReport(recipients, selfSync)
     }

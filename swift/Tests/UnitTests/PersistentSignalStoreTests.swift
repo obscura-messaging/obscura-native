@@ -97,7 +97,8 @@ final class PersistentSignalStoreTests: XCTestCase {
         XCTAssertTrue(try store.isTrustedIdentity(replacement, for: phone, direction: .sending, context: NullContext()))
         XCTAssertTrue(try store.saveIdentity(replacement, for: phone, context: NullContext()))
 
-        XCTAssertEqual(try store.identity(for: ProtocolAddress(name: "laptop", deviceId: 1), context: NullContext()), replacement)
+        XCTAssertEqual(try store.identity(for: phone, context: NullContext()), replacement)
+        XCTAssertThrowsError(try store.identity(for: ProtocolAddress(name: "laptop", deviceId: 1), context: NullContext()))
         XCTAssertNil(try store.loadSession(for: phone, context: NullContext()))
         XCTAssertNil(try store.loadSession(for: ProtocolAddress(name: "laptop", deviceId: 1), context: NullContext()))
         XCTAssertNotNil(try store.loadSession(for: ProtocolAddress(name: "bob-phone", deviceId: 1), context: NullContext()),

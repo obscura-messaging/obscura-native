@@ -34,7 +34,7 @@ class AckSemanticsTests {
     }
 
     /** A real ciphertext for [deviceId] with its MAC corrupted, so it fails at the Signal decrypt. */
-    private suspend fun sendCorruptCiphertext(sender: ObscuraClient, deviceId: String) {
+    private suspend fun sendCorruptCiphertext(sender: ObscuraClient, userId: String, deviceId: String) {
         val address = Messenger.addressFor(deviceId)
         val plaintext = ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry { model = "corrupt" }).build()
         val ciphertext = SessionCipher(sender.signalStore, address).encrypt(plaintext.toByteArray())
@@ -47,11 +47,14 @@ class AckSemanticsTests {
             .setContent(ByteString.copyFrom(bytes))
             .build()
         val submission = SendMessageRequest.Submission.newBuilder()
-            .setSubmissionId(UuidCodec.uuidToBytes(UUID.randomUUID()))
             .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(deviceId)))
             .setMessage(encrypted.toByteString())
             .build()
-        sender.api.sendMessage(SendMessageRequest.newBuilder().addMessages(submission).build().toByteArray())
+        val recipient = SendMessageRequest.Recipient.newBuilder()
+            .setUserId(UuidCodec.uuidToBytes(UUID.fromString(userId)))
+            .addSubmissions(submission)
+            .build()
+        sender.api.sendMessage(SendMessageRequest.newBuilder().addRecipients(recipient).build().toByteArray())
     }
 
     @Test
@@ -64,7 +67,7 @@ class AckSemanticsTests {
         sendAndVerify(bob, alice, "warmup")
         assertEquals(0, logger.decryptFailures.get())
 
-        sendCorruptCiphertext(bob, alice.deviceId!!)
+        sendCorruptCiphertext(bob, alice.userId!!, alice.deviceId!!)
         eventually(message = "first decrypt failure") { logger.decryptFailures.get() == 1 }
 
         alice.disconnect()

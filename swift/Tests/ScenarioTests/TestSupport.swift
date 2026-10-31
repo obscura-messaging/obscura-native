@@ -137,7 +137,7 @@ final class TestUser: @unchecked Sendable {
     func send(_ entryId: String, to recipients: [TestUser], model: String = "testModel",
               payload: Data = Data("hello".utf8)) async throws -> SendReport {
         try await client.send(to: recipients.map(\.userId), modelKey: model, entryId: entryId,
-                              sentAt: UInt64(Date().timeIntervalSince1970 * 1000), payload: payload, acceptedDeviceIds: [])
+                              sentAt: UInt64(Date().timeIntervalSince1970 * 1000), payload: payload)
     }
 
     func sendRaw(_ message: Obscura_Client_V1_ClientMessage, to user: TestUser) async throws {

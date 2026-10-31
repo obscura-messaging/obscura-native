@@ -51,7 +51,6 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
                 .setContent(ByteString.copyFrom(ciphertext.serialize()))
                 .build()
             SendMessageRequest.Submission.newBuilder()
-                .setSubmissionId(UuidCodec.uuidToBytes(UUID.randomUUID()))
                 .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(deviceId)))
                 .setMessage(encrypted.toByteString())
                 .build()
@@ -63,9 +62,14 @@ internal class Messenger(private val signalStore: SignalStore, private val api: 
      * failures leave every result unknown.
      */
     suspend fun submit(userIds: List<String>, submissions: List<UserSubmission>): SubmitOutcome = try {
+        val byUser = submissions.groupBy({ it.userId }, { it.submission })
         val request = SendMessageRequest.newBuilder()
-            .addAllMessages(submissions.map { it.submission })
-            .addAllRecipientUserIds(userIds.map { UuidCodec.uuidToBytes(UUID.fromString(it)) })
+            .addAllRecipients(userIds.distinct().map { userId ->
+                SendMessageRequest.Recipient.newBuilder()
+                    .setUserId(UuidCodec.uuidToBytes(UUID.fromString(userId)))
+                    .addAllSubmissions(byUser[userId].orEmpty())
+                    .build()
+            })
             .build()
         decodeSubmissionResults(userIds, submissions, SendMessageResponse.parseFrom(api.sendMessage(request.toByteArray())))
     } catch (e: CancellationException) {
