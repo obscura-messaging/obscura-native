@@ -104,6 +104,7 @@ message LinkBundle {
   repeated FriendRecord friends = 5;
   // Absent when the primary's entry store is empty.
   HistorySnapshot history = 6;
+  string primary_device_id = 7;
 }
 
 // An attachment holding a serialized EntrySnapshot, encrypted like any attachment.

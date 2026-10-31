@@ -30,7 +30,7 @@ class AccountTest {
 
     /** The server's account state for one user. */
     private class Account {
-        var devices = listOf<Pair<String, Boolean>>()
+        var devices = listOf(SELF_DEVICE_ID to true)
         var loginDeviceId: String? = null
         var linkBody: ByteArray? = null
         var linkStatus = 200

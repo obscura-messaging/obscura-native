@@ -127,7 +127,7 @@ class ObscuraClient(
             onRejected = { credentials, generation -> endSession(revoke = false, expected = credentials, expectedGeneration = generation) },
         )
         authRef = auth
-        gateway = GatewayConnection(api, scope, beforeConnect = { ownDevices(requireFreshToken()) }, log = ::log)
+        gateway = GatewayConnection(api, scope, beforeConnect = { requireFreshToken() }, log = ::log)
         messenger = Messenger(signalStore, api)
         sender = MessageSender(api, messenger, devices) { auth.credentials?.deviceId }
     }
@@ -192,6 +192,9 @@ class ObscuraClient(
             throw ObscuraError.ProtocolViolation("Invalid link bundle", e)
         }
         if (bundle.userId != request.userId) throw ObscuraError.ProtocolViolation("Link bundle is for another account")
+        if (!dev.barrelmaker.obscura.kit.network.isUuid(bundle.primaryDeviceId)) {
+            throw ObscuraError.ProtocolViolation("Invalid primary device in link bundle")
+        }
         val identity = try {
             IdentityKeyPair(bundle.identityKeyPair.toByteArray())
         } catch (e: Exception) {
@@ -201,7 +204,7 @@ class ObscuraClient(
             WireCodec.decodeFriend(it) ?: throw ObscuraError.ProtocolViolation("Invalid friend in link bundle")
         })
         auth.provisionLinked(
-            request.userId, request.username, request.deviceName,
+            request.userId, bundle.primaryDeviceId, request.username, request.deviceName,
             SignalKeyUtils.generateProvisioningKeys(identity), request.sessionId,
         ) { friends.replaceInTransaction(friendList) }
         if (bundle.hasHistory()) importHistory(bundle.history)
@@ -241,6 +244,7 @@ class ObscuraClient(
             .setIdentityKeyPair(ByteString.copyFrom(signalStore.identityKeyPair.serialize()))
             .setUserId(self.userId)
             .setUsername(self.username)
+            .setPrimaryDeviceId(self.deviceId)
             .setFriendListVersion(friendList.version)
             .addAllFriends(friendList.friends.map(WireCodec::encodeFriend))
         exportHistory()?.let { bundle.setHistory(it) }
@@ -276,7 +280,9 @@ class ObscuraClient(
     /** The account's devices. */
     suspend fun devices(): List<DeviceInfo> {
         val self = requireFreshToken()
-        return ownDevices(self).map { DeviceInfo(it.deviceId, it.name, it.isPrimary, it.deviceId == self.deviceId) }
+        val list = api.fetchOwnDevices()
+        if (list.count { it.isPrimary } != 1) throw ObscuraError.ProtocolViolation("The account has no primary device")
+        return list.map { DeviceInfo(it.deviceId, it.name, it.isPrimary, it.deviceId == self.deviceId) }
     }
 
     /**
@@ -788,7 +794,7 @@ class ObscuraClient(
     suspend fun removeFriend(userId: String) {
         requirePrimary()
         val removed = friends.remove(userId)
-        devices.replace(userId, emptyList())
+        devices.removeByUser(userId)
         if (removed) syncFriendList()
     }
 
@@ -817,16 +823,6 @@ class ObscuraClient(
         val self = requireFreshToken()
         if (!isPrimary()) throw ObscuraError.NotPrimary()
         return self
-    }
-
-    /** The account's devices from the server; this device's directory and primary follow them. */
-    private suspend fun ownDevices(self: Credentials): List<OwnDevice> {
-        val list = api.fetchOwnDevices()
-        if (auth.credentials?.deviceId == self.deviceId && auth.credentials?.userId == self.userId) {
-            devices.replace(self.userId, list.map { it.deviceId })
-            devices.setPrimary(list.singleOrNull { it.isPrimary }?.deviceId)
-        }
-        return list
     }
 
     private fun clientMessage(build: ClientMessage.Builder.() -> Unit): ClientMessage =

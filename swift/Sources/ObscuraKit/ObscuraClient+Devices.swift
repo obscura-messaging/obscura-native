@@ -23,6 +23,7 @@ public struct DeviceInfo: Sendable, Equatable {
 /// What a decrypted `LinkBundle` gives the new device.
 struct LinkContents {
     let identity: IdentityKeyPair
+    let primaryDeviceId: String
     let friends: [(userId: String, username: String, status: FriendStatus)]
     let friendListVersion: UInt64
     let history: Obscura_Client_V1_HistorySnapshot?
@@ -70,7 +71,7 @@ extension ObscuraClient {
         let session = try session(response, username: request.username)
         try await db.write { db in
             try PersistentSignalStore.install(keys, in: db)
-            try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: nil, in: db)
+            try DeviceStore.setLocalDevice(session.deviceId, primaryDeviceId: contents.primaryDeviceId, in: db)
             try DeviceStore.add(userId: session.userId, deviceId: session.deviceId, in: db)
             try FriendStore.replace(contents.friends, version: contents.friendListVersion, in: db)
         }
@@ -112,7 +113,11 @@ extension ObscuraClient {
         do {
             let bundle = try Obscura_Client_V1_LinkBundle(serializedBytes: plaintext)
             guard bundle.userID == userId else { throw ObscuraError.protocolViolation("link bundle is for user \(bundle.userID)") }
+            guard UUID(uuidString: bundle.primaryDeviceID) != nil else {
+                throw ObscuraError.protocolViolation("invalid primary device id in link bundle")
+            }
             return LinkContents(identity: try IdentityKeyPair(bytes: bundle.identityKeyPair),
+                                primaryDeviceId: bundle.primaryDeviceID,
                                 friends: try WireCodec.friends(bundle.friends),
                                 friendListVersion: bundle.friendListVersion,
                                 history: bundle.hasHistory ? bundle.history : nil)
@@ -139,6 +144,7 @@ extension ObscuraClient {
         bundle.identityKeyPair = Data(try signalStore.identityKeyPair(context: NullContext()).serialize())
         bundle.userID = session.userId
         bundle.username = session.username
+        bundle.primaryDeviceID = session.deviceId
         let friendList = try await friends.listSync()
         bundle.friendListVersion = friendList.version
         bundle.friends = friendList.friends
@@ -161,7 +167,13 @@ extension ObscuraClient {
 
     public func devices() async throws -> [DeviceInfo] {
         let session = try await requireFreshSession()
-        return try await listOwnDevices().map {
+        let generation = sessionGeneration
+        let list = try await api.listDevices()
+        guard generation == sessionGeneration else { throw CancellationError() }
+        guard list.filter(\.isPrimary).count == 1 else {
+            throw ObscuraError.protocolViolation("the account has no primary device")
+        }
+        return list.map {
             DeviceInfo(deviceId: $0.deviceId, name: $0.name, isPrimary: $0.isPrimary, isThisDevice: $0.deviceId == session.deviceId)
         }
     }
@@ -182,19 +194,5 @@ extension ObscuraClient {
             try await signOut(revoking: false)
             try await ObscuraDatabase.wipe(db)
         }
-    }
-
-    /// The account's devices from the server, confirming which one is the primary.
-    @discardableResult
-    func listOwnDevices() async throws -> [DeviceResponse] {
-        _ = try requireSession()
-        let generation = sessionGeneration
-        let list = try await api.listDevices()
-        guard generation == sessionGeneration else { throw CancellationError() }
-        guard let primary = list.first(where: \.isPrimary) else {
-            throw ObscuraError.protocolViolation("the account has no primary device")
-        }
-        try await directory.setPrimaryDeviceId(primary.deviceId)
-        return list
     }
 }

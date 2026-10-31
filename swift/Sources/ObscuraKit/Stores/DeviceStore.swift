@@ -30,7 +30,7 @@ actor DeviceStore {
         try Bool.fetchOne(db, sql: "SELECT device_id = primary_device_id FROM device_identity WHERE id = 1") ?? false
     }
 
-    static func setLocalDevice(_ deviceId: String, primaryDeviceId: String?, in db: Database) throws {
+    static func setLocalDevice(_ deviceId: String, primaryDeviceId: String, in db: Database) throws {
         try db.execute(sql: "INSERT OR REPLACE INTO device_identity (id, device_id, primary_device_id) VALUES (1, ?, ?)",
                        arguments: [deviceId, primaryDeviceId])
     }
@@ -48,7 +48,7 @@ actor DeviceStore {
     }
 
     static func add(userId: String, deviceId: String, in db: Database) throws {
-        try db.execute(sql: "INSERT OR IGNORE INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
+        try db.execute(sql: "INSERT OR REPLACE INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
     }
 
     func remove(userId: String, deviceIds: [String]) async throws {
@@ -56,13 +56,6 @@ actor DeviceStore {
             for deviceId in deviceIds {
                 try db.execute(sql: "DELETE FROM devices WHERE user_id = ? AND device_id = ?", arguments: [userId, deviceId])
             }
-        }
-    }
-
-    func setPrimaryDeviceId(_ primaryDeviceId: String) async throws {
-        try await db.write { db in
-            try db.execute(sql: "UPDATE device_identity SET primary_device_id = ? WHERE id = 1", arguments: [primaryDeviceId])
-            guard db.changesCount == 1 else { throw DatabaseError(message: "no local device to update") }
         }
     }
 }

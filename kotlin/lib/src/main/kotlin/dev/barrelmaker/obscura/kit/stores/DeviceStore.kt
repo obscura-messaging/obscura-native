@@ -4,8 +4,8 @@ import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** This device and the account's primary; null until known on a linked device. */
-internal data class LocalDevice(val deviceId: String, val primaryDeviceId: String?) {
+/** This device and the account's primary device. */
+internal data class LocalDevice(val deviceId: String, val primaryDeviceId: String) {
     val isPrimary get() = deviceId == primaryDeviceId
 }
 
@@ -27,8 +27,6 @@ internal class DeviceStore(private val db: ObscuraDatabase) {
         queries.insert(userId, local.deviceId)
     }
 
-    suspend fun setPrimary(primaryDeviceId: String?) = withContext(dispatcher) { queries.updatePrimary(primaryDeviceId) }
-
     suspend fun add(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
         db.transaction { deviceIds.forEach { addInTransaction(userId, it) } }
     }
@@ -37,6 +35,10 @@ internal class DeviceStore(private val db: ObscuraDatabase) {
 
     suspend fun remove(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
         db.transaction { deviceIds.forEach { queries.delete(userId, it) } }
+    }
+
+    suspend fun removeByUser(userId: String) = withContext(dispatcher) {
+        queries.deleteByUser(userId)
     }
 
     suspend fun devicesOf(userId: String): List<String> = withContext(dispatcher) {

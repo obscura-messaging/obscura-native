@@ -377,6 +377,8 @@ nonisolated struct Obscura_Client_V1_LinkBundle: Sendable {
   /// Clears the value of `history`. Subsequent reads from it will return its default value.
   mutating func clearHistory() {self._history = nil}
 
+  var primaryDeviceID: String = String()
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -895,7 +897,7 @@ nonisolated extension Obscura_Client_V1_LinkEnvelope: SwiftProtobuf.Message, Swi
 
 nonisolated extension Obscura_Client_V1_LinkBundle: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".LinkBundle"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}identity_key_pair\0\u{3}user_id\0\u{1}username\0\u{3}friend_list_version\0\u{1}friends\0\u{1}history\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}identity_key_pair\0\u{3}user_id\0\u{1}username\0\u{3}friend_list_version\0\u{1}friends\0\u{1}history\0\u{3}primary_device_id\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -909,6 +911,7 @@ nonisolated extension Obscura_Client_V1_LinkBundle: SwiftProtobuf.Message, Swift
       case 4: try { try decoder.decodeSingularUInt64Field(value: &self.friendListVersion) }()
       case 5: try { try decoder.decodeRepeatedMessageField(value: &self.friends) }()
       case 6: try { try decoder.decodeSingularMessageField(value: &self._history) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.primaryDeviceID) }()
       default: break
       }
     }
@@ -937,6 +940,9 @@ nonisolated extension Obscura_Client_V1_LinkBundle: SwiftProtobuf.Message, Swift
     try { if let v = self._history {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
     } }()
+    if !self.primaryDeviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.primaryDeviceID, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -947,6 +953,7 @@ nonisolated extension Obscura_Client_V1_LinkBundle: SwiftProtobuf.Message, Swift
     if lhs.friendListVersion != rhs.friendListVersion {return false}
     if lhs.friends != rhs.friends {return false}
     if lhs._history != rhs._history {return false}
+    if lhs.primaryDeviceID != rhs.primaryDeviceID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

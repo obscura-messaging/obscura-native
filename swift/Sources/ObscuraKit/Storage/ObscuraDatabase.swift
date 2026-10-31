@@ -56,9 +56,7 @@ enum ObscuraDatabase {
                 CREATE TABLE friends (
                     user_id BLOB PRIMARY KEY,
                     username BLOB NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
+                    status TEXT NOT NULL
                 );
                 CREATE TABLE friend_list_version (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -67,13 +65,13 @@ enum ObscuraDatabase {
                 CREATE TABLE device_identity (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     device_id TEXT NOT NULL,
-                    primary_device_id TEXT
+                    primary_device_id TEXT NOT NULL
                 );
                 CREATE TABLE devices (
-                    user_id TEXT NOT NULL,
-                    device_id TEXT NOT NULL,
-                    PRIMARY KEY (user_id, device_id)
+                    device_id TEXT NOT NULL PRIMARY KEY,
+                    user_id TEXT NOT NULL
                 );
+                CREATE INDEX devices_user_id ON devices(user_id);
                 CREATE TABLE signal_local_identity (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     key_pair BLOB NOT NULL,

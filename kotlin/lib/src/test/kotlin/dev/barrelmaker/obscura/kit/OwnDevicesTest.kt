@@ -27,19 +27,18 @@ class OwnDevicesTest {
 
     private fun paths() = List(server.requestCount) { server.takeRequest().url.encodedPath }
 
-    @Test fun `connect stores the own directory and primary from the device list without fetching bundles`() = runBlocking {
-        val c = sessionClient(url, storedSession())
+    @Test fun `connect does not list devices or consume prekeys`() = runBlocking {
+        val c = sessionClient(url, storedSession(), primaryDeviceId = other)
         assertTrue(c.auth.restore())
-        server.enqueue(deviceList(primary = other))
         server.enqueue(MockResponse.Builder().code(500).build())
 
         assertTrue(runCatching { c.connect() }.isFailure)
 
-        assertEquals(listOf(SELF_DEVICE_ID, other).sorted(), c.devices.devicesOf(SELF_USER_ID))
+        assertEquals(listOf(SELF_DEVICE_ID), c.devices.devicesOf(SELF_USER_ID))
         assertFalse(c.isPrimary())
         assertEquals(0L, c.db.signalKeyQueries.countPreKeys().executeAsOne())
         assertFalse(c.signalStore.containsSession(Messenger.addressFor(other)))
-        assertEquals(listOf("/v1/devices", "/v1/gateway/ticket"), paths())
+        assertEquals(listOf("/v1/gateway/ticket"), paths())
         c.auth.end()
         Unit
     }
@@ -103,7 +102,7 @@ class OwnDevicesTest {
 
         assertEquals(AuthState.LOGGED_OUT, c.authState.value)
         assertNull(storage.data)
-        assertEquals(listOf("/v1/devices", "/v1/session/refresh"), paths())
+        assertEquals(listOf("/v1/gateway/ticket", "/v1/session/refresh"), paths())
     }
 
     @Test fun `the primary cannot unlink itself`() = runBlocking {

@@ -79,6 +79,9 @@ extension ObscuraClient {
     /// Primary only.
     public func acceptFriend(_ userId: String) async throws {
         try await requirePrimary()
+        guard try await friends.friend(userId) != nil else {
+            throw ObscuraError.invalidArgument("no friend request from \(userId)")
+        }
         try await sendFriendAccept(to: userId)
         try await friends.updateStatus(userId, .accepted)
         try await syncFriendList()

@@ -72,7 +72,7 @@ data. There are no compatibility migrations.
 | `login` -> `invalidCredentials` | Credentials rejected with 401/403; stays logged out |
 | `beginLink(username, password, deviceName)` | After `linkRequired`: reuses the link session from `login` (or opens a new one) and returns a `LinkRequest` whose `code` is shown to the primary |
 | `linkCodeDeviceName(code)` | Returns the `deviceName` encoded in a `LinkCode` without network I/O |
-| `approveLink(code)` | Primary only (`NOT_PRIMARY` otherwise): encrypts the account identity, versioned friend list, and `HistorySnapshot` into a `LinkEnvelope` and uploads it to the link session |
+| `approveLink(code)` | Primary only (`NOT_PRIMARY` otherwise): encrypts the account identity, primary device id, versioned friend list, and `HistorySnapshot` into a `LinkEnvelope` and uploads it to the link session |
 | `completeLink(request)` | Polls `GET /v1/link-sessions/{id}` until approved (`LINK_FAILED` on 404, expiry, or decryption failure), provisions this device via `POST /v1/devices` with keys signed by the account identity, imports friends and history, and connects |
 | `resetAccount(username, password)` | Deletes all devices and replaces the account identity on the server while provisioning this device as the new primary (`POST /v1/users/reset`), wipes old local data, and installs the new primary session |
 | `isPrimary` | Whether this device is the account's primary device |

@@ -87,6 +87,7 @@ final class LinkingTests: XCTestCase {
         let body = try XCTUnwrap(server.linkSession(sessionId)?.body)
         let contents = try ObscuraClient.open(body, privateKey: Data(newDevice.serialize()), userId: phone.userId)
         XCTAssertEqual(contents.identity.serialize(), try phone.store.identityKeyPair(context: NullContext()).serialize())
+        XCTAssertEqual(contents.primaryDeviceId, phone.deviceId)
         XCTAssertEqual(contents.friendListVersion, 2)
         XCTAssertEqual(contents.friends.map(\.userId), ["bob-id", "carol-id"])
         XCTAssertEqual(contents.friends.map(\.status), [.accepted, .pendingSent])
@@ -129,6 +130,7 @@ final class LinkingTests: XCTestCase {
         var bundle = Obscura_Client_V1_LinkBundle()
         bundle.identityKeyPair = Data(IdentityKeyPair.generate().serialize())
         bundle.userID = "alice-id"
+        bundle.primaryDeviceID = phone.deviceId
         let body = try LinkCrypto.seal(bundle.serializedData(), to: newDevice.publicKey).serializedData()
         XCTAssertNoThrow(try ObscuraClient.open(body, privateKey: Data(newDevice.serialize()), userId: "alice-id"))
 

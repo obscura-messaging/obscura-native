@@ -59,20 +59,20 @@ fun storedSession(
 ))
 
 /** Authenticated through the stored-session path, with no server to connect to. */
-suspend fun authenticatedClient(storage: MemoryStorage = storedSession(), primaryDeviceId: String? = SELF_DEVICE_ID): ObscuraClient {
+suspend fun authenticatedClient(storage: MemoryStorage = storedSession(), primaryDeviceId: String = SELF_DEVICE_ID): ObscuraClient {
     val client = sessionClient(apiUrl = "http://127.0.0.1:1", storage = storage, primaryDeviceId = primaryDeviceId)
     check(client.restorePersistedSession())
     return client
 }
 
 /** A provisioned device ([SELF_DEVICE_ID] of [SELF_USER_ID]), primary unless [primaryDeviceId] says otherwise. */
-suspend fun sessionClient(apiUrl: String, storage: SessionStorage, primaryDeviceId: String? = SELF_DEVICE_ID): ObscuraClient =
+suspend fun sessionClient(apiUrl: String, storage: SessionStorage, primaryDeviceId: String = SELF_DEVICE_ID): ObscuraClient =
     newClient(apiUrl, storage).also {
         it.signalStore.generateIdentity()
         it.storeLocalDevice(primaryDeviceId)
     }
 
-suspend fun ObscuraClient.storeLocalDevice(primaryDeviceId: String? = SELF_DEVICE_ID, deviceId: String = SELF_DEVICE_ID, userId: String = SELF_USER_ID) =
+suspend fun ObscuraClient.storeLocalDevice(primaryDeviceId: String = SELF_DEVICE_ID, deviceId: String = SELF_DEVICE_ID, userId: String = SELF_USER_ID) =
     withContext(Dispatchers.IO) { devices.storeLocalInTransaction(userId, LocalDevice(deviceId, primaryDeviceId)) }
 
 /** A new local identity, as provisioning installs one. */

@@ -166,7 +166,7 @@ public actor ObscuraClient {
     public var deviceId: String? { session?.deviceId }
 
     /// Whether this device is the account's primary: provisioned first, the only one that links and
-    /// unlinks devices and changes the friend list. Confirmed from the server on every connect.
+    /// unlinks devices and changes the friend list.
     public var isPrimary: Bool {
         get async throws { try await directory.isPrimary() }
     }

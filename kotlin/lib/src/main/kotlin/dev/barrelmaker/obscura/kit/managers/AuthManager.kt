@@ -104,7 +104,7 @@ internal class AuthManager(
         validateLogin(username, password)
         requireUnprovisioned()
         val keys = newIdentityKeys()
-        install(api.registerUser(username, password, deviceName, keys.toDeviceKeys()), username, keys, isPrimary = true)
+        install(api.registerUser(username, password, deviceName, keys.toDeviceKeys()), username, keys)
     }
 
     /**
@@ -117,7 +117,7 @@ internal class AuthManager(
         val keys = newIdentityKeys()
         val response = api.resetAccount(username, password, deviceName, keys.toDeviceKeys())
         beforeInstall()
-        commitInstall(response, username, keys, isPrimary = true)
+        install(response, username, keys)
     }
 
     /** Consumes the link session cached by [login], or creates a new one if none is cached. */
@@ -168,6 +168,7 @@ internal class AuthManager(
      */
     suspend fun provisionLinked(
         expectedUserId: String,
+        primaryDeviceId: String,
         username: String,
         name: String,
         keys: ProvisioningKeys,
@@ -175,34 +176,24 @@ internal class AuthManager(
         persist: () -> Unit = {},
     ) {
         val response = api.provisionDevice(name, keys.toDeviceKeys(), linkSessionId)
-        install(response, username, keys, isPrimary = false, expectedUserId = expectedUserId, persist = persist)
+        install(response, username, keys, primaryDeviceId = primaryDeviceId, expectedUserId = expectedUserId, persist = persist)
     }
 
     private suspend fun install(
         response: AuthResponse,
         username: String,
         keys: ProvisioningKeys,
-        isPrimary: Boolean,
+        primaryDeviceId: String = response.deviceId,
         expectedUserId: String? = null,
         persist: () -> Unit = {},
     ) {
         if (expectedUserId != null && response.userId != expectedUserId) {
             throw ObscuraError.ProtocolViolation("Provisioning returned another account")
         }
-        commitInstall(response, username, keys, isPrimary, persist)
-    }
-
-    private suspend fun commitInstall(
-        response: AuthResponse,
-        username: String,
-        keys: ProvisioningKeys,
-        isPrimary: Boolean,
-        persist: () -> Unit = {},
-    ) {
         withContext(Dispatchers.IO) {
             signalStore.transaction {
                 SignalKeyUtils.install(signalStore, keys)
-                devices.storeLocalInTransaction(response.userId, LocalDevice(response.deviceId, primaryDeviceId = response.deviceId.takeIf { isPrimary }))
+                devices.storeLocalInTransaction(response.userId, LocalDevice(response.deviceId, primaryDeviceId = primaryDeviceId))
                 persist()
             }
         }

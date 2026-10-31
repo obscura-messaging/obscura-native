@@ -66,6 +66,7 @@ class LinkConformanceTest {
         assertEquals(expected.getString("identityKeyPair"), bundle.identityKeyPair.toByteArray().hex())
         assertEquals(expected.getString("userId"), bundle.userId)
         assertEquals(expected.getString("username"), bundle.username)
+        assertEquals(expected.getString("primaryDeviceId"), bundle.primaryDeviceId)
         assertEquals(expected.getLong("friendListVersion"), bundle.friendListVersion)
         val friends = objects(expected.getJSONArray("friends")).map {
             FriendData(it.getString("userId"), it.getString("username"), status(it.getString("status")))
@@ -89,6 +90,7 @@ class LinkConformanceTest {
             .setIdentityKeyPair(ByteString.copyFrom(rebuilt.serialize()))
             .setUserId(expected.getString("userId"))
             .setUsername(expected.getString("username"))
+            .setPrimaryDeviceId(expected.getString("primaryDeviceId"))
             .setFriendListVersion(expected.getLong("friendListVersion"))
             .addAllFriends(friends.map(WireCodec::encodeFriend))
         if (expected.has("history")) {

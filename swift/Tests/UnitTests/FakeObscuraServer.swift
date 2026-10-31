@@ -128,6 +128,11 @@ final class FakeObscuraServer: @unchecked Sendable {
             lock.withLock { idempotencyKeys.append(request.value(forHTTPHeaderField: "Idempotency-Key") ?? "") }
             return accept(from: callerDevice, body)
         }
+        if request.httpMethod == "POST", path == "/v1/gateway/ticket" {
+            return lock.withLock {
+                caller(token) == nil ? (401, Data()) : (503, Data("fake gateway is unavailable".utf8))
+            }
+        }
         if request.httpMethod == "DELETE", path == "/v1/session" { return (204, Data()) }
         if path == "/v1/session/refresh" {
             return lock.withLock { refreshed.map { (200, try! JSONSerialization.data(withJSONObject: $0)) } ?? (401, Data()) }

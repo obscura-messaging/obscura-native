@@ -14,12 +14,12 @@ class DeviceStoreTest {
     @Test
     fun `this device round-trips with its own directory entry and the primary`() = runTest {
         assertNull(devices.getLocal())
-        devices.storeLocalInTransaction("me", LocalDevice("device-1", primaryDeviceId = null))
-        assertEquals(LocalDevice("device-1", null), devices.getLocal())
+        devices.storeLocalInTransaction("me", LocalDevice("device-1", primaryDeviceId = "primary-1"))
+        assertEquals(LocalDevice("device-1", "primary-1"), devices.getLocal())
         assertFalse(devices.getLocal()!!.isPrimary)
         assertEquals(listOf("device-1"), devices.devicesOf("me"))
 
-        devices.setPrimary("device-1")
+        devices.storeLocalInTransaction("me", LocalDevice("device-1", primaryDeviceId = "device-1"))
         assertTrue(devices.getLocal()!!.isPrimary)
         assertEquals("device-1", devices.getIdentity())
     }

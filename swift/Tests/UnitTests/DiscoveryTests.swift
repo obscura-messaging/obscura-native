@@ -32,12 +32,11 @@ final class DiscoveryTests: XCTestCase {
         try await client.logout()
     }
 
-    func testConnectConfirmsThePrimaryWithoutTouchingTheDirectoryOrConsumingPrekeys() async throws {
+    func testConnectDoesNotListDevicesOrConsumePrekeys() async throws {
         let userId = user()
         let phone = try await server.register(userId)
         let laptop = try await server.register(userId)
         let client = try await authenticatedClient(laptop)
-        try await client.db.write { try $0.execute(sql: "UPDATE device_identity SET primary_device_id = 'stale'") }
 
         do { try await client.connect(); XCTFail("fake gateway is unavailable") } catch {}
 
@@ -47,23 +46,10 @@ final class DiscoveryTests: XCTestCase {
         XCTAssertFalse(isPrimary)
         let ids = try await client.directory.deviceIds(of: userId)
         XCTAssertEqual(ids, [laptop.deviceId], "the directory learns devices from sends and receives only")
-        XCTAssertEqual(server.deviceListFetches(userId), 1)
+        XCTAssertEqual(server.deviceListFetches(userId), 0)
         XCTAssertEqual(server.bundleFetches(userId), 0)
         XCTAssertEqual(phone.remainingPreKeys, 100)
         XCTAssertEqual(laptop.remainingPreKeys, 100)
-        try await client.logout()
-    }
-
-    func testADeviceListFailureFailsConnect() async throws {
-        let own = try await server.register(user())
-        let client = try await authenticatedClient(own)
-        server.failDeviceList(status: 500)
-
-        do { try await client.connect(); XCTFail("connect device list failure must throw") }
-        catch { XCTAssertEqual(error as? ObscuraError, .http(status: 500, body: "device list failed")) }
-
-        XCTAssertEqual(client.connectionState, .disconnected)
-        XCTAssertTrue(client.getDebugLog().contains { $0.contains("gateway connect failed") })
         try await client.logout()
     }
 

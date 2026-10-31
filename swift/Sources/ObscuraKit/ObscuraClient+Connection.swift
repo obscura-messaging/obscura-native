@@ -53,8 +53,6 @@ extension ObscuraClient {
         do {
             guard try await freshToken() != .rejected else { throw ObscuraError.notAuthenticated }
             guard generation == connectionGeneration else { throw CancellationError() }
-            try await listOwnDevices()
-            guard generation == connectionGeneration else { throw CancellationError() }
             let socket = try await GatewaySocket.open(gatewayURL(ticket: api.fetchGatewayTicket()), logger: logger)
             guard generation == connectionGeneration, session != nil else {
                 socket.close()

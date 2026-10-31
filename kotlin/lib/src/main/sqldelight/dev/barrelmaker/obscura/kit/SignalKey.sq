@@ -26,11 +26,6 @@ CREATE TABLE IF NOT EXISTS SignalSession (
     record BLOB NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS SignalSenderKey (
-    address TEXT NOT NULL PRIMARY KEY,
-    record BLOB NOT NULL
-);
-
 selectLocalIdentity:
 SELECT * FROM SignalLocalIdentity WHERE id = 1;
 
@@ -108,12 +103,3 @@ DELETE FROM SignalSession WHERE address IN (SELECT device_id || '.1' FROM Device
 
 deleteAllSessions:
 DELETE FROM SignalSession;
-
-selectSenderKey:
-SELECT record FROM SignalSenderKey WHERE address = ?;
-
-insertSenderKey:
-INSERT OR REPLACE INTO SignalSenderKey(address, record) VALUES (?, ?);
-
-deleteAllSenderKeys:
-DELETE FROM SignalSenderKey;

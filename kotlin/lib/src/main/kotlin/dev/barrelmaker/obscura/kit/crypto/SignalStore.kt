@@ -48,7 +48,6 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
             queries.deleteAllPreKeys()
             queries.deleteAllSignedPreKeys()
             queries.deleteAllSessions()
-            queries.deleteAllSenderKeys()
         }
         localIdentity = null
     }
@@ -155,10 +154,10 @@ internal class SignalStore(private val db: ObscuraDatabase) : SignalProtocolStor
     override fun deleteAllSessions(name: String) = queries.deleteSessionsByPrefix("$name.%")
 
     override fun storeSenderKey(sender: SignalProtocolAddress, distributionId: UUID, record: SenderKeyRecord) =
-        queries.insertSenderKey("${sender.key()}::$distributionId", record.serialize())
+        throw UnsupportedOperationException("No sender keys")
 
     override fun loadSenderKey(sender: SignalProtocolAddress, distributionId: UUID): SenderKeyRecord? =
-        queries.selectSenderKey("${sender.key()}::$distributionId").executeAsOneOrNull()?.let(::SenderKeyRecord)
+        throw UnsupportedOperationException("No sender keys")
 
     override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord = throw InvalidKeyIdException("No Kyber prekeys")
     override fun loadKyberPreKeys(): List<KyberPreKeyRecord> = emptyList()

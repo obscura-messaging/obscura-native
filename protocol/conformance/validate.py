@@ -165,12 +165,13 @@ def check_link(rep: Report, doc: dict) -> None:
                 continue
             b, wb = e["linkBundle"], w + " linkBundle"
             rep.only_keys(wb, b, {"identityPrivateKey", "identityPublicKey", "identityKeyPair", "userId", "username",
-                                  "friendListVersion", "friends", "history"})
+                                  "primaryDeviceId", "friendListVersion", "friends", "history"})
             _is_hex(rep, wb, b, "identityPrivateKey", 32)
             _is_hex(rep, wb, b, "identityPublicKey", 33)
             _is_hex(rep, wb, b, "identityKeyPair")
             rep.is_str(wb, b, "userId")
             rep.is_str(wb, b, "username")
+            rep.is_str(wb, b, "primaryDeviceId")
             _is_uint(rep, wb, b, "friendListVersion")
             if not isinstance(b.get("friends"), list):
                 rep.err(wb, "'friends' must be an array")

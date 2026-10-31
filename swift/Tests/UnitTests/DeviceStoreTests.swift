@@ -46,22 +46,10 @@ final class DeviceStoreTests: XCTestCase {
 
         let local = try await devices.localDeviceId()
         let linked = try await devices.isPrimary()
+        let primaryId = try await devices.primaryDeviceId()
         XCTAssertEqual(local, "second")
+        XCTAssertEqual(primaryId, "first")
         XCTAssertFalse(linked)
-    }
-
-    func testThePrimaryIsReplacedWithoutTouchingTheDirectory() async throws {
-        try await db.write { try DeviceStore.setLocalDevice("me-1", primaryDeviceId: "old-primary", in: $0) }
-        try await devices.add(userId: "me", deviceIds: ["me-1"])
-
-        try await devices.setPrimaryDeviceId("me-1")
-
-        let primary = try await devices.primaryDeviceId()
-        let isPrimary = try await devices.isPrimary()
-        let mine = try await devices.deviceIds(of: "me")
-        XCTAssertEqual(primary, "me-1")
-        XCTAssertTrue(isPrimary)
-        XCTAssertEqual(mine, ["me-1"])
     }
 
     func testRemovingAFriendForgetsTheirDevices() async throws {

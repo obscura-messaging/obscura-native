@@ -11,8 +11,6 @@ public struct Friend: Codable, Sendable, Equatable {
     public let userId: String
     public let username: String
     public let status: FriendStatus
-    public let createdAt: UInt64
-    public let updatedAt: UInt64
 }
 
 /// The friend list and its version. Every change bumps the version in the same transaction; a
@@ -44,10 +42,9 @@ actor FriendStore {
     }
 
     static func add(_ userId: String, username: String, status: FriendStatus, in db: Database) throws {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         try db.execute(sql: """
-            INSERT OR REPLACE INTO friends (user_id, username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-        """, arguments: [userId.storedText, username.storedText, status.rawValue, now, now])
+            INSERT OR REPLACE INTO friends (user_id, username, status) VALUES (?, ?, ?)
+        """, arguments: [userId.storedText, username.storedText, status.rawValue])
         try bumpVersion(in: db)
     }
 
@@ -76,9 +73,8 @@ actor FriendStore {
     }
 
     static func updateStatus(_ userId: String, _ status: FriendStatus, in db: Database) throws {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        try db.execute(sql: "UPDATE friends SET status = ?, updated_at = ? WHERE user_id = ?",
-                       arguments: [status.rawValue, now, userId.storedText])
+        try db.execute(sql: "UPDATE friends SET status = ? WHERE user_id = ?",
+                       arguments: [status.rawValue, userId.storedText])
         guard db.changesCount == 1 else {
             throw DatabaseError(message: "friend \(userId) is missing; status was not updated")
         }
@@ -132,11 +128,10 @@ actor FriendStore {
                         in db: Database) throws {
         guard let stored = Int64(exactly: version) else { throw DatabaseError(message: "friend list version \(version)") }
         try db.execute(sql: "DELETE FROM friends")
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         for friend in friends {
             try db.execute(sql: """
-                INSERT INTO friends (user_id, username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-            """, arguments: [friend.userId.storedText, friend.username.storedText, friend.status.rawValue, now, now])
+                INSERT INTO friends (user_id, username, status) VALUES (?, ?, ?)
+            """, arguments: [friend.userId.storedText, friend.username.storedText, friend.status.rawValue])
         }
         try db.execute(sql: "INSERT OR REPLACE INTO friend_list_version (id, version) VALUES (1, ?)", arguments: [stored])
     }
@@ -146,7 +141,6 @@ actor FriendStore {
         guard let status = FriendStatus(rawValue: row["status"]) else {
             throw DatabaseError(message: "friend \(userId) has unknown status \(row["status"] as String)")
         }
-        return Friend(userId: userId, username: try row.text("username"), status: status,
-                      createdAt: UInt64(row["created_at"] as Int64), updatedAt: UInt64(row["updated_at"] as Int64))
+        return Friend(userId: userId, username: try row.text("username"), status: status)
     }
 }

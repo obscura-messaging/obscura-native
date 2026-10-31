@@ -62,6 +62,7 @@ final class LinkConformanceTests: XCTestCase {
         XCTAssertEqual(Data(rebuilt.serialize()), identityKeyPair, name)
         XCTAssertEqual(bundle.userID, expected["userId"] as? String, name)
         XCTAssertEqual(bundle.username, expected["username"] as? String, name)
+        XCTAssertEqual(bundle.primaryDeviceID, expected["primaryDeviceId"] as? String, name)
         XCTAssertEqual(bundle.friendListVersion, conformanceUInt64(expected["friendListVersion"]), name)
         let friends = try XCTUnwrap(expected["friends"] as? [[String: Any]])
         XCTAssertEqual(bundle.friends.map(\.userID), friends.map { $0["userId"] as? String ?? "" }, name)
