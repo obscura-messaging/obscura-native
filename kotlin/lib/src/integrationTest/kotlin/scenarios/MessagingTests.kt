@@ -25,7 +25,6 @@ class MessagingTests {
         assertEquals(emptyList<Any>(), report.selfSync, "a single-device sender has no other devices")
 
         val row = bob.awaitRow { it.entryId == "dm_1" }
-        assertEquals("APP_ENTRY", row.kind)
         assertEquals("directMessage", row.modelKey)
         assertEquals(1_700_000_000_000, row.sentAt)
         assertEquals(alice.userId, row.senderUserId)

@@ -12,6 +12,7 @@ data class StoredEntry(
     val id: String,
     val data: String,
     val sentAt: Long,
+    val authorUserId: String,
     val authorDeviceId: String,
     val localMetadata: String? = null,
 )
@@ -25,7 +26,7 @@ class EntryStore internal constructor(
     private val queries = db.modelEntryQueries
 
     suspend fun put(model: String, entry: StoredEntry) = withContext(dispatcher) {
-        queries.insertEntry(model, entry.id, entry.data, entry.sentAt, entry.authorDeviceId, entry.localMetadata)
+        queries.insertEntry(model, entry.id, entry.data, entry.sentAt, entry.authorUserId, entry.authorDeviceId, entry.localMetadata)
     }
 
     /** The stored entries among [ids], in no guaranteed order. */
@@ -39,13 +40,16 @@ class EntryStore internal constructor(
 
     /** Every entry of every model, without [StoredEntry.localMetadata]: what a history snapshot carries. */
     internal suspend fun export(): List<Pair<String, StoredEntry>> = withContext(dispatcher) {
-        queries.selectAll { model, id, data, sentAt, authorDeviceId, _ -> model to StoredEntry(id, data, sentAt, authorDeviceId) }
-            .executeAsList()
+        queries.selectAll { model, id, data, sentAt, authorUserId, authorDeviceId, _ ->
+            model to StoredEntry(id, data, sentAt, authorUserId, authorDeviceId)
+        }.executeAsList()
     }
 
     internal suspend fun import(entries: List<Pair<String, StoredEntry>>) = withContext(dispatcher) {
         db.transaction {
-            entries.forEach { (model, e) -> queries.insertEntry(model, e.id, e.data, e.sentAt, e.authorDeviceId, e.localMetadata) }
+            entries.forEach { (model, e) ->
+                queries.insertEntry(model, e.id, e.data, e.sentAt, e.authorUserId, e.authorDeviceId, e.localMetadata)
+            }
         }
     }
 
@@ -64,8 +68,15 @@ class EntryStore internal constructor(
     }
 
     @Suppress("UNUSED_PARAMETER")
-    private fun entry(model: String, id: String, data: String, sentAt: Long, authorDeviceId: String, localMetadata: String?) =
-        StoredEntry(id, data, sentAt, authorDeviceId, localMetadata)
+    private fun entry(
+        model: String,
+        id: String,
+        data: String,
+        sentAt: Long,
+        authorUserId: String,
+        authorDeviceId: String,
+        localMetadata: String?,
+    ) = StoredEntry(id, data, sentAt, authorUserId, authorDeviceId, localMetadata)
 }
 
 /** PRAGMAs go through `executeQuery` because several return a row, which Android's `execute` rejects. */

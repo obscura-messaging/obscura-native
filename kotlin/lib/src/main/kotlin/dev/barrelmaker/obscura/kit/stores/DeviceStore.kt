@@ -24,14 +24,20 @@ internal class DeviceStore(private val db: ObscuraDatabase) {
     /** This device and its own directory entry. Joins an enclosing transaction. */
     internal fun storeLocalInTransaction(userId: String, local: LocalDevice) = db.transaction {
         queries.insertIdentity(local.deviceId, local.primaryDeviceId)
-        queries.insert(userId, local.deviceId)
+        addInTransaction(userId, local.deviceId)
     }
 
     suspend fun add(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
         db.transaction { deviceIds.forEach { addInTransaction(userId, it) } }
     }
 
-    internal fun addInTransaction(userId: String, deviceId: String) = queries.insert(userId, deviceId)
+    internal fun addInTransaction(userId: String, deviceId: String) {
+        val existing = queries.selectUser(deviceId).executeAsOneOrNull()
+        if (existing != null && existing != userId) {
+            throw dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation("Device $deviceId belongs to $existing, not $userId")
+        }
+        queries.insert(userId, deviceId)
+    }
 
     suspend fun remove(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
         db.transaction { deviceIds.forEach { queries.delete(userId, it) } }

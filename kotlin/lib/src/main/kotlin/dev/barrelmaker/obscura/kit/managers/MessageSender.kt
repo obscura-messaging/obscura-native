@@ -63,6 +63,10 @@ internal class MessageSender(
                 val batchSubmissions = mutableListOf<UserSubmission>()
 
                 for (userId in pending) {
+                    if (!dev.barrelmaker.obscura.kit.network.isUuid(userId)) {
+                        settled[userId] = listOf(rejected(userId, "Invalid user ID: $userId"))
+                        continue
+                    }
                     try {
                         val targets = sessionTargets(userId)
                         if (targets == null) {

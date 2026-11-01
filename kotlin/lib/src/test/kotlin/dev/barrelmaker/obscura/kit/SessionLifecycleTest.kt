@@ -166,7 +166,7 @@ class SessionLifecycleTest {
         assertNull(c.userId)
         assertEquals(ConnectionState.DISCONNECTED, c.connectionState.value)
         assertEquals(emptyList<String>(), c.observeTyping("ctx").first())
-        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", "kept", 1, SELF_DEVICE_ID))
+        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", "kept", 1, SELF_USER_ID, SELF_DEVICE_ID))
         val wipeError = runCatching { c.wipeDevice() }.exceptionOrNull()
         assertTrue(wipeError is ObscuraError.StorageFailed)
         assertSame(storage.cause, wipeError!!.cause)
@@ -237,7 +237,7 @@ class SessionLifecycleTest {
         driver.pragma("PRAGMA journal_mode = WAL")
         val c = ObscuraClient(ObscuraConfig(url, "test"), driver, MemoryStorage())
         val secret = "DEVICE-WIPE-SECRET-83a10"
-        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", secret, 1, SELF_DEVICE_ID))
+        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", secret, 1, SELF_USER_ID, SELF_DEVICE_ID))
         fun onDisk() = listOf(file, java.io.File("${file.absolutePath}-wal")).filter { it.exists() }
             .any { String(it.readBytes(), Charsets.ISO_8859_1).contains(secret) }
         assertTrue(onDisk())

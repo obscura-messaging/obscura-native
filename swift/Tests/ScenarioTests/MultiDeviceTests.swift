@@ -161,10 +161,10 @@ final class MultiDeviceTests: XCTestCase {
 
     func testANewlyLinkedDeviceHasTheHistoryButNotTheLocalMetadata() async throws {
         let alice = try await TestUser.register()
-        let story = StoredEntry(id: "s1", data: #"{"text":"hi"}"#, sentAt: 1_706_389_200_000, authorDeviceId: alice.deviceId,
-                                localMetadata: "seen")
-        let pix = StoredEntry(id: "p1", data: "opaque", sentAt: 1_706_389_300_000, authorDeviceId: "some-peer-device",
-                              localMetadata: nil)
+        let story = StoredEntry(id: "s1", data: #"{"text":"hi"}"#, sentAt: 1_706_389_200_000,
+                                authorUserId: alice.userId, authorDeviceId: alice.deviceId, localMetadata: "seen")
+        let pix = StoredEntry(id: "p1", data: "opaque", sentAt: 1_706_389_300_000,
+                              authorUserId: "some-peer-user", authorDeviceId: "some-peer-device", localMetadata: nil)
         try await alice.client.entries.put(model: "story", entry: story)
         try await alice.client.entries.put(model: "pix", entry: pix)
 
@@ -173,7 +173,8 @@ final class MultiDeviceTests: XCTestCase {
         let stories = try await laptop.client.entries.all(model: "story")
         let pixes = try await laptop.client.entries.all(model: "pix")
         XCTAssertEqual(stories, [StoredEntry(id: story.id, data: story.data, sentAt: story.sentAt,
-                                             authorDeviceId: story.authorDeviceId, localMetadata: nil)])
+                                             authorUserId: story.authorUserId, authorDeviceId: story.authorDeviceId,
+                                             localMetadata: nil)])
         XCTAssertEqual(pixes, [pix])
         await laptop.client.disconnect()
     }

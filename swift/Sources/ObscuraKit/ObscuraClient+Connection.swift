@@ -225,18 +225,17 @@ extension ObscuraClient {
                         senderDeviceId: String, selfUserId: String?, in db: Database) throws -> PersistedContent {
         switch message.payload {
         case .appEntry(let entry)?:
+            guard !entry.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !entry.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .ignored("app entry with blank model or id")
+            }
             let inserted = try InboxStore.put(InboxInsert(
-                envelopeId: envelopeId, kind: "APP_ENTRY", senderUserId: senderUserId,
+                envelopeId: envelopeId, senderUserId: senderUserId,
                 senderDeviceId: senderDeviceId, modelKey: entry.model, entryId: entry.id,
                 sentAt: clampFuture(entry.timestamp), payload: entry.data), in: db)
             return .inboxed(modelKey: inserted ? entry.model : nil)
         case nil:
-            // An arm this kit does not know. Inboxed whole rather than destroyed.
-            _ = try InboxStore.put(InboxInsert(
-                envelopeId: envelopeId, kind: "UNKNOWN", senderUserId: senderUserId,
-                senderDeviceId: senderDeviceId, modelKey: nil, entryId: nil, sentAt: nil,
-                payload: message.serializedData()), in: db)
-            return .inboxed(modelKey: nil)
+            return .ignored("unknown client message arm")
         case .friendRequest(let request)?:
             guard try DeviceStore.isPrimary(in: db) else { return .ignored("friend request on a linked device") }
             switch try FriendStore.friend(senderUserId, in: db)?.status {

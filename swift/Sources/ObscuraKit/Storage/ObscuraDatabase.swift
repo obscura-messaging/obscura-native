@@ -97,12 +97,11 @@ enum ObscuraDatabase {
                 CREATE TABLE inbox_rows (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     envelope_id TEXT NOT NULL UNIQUE,
-                    kind TEXT NOT NULL,
                     sender_user_id TEXT NOT NULL,
-                    sender_device_id TEXT,
-                    model_key BLOB,
-                    entry_id BLOB,
-                    sent_at INTEGER,
+                    sender_device_id TEXT NOT NULL,
+                    model_key BLOB NOT NULL,
+                    entry_id BLOB NOT NULL,
+                    sent_at INTEGER NOT NULL,
                     payload BLOB NOT NULL
                 );
                 CREATE TABLE model_entries (
@@ -110,6 +109,7 @@ enum ObscuraDatabase {
                     id BLOB NOT NULL,
                     data BLOB NOT NULL,
                     timestamp INTEGER NOT NULL,
+                    author_user_id BLOB NOT NULL,
                     author_device_id BLOB NOT NULL,
                     local_metadata BLOB,
                     PRIMARY KEY (model_name, id)

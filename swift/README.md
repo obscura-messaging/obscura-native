@@ -90,7 +90,7 @@ try await client.inbox.discard(rowIds, reason: reason)
 let depth = try await client.inbox.depth()
 try await client.entries.put(model: modelKey, entry: StoredEntry(
     id: entryId, data: opaqueString, sentAt: timestamp,
-    authorDeviceId: authorDeviceId, localMetadata: metadata
+    authorUserId: authorUserId, authorDeviceId: authorDeviceId, localMetadata: metadata
 ))
 let entries = try await client.entries.get(model: modelKey, ids: entryIds)
 let all = try await client.entries.all(model: modelKey)

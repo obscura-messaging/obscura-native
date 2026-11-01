@@ -33,10 +33,10 @@ final class SchemaTests: XCTestCase {
         try await db.write { try DeviceStore.setLocalDevice("me", primaryDeviceId: "me", in: $0) }
         try await DeviceStore(db: db).add(userId: "peer", deviceIds: ["d"])
         _ = try await InboxStore(db: db, logger: SilentLogger()).put(InboxInsert(
-            envelopeId: "e", kind: "APP_ENTRY", senderUserId: "peer", senderDeviceId: "d",
+            envelopeId: "e", senderUserId: "peer", senderDeviceId: "d",
             modelKey: "m", entryId: "1", sentAt: 1, payload: Data([1])))
         try await EntryStore(db: db).put(model: "m", entry: StoredEntry(
-            id: "1", data: "x", sentAt: 1, authorDeviceId: "d", localMetadata: nil))
+            id: "1", data: "x", sentAt: 1, authorUserId: "peer", authorDeviceId: "d", localMetadata: nil))
 
         try await ObscuraDatabase.wipe(db)
 
@@ -51,10 +51,10 @@ final class SchemaTests: XCTestCase {
 
         XCTAssertEqual(try columns(of: "model_entries", in: db), [
             "model_name:BLOB", "id:BLOB", "data:BLOB", "timestamp:INTEGER",
-            "author_device_id:BLOB", "local_metadata:BLOB",
+            "author_user_id:BLOB", "author_device_id:BLOB", "local_metadata:BLOB",
         ])
         XCTAssertEqual(try columns(of: "inbox_rows", in: db), [
-            "id:INTEGER", "envelope_id:TEXT", "kind:TEXT", "sender_user_id:TEXT",
+            "id:INTEGER", "envelope_id:TEXT", "sender_user_id:TEXT",
             "sender_device_id:TEXT", "model_key:BLOB", "entry_id:BLOB",
             "sent_at:INTEGER", "payload:BLOB",
         ])
@@ -75,8 +75,8 @@ final class SchemaTests: XCTestCase {
             for value in ["first", "second"] {
                 try db.execute(sql: """
                     INSERT OR REPLACE INTO model_entries
-                        (model_name, id, data, timestamp, author_device_id)
-                    VALUES ('story', 'e1', ?, 1, 'device-a')
+                        (model_name, id, data, timestamp, author_user_id, author_device_id)
+                    VALUES ('story', 'e1', ?, 1, 'user-a', 'device-a')
                 """, arguments: [value])
             }
         }

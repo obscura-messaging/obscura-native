@@ -179,14 +179,14 @@ class MultiDeviceTests {
     fun `a newly linked device has the primary's history`() = runBlocking {
         requireServer()
         val alice = registerAndConnect("history_alice")
-        val entries = (1..3).map { StoredEntry("e$it", """{"n":$it}""", 1_000L + it, alice.deviceId!!, localMetadata = "local $it") }
+        val entries = (1..3).map { StoredEntry("e$it", """{"n":$it}""", 1_000L + it, alice.userId!!, alice.deviceId!!, localMetadata = "local $it") }
         entries.forEach { alice.entries.put("directMessage", it) }
-        alice.entries.put("note", StoredEntry("n1", "{}", 5, alice.deviceId!!))
+        alice.entries.put("note", StoredEntry("n1", "{}", 5, alice.userId!!, alice.deviceId!!))
 
         val tablet = linkDevice(alice, "Alice Tablet")
 
         assertEquals(entries.map { it.copy(localMetadata = null) }, tablet.entries.all("directMessage").sortedBy { it.id })
-        assertEquals(listOf(StoredEntry("n1", "{}", 5, alice.deviceId!!)), tablet.entries.all("note"))
+        assertEquals(listOf(StoredEntry("n1", "{}", 5, alice.userId!!, alice.deviceId!!)), tablet.entries.all("note"))
         alice.disconnect(); tablet.disconnect()
     }
 }

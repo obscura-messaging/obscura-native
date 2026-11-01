@@ -151,7 +151,7 @@ class AccountTest {
         val c = sessionClient(url, storage)
         assertTrue(c.auth.restore())
         val oldIdentity = c.signalStore.identityKeyPair.publicKey
-        c.entries.put("m", StoredEntry("e", "{}", 1, SELF_DEVICE_ID))
+        c.entries.put("m", StoredEntry("e", "{}", 1, SELF_USER_ID, SELF_DEVICE_ID))
 
         c.resetAccount("self", "password")
 
@@ -175,7 +175,7 @@ class AccountTest {
         val friends = listOf(FriendData("019f025a-0000-7de6-84b6-000000000002", "alice", FriendStatus.ACCEPTED))
         primary.db.friendQueries.insert(friends[0].userId, friends[0].username, friends[0].status.value)
         primary.db.friendQueries.incrementVersion()
-        primary.entries.put("chat", StoredEntry("e1", """{"text":"hi"}""", 42, SELF_DEVICE_ID, localMetadata = "private"))
+        primary.entries.put("chat", StoredEntry("e1", """{"text":"hi"}""", 42, SELF_USER_ID, SELF_DEVICE_ID, localMetadata = "private"))
         val storage = MemoryStorage()
         val tablet = newClient(url, storage)
 
@@ -193,7 +193,7 @@ class AccountTest {
         assertEquals(newDeviceId, storage.data!!["deviceId"])
         assertEquals(friends, tablet.getFriends())
         assertEquals(1L, tablet.db.friendQueries.selectVersion().executeAsOne())
-        assertEquals(listOf(StoredEntry("e1", """{"text":"hi"}""", 42, SELF_DEVICE_ID)), tablet.entries.all("chat"))
+        assertEquals(listOf(StoredEntry("e1", """{"text":"hi"}""", 42, SELF_USER_ID, SELF_DEVICE_ID)), tablet.entries.all("chat"))
         assertEquals(ConnectionState.CONNECTED, tablet.connectionState.value)
         val created = JSONObject(requestsTo("/v1/devices").single { it.method == "POST" }.body!!.utf8())
         assertEquals("ls-1", created.getString("linkSessionId"))
@@ -212,7 +212,7 @@ class AccountTest {
     @Test fun `a history that cannot be imported throws but leaves the device linked and authenticated`() = runBlocking {
         val primary = sessionClient(url, storedSession())
         assertTrue(primary.auth.restore())
-        primary.entries.put("chat", StoredEntry("e1", "{}", 1, SELF_DEVICE_ID))
+        primary.entries.put("chat", StoredEntry("e1", "{}", 1, SELF_USER_ID, SELF_DEVICE_ID))
         val storage = MemoryStorage()
         val tablet = newClient(url, storage)
         val request = tablet.beginLink("self", "password", "Tablet")

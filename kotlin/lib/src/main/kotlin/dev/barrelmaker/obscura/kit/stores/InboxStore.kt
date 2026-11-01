@@ -4,19 +4,18 @@ import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** One inbox row. The APP_ENTRY fields are null for every other kind. [payload] is opaque. */
+/** One inboxed APP_ENTRY row. [payload] is opaque. */
 data class InboxRecord(
     val id: Long,
-    val kind: String,
     val senderUserId: String,
-    val senderDeviceId: String?,
-    val modelKey: String?,
-    val entryId: String?,
-    val sentAt: Long?,
+    val senderDeviceId: String,
+    val modelKey: String,
+    val entryId: String,
+    val sentAt: Long,
     val payload: ByteArray,
 ) {
     override fun equals(other: Any?): Boolean = other is InboxRecord &&
-        id == other.id && kind == other.kind && senderUserId == other.senderUserId &&
+        id == other.id && senderUserId == other.senderUserId &&
         senderDeviceId == other.senderDeviceId && modelKey == other.modelKey && entryId == other.entryId &&
         sentAt == other.sentAt && payload.contentEquals(other.payload)
 
@@ -25,12 +24,11 @@ data class InboxRecord(
 
 internal data class InboxInsert(
     val envelopeId: String,
-    val kind: String,
     val senderUserId: String,
     val senderDeviceId: String,
-    val modelKey: String?,
-    val entryId: String?,
-    val sentAt: Long?,
+    val modelKey: String,
+    val entryId: String,
+    val sentAt: Long,
     val payload: ByteArray,
 )
 
@@ -55,7 +53,7 @@ class InboxStore internal constructor(
         db.transactionWithResult {
             val existed = queries.existsByEnvelopeId(record.envelopeId).executeAsOne()
             queries.insertRow(
-                record.envelopeId, record.kind, record.senderUserId, record.senderDeviceId,
+                record.envelopeId, record.senderUserId, record.senderDeviceId,
                 record.modelKey, record.entryId, record.sentAt, record.payload,
             )
             check(queries.existsByEnvelopeId(record.envelopeId).executeAsOne()) {

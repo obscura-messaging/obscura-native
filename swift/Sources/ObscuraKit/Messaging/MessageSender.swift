@@ -70,6 +70,10 @@ actor MessageSender {
             var batchSubmissions: [UserSubmission] = []
 
             for userId in pending {
+                guard UUID(uuidString: userId) != nil else {
+                    settled[userId] = [rejected(userId, nil, "invalid user id \(userId)")]
+                    continue
+                }
                 do {
                     var listed = try await devices.deviceIds(of: userId)
                     if listed.isEmpty {

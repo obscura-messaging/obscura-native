@@ -14,9 +14,12 @@ final class DeviceStoreTests: XCTestCase {
         friends = FriendStore(db: db)
     }
 
-    func testDevicesAreListedPerUser() async throws {
+    func testDevicesAreListedPerUserAndCannotChangeOwner() async throws {
         try await devices.add(userId: "me", deviceIds: ["d1"])
         try await devices.add(userId: "peer", deviceIds: ["d2", "d2"])
+        await assertThrows(.protocolViolation("device d1 belongs to me, not peer")) {
+            try await self.devices.add(userId: "peer", deviceIds: ["d1"])
+        }
 
         let mine = try await devices.deviceIds(of: "me")
         let theirs = try await devices.deviceIds(of: "peer")

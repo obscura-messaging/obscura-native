@@ -23,12 +23,14 @@ class EntryStoreTest {
         id: String,
         data: String = """{"content":"hi"}""",
         sentAt: Long = 1_000,
+        user: String = "user_a",
         device: String = "device_a",
         localMetadata: String? = null,
     ) = StoredEntry(
         id = id,
         data = data,
         sentAt = sentAt,
+        authorUserId = user,
         authorDeviceId = device,
         localMetadata = localMetadata,
     )

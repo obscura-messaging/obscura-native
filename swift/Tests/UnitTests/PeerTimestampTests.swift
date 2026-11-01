@@ -25,7 +25,7 @@ final class PeerTimestampTests: XCTestCase {
         let entries = EntryStore(db: db)
 
         try await entries.put(model: "story", entry: StoredEntry(
-            id: "s1", data: #"{"x":1}"#, sentAt: Self.aboveInt64Max, authorDeviceId: "dev-1", localMetadata: nil))
+            id: "s1", data: #"{"x":1}"#, sentAt: Self.aboveInt64Max, authorUserId: "user-1", authorDeviceId: "dev-1", localMetadata: nil))
 
         let written = try await entries.all(model: "story")
         XCTAssertEqual(written.map(\.sentAt), [UInt64(Int64.max)], "the write saturates rather than trapping")

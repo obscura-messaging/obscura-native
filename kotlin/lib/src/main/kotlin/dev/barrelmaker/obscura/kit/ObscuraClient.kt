@@ -232,7 +232,9 @@ class ObscuraClient(
         } catch (e: InvalidProtocolBufferException) {
             throw ObscuraError.ProtocolViolation("Invalid history snapshot", e)
         }
-        entries.import(snapshot.entriesList.map { it.model to StoredEntry(it.id, it.data.toStringUtf8(), it.sentAt, it.authorDeviceId) })
+        entries.import(snapshot.entriesList.map {
+            it.model to StoredEntry(it.id, it.data.toStringUtf8(), it.sentAt, it.authorUserId, it.authorDeviceId)
+        })
     }
 
     /** Primary only: approve the device showing [code] by sending it the account identity, friends and history. */
@@ -266,6 +268,7 @@ class ObscuraClient(
                 .setId(entry.id)
                 .setData(ByteString.copyFromUtf8(entry.data))
                 .setSentAt(entry.sentAt)
+                .setAuthorUserId(entry.authorUserId)
                 .setAuthorDeviceId(entry.authorDeviceId)
                 .build()
         }).build()
@@ -458,7 +461,7 @@ class ObscuraClient(
             acknowledge(envelope.id, envelopeId, ack)
             return
         } catch (e: Exception) {
-            if (stage == "decrypt") {
+            if (stage == "decrypt" || e is ObscuraError.ProtocolViolation) {
                 log("RECV decrypt failed from $senderUserId: ${e.message}")
                 logger.decryptFailed(senderUserId, e.message ?: e.javaClass.simpleName)
             } else {
@@ -511,9 +514,22 @@ class ObscuraClient(
     /** The local, synchronous part of handling a message; runs inside the receive transaction. */
     private fun store(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String): Stored =
         when (payloadDisposition(message.payloadCase)) {
-            PayloadDisposition.INBOXED -> Stored(message, inserted = inbox.putInTransaction(inboxRecord(message, senderUserId, senderDeviceId, envelopeId)))
+            PayloadDisposition.INBOXED -> {
+                val entry = message.appEntry
+                if (entry.model.isBlank() || entry.id.isBlank()) {
+                    log("RECV APP_ENTRY with blank model or id from $senderUserId; ignored")
+                    Stored(message)
+                } else {
+                    Stored(message, inserted = inbox.putInTransaction(inboxRecord(entry, senderUserId, senderDeviceId, envelopeId)))
+                }
+            }
             PayloadDisposition.KIT_INTERNAL -> Stored(message, friendFollowUp = applyFriendMessage(message, senderUserId, senderDeviceId))
-            PayloadDisposition.DROPPABLE -> Stored(message)
+            PayloadDisposition.DROPPABLE -> {
+                if (message.payloadCase != ClientMessage.PayloadCase.TYPING_SIGNAL) {
+                    log("RECV unknown client message arm from $senderUserId; ignored")
+                }
+                Stored(message)
+            }
         }
 
     /** Network-dependent work after the receive transaction committed. Throws when it failed. */
@@ -521,7 +537,9 @@ class ObscuraClient(
         val message = stored.message
         when (payloadDisposition(message.payloadCase)) {
             PayloadDisposition.INBOXED -> wakeInbox(message, envelopeId, stored.inserted)
-            PayloadDisposition.DROPPABLE -> onTypingSignal(message, senderUserId, senderDeviceId)
+            PayloadDisposition.DROPPABLE -> if (message.payloadCase == ClientMessage.PayloadCase.TYPING_SIGNAL) {
+                onTypingSignal(message, senderUserId, senderDeviceId)
+            }
             PayloadDisposition.KIT_INTERNAL -> when (stored.friendFollowUp) {
                 FriendFollowUp.NONE -> Unit
                 FriendFollowUp.SYNC -> syncFriendList()
@@ -536,25 +554,26 @@ class ObscuraClient(
         }
     }
 
-    private fun inboxRecord(message: ClientMessage, senderUserId: String, senderDeviceId: String, envelopeId: String): InboxInsert {
-        val entry = message.takeIf { it.payloadCase == ClientMessage.PayloadCase.APP_ENTRY }?.appEntry
-        return InboxInsert(
-            envelopeId = envelopeId,
-            kind = WireCodec.kind(message.payloadCase),
-            senderUserId = senderUserId,
-            senderDeviceId = senderDeviceId,
-            modelKey = entry?.model,
-            entryId = entry?.id,
-            sentAt = entry?.let { clampFutureTimestamp(it.timestamp) },
-            // An unknown arm is stored whole: the kit cannot know which field is the payload.
-            payload = entry?.data?.toByteArray() ?: message.toByteArray(),
-        )
-    }
+    private fun inboxRecord(
+        entry: obscura.client.v1.Client.AppEntry,
+        senderUserId: String,
+        senderDeviceId: String,
+        envelopeId: String,
+    ): InboxInsert = InboxInsert(
+        envelopeId = envelopeId,
+        senderUserId = senderUserId,
+        senderDeviceId = senderDeviceId,
+        modelKey = entry.model,
+        entryId = entry.id,
+        sentAt = clampFutureTimestamp(entry.timestamp),
+        payload = entry.data.toByteArray(),
+    )
 
     private fun wakeInbox(message: ClientMessage, envelopeId: String, inserted: Boolean) {
         when {
-            !inserted -> log("RECV duplicate envelope $envelopeId")
-            message.payloadCase == ClientMessage.PayloadCase.APP_ENTRY -> newEntries.trySend(message.appEntry.model)
+            !inserted && message.appEntry.model.isNotBlank() && message.appEntry.id.isNotBlank() ->
+                log("RECV duplicate envelope $envelopeId")
+            inserted -> newEntries.trySend(message.appEntry.model)
         }
     }
 

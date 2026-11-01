@@ -138,7 +138,7 @@ class SessionTest {
         c.storeLocalDevice()
         c.route(friendRequest(), "019f025a-0000-7de6-84b6-000000000002", "dev", "env-1")
         c.route(ClientMessage.getDefaultInstance(), "019f025a-0000-7de6-84b6-000000000002", "dev", "env-2")
-        c.entries.put("m", StoredEntry("e", "{}", 1, "dev"))
+        c.entries.put("m", StoredEntry("e", "{}", 1, SELF_USER_ID, "dev"))
 
         c.wipeDevice()
 

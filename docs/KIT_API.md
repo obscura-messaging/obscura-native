@@ -223,11 +223,11 @@ transaction.
 
 | Payload | Handling |
 |---|---|
-| `APP_ENTRY` | Inbox opaque `data`, model, id and timestamp |
+| `APP_ENTRY` | Inbox opaque `data`, model, id and timestamp (blank model or id is logged and ignored) |
 | `FRIEND_REQUEST`, `FRIEND_ACCEPT` | Kit-internal friend transition |
 | `TYPING_SIGNAL` | Ephemeral, no inbox row |
 | `FRIEND_LIST_SYNC` | Kit-internal: replaces the friend list if sent by the account's primary with a newer version, otherwise ignored |
-| Unknown/unset arm | Inbox the whole serialized message as `UNKNOWN` |
+| Unknown/unset arm | Logged and acknowledged without an inbox row |
 
 A request from an unknown sender becomes pending-received. Crossed
 requests accept the friendship. Other requests do not relabel known
@@ -257,8 +257,8 @@ delivery alone does not authorize an application write.
 `peek(limit)`, `consume(ids)`, `discard(ids, reason)`, and `depth()` are
 the public API. Insert is internal.
 
-Rows contain a local monotonic `id`, `kind`, authenticated sender user/device,
-nullable model/id/timestamp, and opaque bytes. Peek is stable oldest-first
+Rows contain a local monotonic `id`, authenticated sender user/device,
+model, entry id, timestamp, and opaque bytes. Peek is stable oldest-first
 and has no side effects. Consume/discard are idempotent and accept partial
 batches. Discard logs its reason.
 
@@ -275,8 +275,8 @@ rejections are discarded explicitly. The app monitors abnormal inbox depth.
 
 `put(model, entry)`, `get(model, ids)`, `all(model)`, `erase(model, ids)`.
 
-`StoredEntry` contains id, opaque data, timestamp, author device, and
-nullable opaque `localMetadata`. Put is a blind upsert. Merge is the app's
+`StoredEntry` contains id, opaque data, timestamp, author user, author device,
+and nullable opaque `localMetadata`. Put is a blind upsert. Merge is the app's
 job. Local metadata never enters the wire payload.
 
 Get returns named rows that exist. Erase enables `secure_delete` on the

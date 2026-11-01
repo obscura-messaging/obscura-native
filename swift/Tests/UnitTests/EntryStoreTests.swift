@@ -14,6 +14,7 @@ final class EntryStoreTests: XCTestCase {
         _ id: String,
         data: String = #"{"content":"hi"}"#,
         sentAt: UInt64 = 1_000,
+        user: String = "user_a",
         device: String = "device_a",
         localMetadata: String? = nil
     ) -> StoredEntry {
@@ -21,6 +22,7 @@ final class EntryStoreTests: XCTestCase {
             id: id,
             data: data,
             sentAt: sentAt,
+            authorUserId: user,
             authorDeviceId: device,
             localMetadata: localMetadata)
     }
@@ -87,10 +89,10 @@ final class EntryStoreTests: XCTestCase {
     func testTextWithEmbeddedNULAndAwkwardCharactersRoundTripsExactlyThroughEveryPath() async throws {
         let awkward = "opaque\0bytes?\u{1}\u{7F}\u{FFFF}\u{FEFF}\u{200D}👩‍👩‍👧\r\n\\%_'\""
         let source = try makeStore()
-        let stored = StoredEntry(id: "id\0\(awkward)", data: awkward, sentAt: 7, authorDeviceId: "device\0x",
-                                 localMetadata: "meta\0\(awkward)")
-        let other = StoredEntry(id: "id", data: "truncated id must not collide", sentAt: 1, authorDeviceId: "d",
-                                localMetadata: nil)
+        let stored = StoredEntry(id: "id\0\(awkward)", data: awkward, sentAt: 7, authorUserId: "user\0x",
+                                 authorDeviceId: "device\0x", localMetadata: "meta\0\(awkward)")
+        let other = StoredEntry(id: "id", data: "truncated id must not collide", sentAt: 1, authorUserId: "u",
+                                authorDeviceId: "d", localMetadata: nil)
         try await source.put(model: "m\0x", entry: stored)
         try await source.put(model: "m\0x", entry: other)
         try await source.put(model: "m", entry: other)
@@ -108,8 +110,8 @@ final class EntryStoreTests: XCTestCase {
         let target = try makeStore()
         try await target.importSnapshot(Obscura_Client_V1_EntrySnapshot(serializedBytes: snapshot.serializedData()))
         let imported = try await target.get(model: "m\0x", ids: [stored.id])
-        XCTAssertEqual(imported, [StoredEntry(id: stored.id, data: awkward, sentAt: 7, authorDeviceId: "device\0x",
-                                              localMetadata: nil)])
+        XCTAssertEqual(imported, [StoredEntry(id: stored.id, data: awkward, sentAt: 7, authorUserId: "user\0x",
+                                              authorDeviceId: "device\0x", localMetadata: nil)])
 
         try await source.erase(model: "m\0x", ids: [stored.id])
         let left = try await source.all(model: "m\0x")

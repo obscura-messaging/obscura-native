@@ -7,13 +7,15 @@ public struct StoredEntry: Sendable, Equatable {
     public let id: String
     public let data: String
     public let sentAt: UInt64
+    public let authorUserId: String
     public let authorDeviceId: String
     public let localMetadata: String?
 
-    public init(id: String, data: String, sentAt: UInt64, authorDeviceId: String, localMetadata: String?) {
+    public init(id: String, data: String, sentAt: UInt64, authorUserId: String, authorDeviceId: String, localMetadata: String?) {
         self.id = id
         self.data = data
         self.sentAt = sentAt
+        self.authorUserId = authorUserId
         self.authorDeviceId = authorDeviceId
         self.localMetadata = localMetadata
     }
@@ -33,11 +35,11 @@ public actor EntryStore {
 
     private static func put(model: String, entry: StoredEntry, in db: Database) throws {
         try db.execute(sql: """
-            INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_device_id, local_metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_user_id, author_device_id, local_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, arguments: [
             model.storedText, entry.id.storedText, entry.data.storedText, Int64(clamping: entry.sentAt),
-            entry.authorDeviceId.storedText, entry.localMetadata?.storedText,
+            entry.authorUserId.storedText, entry.authorDeviceId.storedText, entry.localMetadata?.storedText,
         ])
     }
 
@@ -81,6 +83,7 @@ public actor EntryStore {
                 exported.id = entry.id
                 exported.data = Data(entry.data.utf8)
                 exported.sentAt = entry.sentAt
+                exported.authorUserID = entry.authorUserId
                 exported.authorDeviceID = entry.authorDeviceId
                 return exported
             }
@@ -94,7 +97,8 @@ public actor EntryStore {
                 throw ObscuraError.protocolViolation("history entry \(exported.model)/\(exported.id) is not UTF-8")
             }
             return (exported.model, StoredEntry(id: exported.id, data: data, sentAt: exported.sentAt,
-                                                authorDeviceId: exported.authorDeviceID, localMetadata: nil))
+                                                authorUserId: exported.authorUserID, authorDeviceId: exported.authorDeviceID,
+                                                localMetadata: nil))
         }
         try await db.write { db in
             for (model, entry) in entries { try Self.put(model: model, entry: entry, in: db) }
@@ -106,6 +110,7 @@ public actor EntryStore {
             id: try row.text("id"),
             data: try row.text("data"),
             sentAt: UInt64(max(0, row["timestamp"] as Int64)),
+            authorUserId: try row.text("author_user_id"),
             authorDeviceId: try row.text("author_device_id"),
             localMetadata: try row.optionalText("local_metadata")
         )

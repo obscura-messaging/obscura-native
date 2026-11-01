@@ -92,8 +92,8 @@ final class ConnectionTests: XCTestCase {
         try await alice.send("before-restart", to: [bob])
         let row = try await bob.waitForEntry("before-restart")
         try await bob.client.entries.put(model: "testModel", entry: StoredEntry(
-            id: "before-restart", data: "hello", sentAt: row.sentAt ?? 0, authorDeviceId: row.senderDeviceId ?? "",
-            localMetadata: nil))
+            id: "before-restart", data: "hello", sentAt: row.sentAt, authorUserId: row.senderUserId,
+            authorDeviceId: row.senderDeviceId, localMetadata: nil))
         try await bob.client.inbox.consume([row.id])
         await bob.client.disconnect()
 

@@ -432,6 +432,8 @@ nonisolated struct Obscura_Client_V1_SnapshotEntry: Sendable {
 
   var authorDeviceID: String = String()
 
+  var authorUserID: String = String()
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1031,7 +1033,7 @@ nonisolated extension Obscura_Client_V1_EntrySnapshot: SwiftProtobuf.Message, Sw
 
 nonisolated extension Obscura_Client_V1_SnapshotEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SnapshotEntry"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}model\0\u{1}id\0\u{1}data\0\u{3}sent_at\0\u{3}author_device_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}model\0\u{1}id\0\u{1}data\0\u{3}sent_at\0\u{3}author_device_id\0\u{3}author_user_id\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1044,6 +1046,7 @@ nonisolated extension Obscura_Client_V1_SnapshotEntry: SwiftProtobuf.Message, Sw
       case 3: try { try decoder.decodeSingularBytesField(value: &self.data) }()
       case 4: try { try decoder.decodeSingularUInt64Field(value: &self.sentAt) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.authorDeviceID) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.authorUserID) }()
       default: break
       }
     }
@@ -1065,6 +1068,9 @@ nonisolated extension Obscura_Client_V1_SnapshotEntry: SwiftProtobuf.Message, Sw
     if !self.authorDeviceID.isEmpty {
       try visitor.visitSingularStringField(value: self.authorDeviceID, fieldNumber: 5)
     }
+    if !self.authorUserID.isEmpty {
+      try visitor.visitSingularStringField(value: self.authorUserID, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1074,6 +1080,7 @@ nonisolated extension Obscura_Client_V1_SnapshotEntry: SwiftProtobuf.Message, Sw
     if lhs.data != rhs.data {return false}
     if lhs.sentAt != rhs.sentAt {return false}
     if lhs.authorDeviceID != rhs.authorDeviceID {return false}
+    if lhs.authorUserID != rhs.authorUserID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

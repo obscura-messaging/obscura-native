@@ -126,4 +126,5 @@ message SnapshotEntry {
   bytes data = 3;
   uint64 sent_at = 4;
   string author_device_id = 5;
+  string author_user_id = 6;
 }

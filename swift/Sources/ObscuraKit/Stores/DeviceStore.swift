@@ -48,6 +48,10 @@ actor DeviceStore {
     }
 
     static func add(userId: String, deviceId: String, in db: Database) throws {
+        if let existing = try String.fetchOne(db, sql: "SELECT user_id FROM devices WHERE device_id = ?", arguments: [deviceId]),
+           existing != userId {
+            throw ObscuraError.protocolViolation("device \(deviceId) belongs to \(existing), not \(userId)")
+        }
         try db.execute(sql: "INSERT OR REPLACE INTO devices (user_id, device_id) VALUES (?, ?)", arguments: [userId, deviceId])
     }
 

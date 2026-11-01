@@ -94,16 +94,15 @@ final class ClientTests: XCTestCase {
 
         let rows = try await client.inbox.peek(limit: 10)
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0].kind, "APP_ENTRY")
         XCTAssertEqual(rows[0].senderDeviceId, bob.deviceId)
         XCTAssertEqual(rows[0].payload, Data([1, 2, 3]))
-        XCTAssertLessThanOrEqual(rows[0].sentAt!, UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)
+        XCTAssertLessThanOrEqual(rows[0].sentAt, UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)
         wakes.cancel()
         let woken = await wakes.value
         XCTAssertEqual(woken, ["story"])
     }
 
-    func testAnUnknownArmIsInboxedWholeAsUnknown() async throws {
+    func testAnUnknownArmIsAckedAndIgnoredWithoutAnInboxRow() async throws {
         // Field 4, the removed device link approval arm, as an empty message.
         let unknown = try Obscura_Client_V1_ClientMessage(serializedBytes: Data([0x22, 0x00]))
 
@@ -111,9 +110,7 @@ final class ClientTests: XCTestCase {
 
         XCTAssertEqual(acks, 1)
         let rows = try await client.inbox.peek(limit: 10)
-        XCTAssertEqual(rows.map(\.kind), ["UNKNOWN"])
-        XCTAssertNil(rows[0].modelKey)
-        XCTAssertEqual(rows[0].payload, try unknown.serializedData())
+        XCTAssertTrue(rows.isEmpty)
     }
 
     func testAFriendRequestFromAStrangerIsPendingAndAnAcceptedFriendsGetsAnAcceptReplyAndChangesNothing() async throws {

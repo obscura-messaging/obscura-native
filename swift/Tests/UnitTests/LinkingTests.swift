@@ -54,7 +54,7 @@ final class LinkingTests: XCTestCase {
         let client = try makeClient(apiURL: FakeObscuraServer.baseURL, database: phone.db, storage: storage)
         _ = try await client.login("alice", "password")
         let oldIdentity = try client.signalStore.identityKeyPair(context: NullContext()).serialize()
-        try await client.entries.put(model: "m", entry: StoredEntry(id: "e", data: "x", sentAt: 1, authorDeviceId: "d",
+        try await client.entries.put(model: "m", entry: StoredEntry(id: "e", data: "x", sentAt: 1, authorUserId: "u", authorDeviceId: "d",
                                                                      localMetadata: nil))
 
         try await client.resetAccount("alice", "password")
@@ -76,9 +76,9 @@ final class LinkingTests: XCTestCase {
         try await phoneClient.friends.add("bob-id", username: "bob", status: .accepted)
         try await phoneClient.friends.add("carol-id", username: "carol", status: .pendingSent)
         try await phoneClient.entries.put(model: "story", entry: StoredEntry(
-            id: "s1", data: #"{"t":"hi"}"#, sentAt: 7, authorDeviceId: "phone", localMetadata: "private"))
+            id: "s1", data: #"{"t":"hi"}"#, sentAt: 7, authorUserId: "alice-id", authorDeviceId: "phone", localMetadata: "private"))
         try await phoneClient.entries.put(model: "pix", entry: StoredEntry(
-            id: "p1", data: "ü", sentAt: 9, authorDeviceId: "laptop", localMetadata: nil))
+            id: "p1", data: "ü", sentAt: 9, authorUserId: "bob-id", authorDeviceId: "laptop", localMetadata: nil))
         let newDevice = PrivateKey.generate()
         let sessionId = try await openLinkSession()
 
@@ -98,6 +98,7 @@ final class LinkingTests: XCTestCase {
         XCTAssertEqual(snapshot.entries.map(\.id), ["p1", "s1"])
         XCTAssertEqual(snapshot.entries.map { String(decoding: $0.data, as: UTF8.self) }, ["ü", #"{"t":"hi"}"#])
         XCTAssertEqual(snapshot.entries.map(\.sentAt), [9, 7])
+        XCTAssertEqual(snapshot.entries.map(\.authorUserID), ["bob-id", "alice-id"])
         XCTAssertEqual(snapshot.entries.map(\.authorDeviceID), ["laptop", "phone"])
         XCTAssertFalse(try snapshot.serializedData().contains(Data("private".utf8)), "localMetadata never leaves the device")
     }
