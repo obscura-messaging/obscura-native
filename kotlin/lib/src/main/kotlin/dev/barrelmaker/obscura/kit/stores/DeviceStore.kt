@@ -40,11 +40,21 @@ internal class DeviceStore(private val db: ObscuraDatabase) {
     }
 
     suspend fun remove(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
-        db.transaction { deviceIds.forEach { queries.delete(userId, it) } }
+        db.transaction {
+            deviceIds.forEach {
+                queries.delete(userId, it)
+                if (db.friendQueries.changes().executeAsOne() > 0) {
+                    db.signalKeyQueries.deleteSession("$it.1")
+                }
+            }
+        }
     }
 
     suspend fun removeByUser(userId: String) = withContext(dispatcher) {
-        queries.deleteByUser(userId)
+        db.transaction {
+            db.signalKeyQueries.deleteSessionsOfUser(userId)
+            queries.deleteByUser(userId)
+        }
     }
 
     suspend fun devicesOf(userId: String): List<String> = withContext(dispatcher) {

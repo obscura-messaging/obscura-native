@@ -39,6 +39,9 @@ internal object LinkCrypto {
     /** The serialized `LinkBundle` in [envelope]; [ObscuraError.LinkFailed] when it does not decrypt. */
     fun open(envelope: ByteArray, own: ECPrivateKey): ByteArray = try {
         val parsed = LinkEnvelope.parseFrom(envelope)
+        if (parsed.nonce.size() != AttachmentCrypto.NONCE_SIZE) {
+            throw ObscuraError.LinkFailed("Link envelope nonce has invalid length")
+        }
         val peer = Curve.decodePoint(parsed.ephemeralPublicKey.toByteArray(), 0)
         AttachmentCrypto.decrypt(parsed.ciphertext.toByteArray(), key(Curve.calculateAgreement(peer, own)), parsed.nonce.toByteArray())
     } catch (e: InvalidProtocolBufferException) {
@@ -47,6 +50,8 @@ internal object LinkCrypto {
         throw ObscuraError.LinkFailed("Link envelope key is invalid", e)
     } catch (e: GeneralSecurityException) {
         throw ObscuraError.LinkFailed("Link envelope does not decrypt", e)
+    } catch (e: IllegalArgumentException) {
+        throw ObscuraError.LinkFailed("Link envelope is invalid", e)
     }
 
     fun encodeCode(code: LinkCode): String = Base64.getUrlEncoder().withoutPadding().encodeToString(code.toByteArray())

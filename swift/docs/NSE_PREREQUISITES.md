@@ -11,8 +11,8 @@ wake.
   SQLCipher database and falls back, with a log line, to private storage.
 - `ObscuraClient(apiURL:dataDirectory:userId:keychainAccessGroup:deviceName:sessionStorage:logger:)`
   stores the database key in a shared keychain group.
-- `obscura-app` `KeychainSession` stores the access and refresh tokens, user
-  ID, device ID and username in that group.
+- `obscura-app` `KeychainSession` stores the access and refresh tokens,
+  `expiresAt`, user ID, device ID and username in that group.
 
 ## To enable push with the app's background handler
 

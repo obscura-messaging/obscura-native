@@ -252,7 +252,7 @@ public actor ObscuraClient {
                        userId: response.userId, deviceId: response.deviceId, username: username)
     }
 
-    func begin(_ session: Session) throws {
+    func begin(_ session: Session, publishAuth: Bool = true) throws {
         try storeSession { try sessionStorage.save(session.stored) }
         stopSessionWork()
         api.setToken(session.token)
@@ -260,7 +260,7 @@ public actor ObscuraClient {
         sender = MessageSender(messenger: messenger, devices: directory, api: api, logger: logger, selfDeviceId: session.deviceId)
         refreshFailures = 0
         startRefreshLoop()
-        auth.set(.authenticated)
+        if publishAuth { auth.set(.authenticated) }
     }
 
     /// Keeps local data. Revoking the refresh token on the server is best effort.
@@ -390,9 +390,11 @@ public actor ObscuraClient {
         } catch ObscuraError.http(let status, _) where status == 401 || status == 403 {
             guard generation == sessionGeneration else { return .rejected }
             logger.tokenRefreshFailed(attempt: refreshFailures + 1, reason: "refresh token rejected (\(status))")
-            try await logout()
+            try await signOut(revoking: false)
             return .rejected
-        } catch let error as ObscuraError where error.code == "STORAGE_ERROR" {
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as ObscuraError where error.code == "STORAGE_ERROR" || error.code == "PROTOCOL_VIOLATION" {
             throw error
         } catch {
             guard generation == sessionGeneration else { return .rejected }

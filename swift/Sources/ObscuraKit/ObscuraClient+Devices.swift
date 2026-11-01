@@ -75,11 +75,18 @@ extension ObscuraClient {
             try DeviceStore.add(userId: session.userId, deviceId: session.deviceId, in: db)
             try FriendStore.replace(contents.friends, version: contents.friendListVersion, in: db)
         }
-        try begin(session)
+        try begin(session, publishAuth: false)
+        defer { if self.session != nil { auth.set(.authenticated) } }
         if let history = contents.history {
             let snapshot = try await downloadDecryptedAttachment(id: history.attachmentID, contentKey: history.contentKey,
                                                                  nonce: history.nonce)
-            try await entries.importSnapshot(Obscura_Client_V1_EntrySnapshot(serializedBytes: snapshot))
+            let parsed: Obscura_Client_V1_EntrySnapshot
+            do {
+                parsed = try Obscura_Client_V1_EntrySnapshot(serializedBytes: snapshot)
+            } catch {
+                throw ObscuraError.protocolViolation("invalid history snapshot")
+            }
+            try await entries.importSnapshot(parsed)
         }
         try await connect()
     }

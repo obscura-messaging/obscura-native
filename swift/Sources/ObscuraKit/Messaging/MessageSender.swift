@@ -87,14 +87,18 @@ actor MessageSender {
                     for deviceId in targets {
                         guard try await !messenger.hasSession(deviceId) else { continue }
                         do {
-                            try await establish(userId, [try await api.fetchPreKeyBundle(userId, deviceId: deviceId)])
+                            let bundle = try await api.fetchPreKeyBundle(userId, deviceId: deviceId)
+                            guard bundle.deviceId == deviceId else {
+                                throw ObscuraError.protocolViolation("bundle deviceId \(bundle.deviceId) did not match requested \(deviceId)")
+                            }
+                            try await establish(userId, [bundle])
                         } catch ObscuraError.http(status: 404, body: _) {
                             gone.append(deviceId)
                         }
                     }
                     try await devices.remove(userId: userId, deviceIds: gone)
 
-                    let remaining = targets.filter { !gone.contains($0) }
+                    let remaining = try await devices.deviceIds(of: userId).filter { $0 != selfDeviceId }
                     var allHaveSessions = true
                     for deviceId in remaining where try await !messenger.hasSession(deviceId) {
                         allHaveSessions = false
@@ -123,7 +127,11 @@ actor MessageSender {
             if !targetUsers.isEmpty {
                 let outcome = await messenger.submit(userIds: targetUsers.map(\.userId), submissions: batchSubmissions)
                 for (userId, items) in Dictionary(grouping: outcome.submitted.filter(\.invalidDevice), by: \.result.userId) {
-                    try? await devices.remove(userId: userId, deviceIds: items.compactMap(\.result.deviceId))
+                    do {
+                        try await devices.remove(userId: userId, deviceIds: items.compactMap(\.result.deviceId))
+                    } catch {
+                        logger.sessionEstablishFailed(userId: userId, reason: "\(error)")
+                    }
                 }
 
                 for (userId, isSelf) in targetUsers {
@@ -131,10 +139,15 @@ actor MessageSender {
                         .filter { $0.result.userId == userId && !$0.invalidDevice }
                         .map(\.result)
                     if let missing = outcome.mismatches[userId], !missing.isEmpty {
-                        try? await devices.add(userId: userId, deviceIds: missing)
-                        let mismatch = rejected(userId, nil, "devices not covered: \(missing.joined(separator: ", "))")
-                        mismatched[userId] = kept.isEmpty ? [mismatch] : kept
-                        nextPending.append(userId)
+                        do {
+                            try await devices.add(userId: userId, deviceIds: missing)
+                            let mismatch = rejected(userId, nil, "devices not covered: \(missing.joined(separator: ", "))")
+                            mismatched[userId] = kept.isEmpty ? [mismatch] : kept
+                            nextPending.append(userId)
+                        } catch {
+                            logger.sessionEstablishFailed(userId: userId, reason: "\(error)")
+                            settled[userId] = [rejected(userId, nil, error)]
+                        }
                     } else if kept.isEmpty {
                         settled[userId] = isSelf ? [] : [noDevices(userId)]
                     } else {

@@ -176,7 +176,11 @@ internal class AuthManager(
         persist: () -> Unit = {},
     ) {
         val response = api.provisionDevice(name, keys.toDeviceKeys(), linkSessionId)
-        install(response, username, keys, primaryDeviceId = primaryDeviceId, expectedUserId = expectedUserId, persist = persist)
+        install(response, username, keys, primaryDeviceId = primaryDeviceId, expectedUserId = expectedUserId, publishAuth = false, persist = persist)
+    }
+
+    fun publishAuthenticated() = synchronized(lock) {
+        if (credentials != null) _state.value = AuthState.AUTHENTICATED
     }
 
     private suspend fun install(
@@ -185,6 +189,7 @@ internal class AuthManager(
         keys: ProvisioningKeys,
         primaryDeviceId: String = response.deviceId,
         expectedUserId: String? = null,
+        publishAuth: Boolean = true,
         persist: () -> Unit = {},
     ) {
         if (expectedUserId != null && response.userId != expectedUserId) {
@@ -197,7 +202,7 @@ internal class AuthManager(
                 persist()
             }
         }
-        start(Credentials(response.token, response.refreshToken, response.expiresAt, response.userId, response.deviceId, username))
+        start(Credentials(response.token, response.refreshToken, response.expiresAt, response.userId, response.deviceId, username), publishAuth = publishAuth)
     }
 
     private fun newIdentityKeys() = SignalKeyUtils.generateProvisioningKeys(IdentityKeyPair.generate())
@@ -293,7 +298,7 @@ internal class AuthManager(
         }
     }
 
-    private fun start(new: Credentials) {
+    private fun start(new: Credentials, publishAuth: Boolean = true) {
         synchronized(lock) {
             stored("save") { storage.save(new.toMap()) }
             generation++
@@ -304,7 +309,7 @@ internal class AuthManager(
             refreshFailures = 0
             refreshLoop?.cancel()
             refreshLoop = scope.launch { refreshAheadOfExpiry() }
-            _state.value = AuthState.AUTHENTICATED
+            if (publishAuth) _state.value = AuthState.AUTHENTICATED
         }
     }
 

@@ -97,6 +97,9 @@ actor FriendStore {
         try await db.write { db in
             try db.execute(sql: "DELETE FROM friends WHERE user_id = ?", arguments: [userId.storedText])
             let removed = db.changesCount == 1
+            try db.execute(sql: """
+                DELETE FROM signal_sessions WHERE address IN (SELECT device_id || '.\(Messenger.deviceSlot)' FROM devices WHERE user_id = ?)
+            """, arguments: [userId])
             try db.execute(sql: "DELETE FROM devices WHERE user_id = ?", arguments: [userId])
             if removed { try Self.bumpVersion(in: db) }
         }

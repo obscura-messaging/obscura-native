@@ -24,6 +24,9 @@ enum LinkCrypto {
     }
 
     static func open(_ envelope: Obscura_Client_V1_LinkEnvelope, with privateKey: PrivateKey) throws -> Data {
+        guard envelope.nonce.count == 12 else {
+            throw ObscuraError.linkFailed("envelope nonce has invalid length")
+        }
         do {
             let peer = try PublicKey(envelope.ephemeralPublicKey)
             return try AttachmentCrypto.open(envelope.ciphertext, key: key(privateKey: privateKey, peerPublicKey: peer),

@@ -29,6 +29,14 @@ actor Messenger {
     /// Parses one fetch of a user's bundles. Every bundle must carry the same identity key and a signed
     /// prekey that verifies against it, or the whole fetch is refused.
     static func verifiedBundles(_ responses: [PreKeyBundleResponse]) throws -> [(deviceId: String, bundle: PreKeyBundle)] {
+        for response in responses {
+            guard UUID(uuidString: response.deviceId) != nil else {
+                throw ObscuraError.protocolViolation("invalid deviceId in bundle: \(response.deviceId)")
+            }
+        }
+        guard Set(responses.map(\.deviceId)).count == responses.count else {
+            throw ObscuraError.protocolViolation("duplicate deviceId in bundle response")
+        }
         let parsed = try responses.map { ($0.deviceId, try bundle($0)) }
         let identities = Set(parsed.map { Data($0.1.identityKey.serialize()) })
         guard identities.count <= 1 else {

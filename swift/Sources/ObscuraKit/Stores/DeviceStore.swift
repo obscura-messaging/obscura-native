@@ -59,6 +59,9 @@ actor DeviceStore {
         try await db.write { db in
             for deviceId in deviceIds {
                 try db.execute(sql: "DELETE FROM devices WHERE user_id = ? AND device_id = ?", arguments: [userId, deviceId])
+                if db.changesCount > 0 {
+                    try db.execute(sql: "DELETE FROM signal_sessions WHERE address = ?", arguments: ["\(deviceId).\(Messenger.deviceSlot)"])
+                }
             }
         }
     }

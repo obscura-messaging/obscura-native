@@ -8,9 +8,9 @@ import LibSignalClient
 /// primary. `GET /v1/keys/{id}` returns one bundle per device and consumes a one-time prekey from each
 /// (404 when the user has none), `GET /v1/keys/{id}/devices/{device}` consumes one from that device
 /// only, and `POST /v1/messages` enforces complete delivery for every named or targeted user: a user's
-/// submissions are all rejected with `ERROR_CODE_DEVICE_MISMATCH` unless they cover the user's devices
+/// submissions are all rejected with a `device_mismatches` entry unless they cover the user's devices
 /// other than the sender, and
-/// a submission for an unknown device or the sender fails with `ERROR_CODE_INVALID_DEVICE`. Refresh
+/// a submission for an unknown device is reported in `invalid_device_ids`. Refresh
 /// tokens are rejected unless ``acceptRefresh(token:refreshToken:)`` says otherwise.
 ///
 /// Served through ``FakeServerProtocol`` for requests to ``host``; one server is active at a time.

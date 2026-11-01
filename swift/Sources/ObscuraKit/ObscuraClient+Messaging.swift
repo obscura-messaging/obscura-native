@@ -57,6 +57,9 @@ extension ObscuraClient {
 
     func befriend(_ userId: String, username: String) async throws {
         let me = try requireSession()
+        guard userId != me.userId else {
+            throw ObscuraError.invalidArgument("cannot befriend yourself")
+        }
         try await requirePrimary()
         let existing = try await friends.friend(userId)?.status
         switch existing {
@@ -70,7 +73,9 @@ extension ObscuraClient {
         do {
             try await sendControl(message, to: userId)
         } catch {
-            if existing == nil { _ = try await friends.removePendingSent(userId) }
+            if existing == nil, (try? await friends.removePendingSent(userId)) == true {
+                try? await syncFriendList()
+            }
             throw error
         }
         if existing == nil { try await syncFriendList() }

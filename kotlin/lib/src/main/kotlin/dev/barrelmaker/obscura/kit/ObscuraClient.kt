@@ -207,8 +207,12 @@ class ObscuraClient(
             request.userId, bundle.primaryDeviceId, request.username, request.deviceName,
             SignalKeyUtils.generateProvisioningKeys(identity), request.sessionId,
         ) { friends.replaceInTransaction(friendList) }
-        if (bundle.hasHistory()) importHistory(bundle.history)
-        connect()
+        try {
+            if (bundle.hasHistory()) importHistory(bundle.history)
+            connect()
+        } finally {
+            auth.publishAuthenticated()
+        }
     }
 
     private suspend fun awaitApproval(request: LinkRequest): ByteArray {
