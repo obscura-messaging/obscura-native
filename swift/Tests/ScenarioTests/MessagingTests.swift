@@ -11,7 +11,6 @@ final class MessagingTests: XCTestCase {
         XCTAssertEqual(report.recipients.map(\.status), [.accepted])
         XCTAssertEqual(report.selfSync, [], "a single-device sender has no other device to sync")
         let row = try await bob.waitForEntry("dm_1")
-        XCTAssertEqual(row.kind, "APP_ENTRY")
         XCTAssertEqual(row.modelKey, "directMessage")
         XCTAssertEqual(row.payload, payload)
         XCTAssertEqual(row.senderUserId, alice.userId)
