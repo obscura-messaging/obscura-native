@@ -73,9 +73,7 @@ extension ObscuraClient {
         do {
             try await sendControl(message, to: userId)
         } catch {
-            if existing == nil, (try? await friends.removePendingSent(userId)) == true {
-                try? await syncFriendList()
-            }
+            if existing == nil { _ = try await friends.removePendingSent(userId) }
             throw error
         }
         if existing == nil { try await syncFriendList() }

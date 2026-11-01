@@ -796,7 +796,7 @@ class ObscuraClient(
         try {
             sender.sendOrThrow(targetUserId, clientMessage { setFriendRequest(friendRequest { username = self.username }) })
         } catch (e: Exception) {
-            if (existing == null) withContext(NonCancellable) { if (friends.removePendingRequest(targetUserId)) syncFriendList() }
+            if (existing == null) withContext(NonCancellable) { friends.removePendingRequest(targetUserId) }
             throw e
         }
         if (existing == null) syncFriendList()

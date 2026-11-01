@@ -122,7 +122,7 @@ final class ReceiveTests: XCTestCase {
         XCTAssertEqual(acks.withLock { $0 }, 2)
         let depth = try await client.inbox.depth()
         XCTAssertEqual(depth, 0)
-        let log = await client.getDebugLog()
+        let log = client.getDebugLog()
         XCTAssertFalse(log.contains { $0.contains("decrypt failed") })
     }
 
