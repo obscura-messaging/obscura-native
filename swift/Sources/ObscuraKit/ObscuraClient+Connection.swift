@@ -141,10 +141,10 @@ extension ObscuraClient {
     /// Persist, then ack. Anything that fails before the ack leaves the envelope on the server.
     func receive(_ envelope: Envelope, acknowledge: @Sendable (Data) async throws -> Void) async {
         let generation = sessionGeneration
-        guard let envelopeId = uuidString(envelope.id), let senderUserId = uuidString(envelope.senderId),
+        guard let envelopeId = uuidString(envelope.id), let senderUserId = uuidString(envelope.senderUserId),
               let senderDeviceId = uuidString(envelope.senderDeviceId) else {
-            logger.decryptFailed(sourceUserId: uuidString(envelope.senderId) ?? "unknown", reason:
-                "malformed envelope (id \(envelope.id.count) bytes, sender \(envelope.senderId.count), "
+            logger.decryptFailed(sourceUserId: uuidString(envelope.senderUserId) ?? "unknown", reason:
+                "malformed envelope (id \(envelope.id.count) bytes, sender \(envelope.senderUserId.count), "
                 + "sender device \(envelope.senderDeviceId.count)); not acked")
             return
         }

@@ -50,7 +50,7 @@ class ReceiveDurabilityTest {
         } else messenger.prepareSubmission(SELF_DEVICE_ID, message).message
         val envelope = Envelope.newBuilder()
             .setId(UuidCodec.uuidToBytes(UUID.randomUUID()))
-            .setSenderId(UuidCodec.uuidToBytes(UUID.fromString(peerUser)))
+            .setSenderUserId(UuidCodec.uuidToBytes(UUID.fromString(peerUser)))
             .setSenderDeviceId(UuidCodec.uuidToBytes(UUID.fromString(peerDevice)))
             .setMessage(encrypted).build()
         return Triple(c, driver, envelope)

@@ -405,7 +405,7 @@ final class FakeDevice: @unchecked Sendable {
     /// The pending deliveries as gateway envelopes, for an `ObscuraClient` on this device's database.
     func envelopes() -> [Envelope] {
         FakeObscuraServer.active!.drain(self).map {
-            Envelope(id: uuidBytes(UUID().uuidString)!, senderId: uuidBytes($0.senderUserId)!,
+            Envelope(id: uuidBytes(UUID().uuidString)!, senderUserId: uuidBytes($0.senderUserId)!,
                      senderDeviceId: uuidBytes($0.senderDeviceId)!, message: $0.message)
         }
     }

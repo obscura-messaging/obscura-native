@@ -60,7 +60,7 @@ final class ReceiveTests: XCTestCase {
     }
 
     private func envelope(_ data: Data, sender: FakeDevice, id: Data = uuidBytes(UUID().uuidString)!) -> Envelope {
-        Envelope(id: id, senderId: uuidBytes(sender.userId)!, senderDeviceId: uuidBytes(sender.deviceId)!, message: data)
+        Envelope(id: id, senderUserId: uuidBytes(sender.userId)!, senderDeviceId: uuidBytes(sender.deviceId)!, message: data)
     }
 
     private func encrypted(_ sender: FakeDevice, to receiver: FakeDevice, plaintext: Data? = nil) async throws -> Data {
@@ -134,7 +134,7 @@ final class ReceiveTests: XCTestCase {
         let acks = Locked(0)
         let acknowledge: @Sendable (Data) async throws -> Void = { _ in acks.withLock { $0 += 1 } }
         await client.receive(envelope(Data([0xff]), sender: sender), acknowledge: acknowledge)
-        let malformed = Envelope(id: Data([1]), senderId: uuidBytes(sender.userId)!,
+        let malformed = Envelope(id: Data([1]), senderUserId: uuidBytes(sender.userId)!,
                                  senderDeviceId: Data(), message: Data())
         await client.receive(malformed, acknowledge: acknowledge)
         XCTAssertEqual(acks.withLock { $0 }, 0)

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS Friend (
 -- Incremented with every change to Friend on the primary; set from FriendListSync on a linked
 -- device. No row means version 0.
 CREATE TABLE IF NOT EXISTS FriendListVersion (
-    id INTEGER NOT NULL PRIMARY KEY DEFAULT 1,
+    id INTEGER NOT NULL PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     version INTEGER NOT NULL
 );
 

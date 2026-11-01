@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicReference
 class FriendHandshakeTest {
     private fun envelope(userId: String, deviceId: String, submission: SendMessageRequest.Submission) =
         Envelope.newBuilder().setId(UuidCodec.uuidToBytes(UUID.randomUUID()))
-            .setSenderId(UuidCodec.uuidToBytes(UUID.fromString(userId)))
+            .setSenderUserId(UuidCodec.uuidToBytes(UUID.fromString(userId)))
             .setSenderDeviceId(UuidCodec.uuidToBytes(UUID.fromString(deviceId)))
             .setMessage(submission.message).build()
 

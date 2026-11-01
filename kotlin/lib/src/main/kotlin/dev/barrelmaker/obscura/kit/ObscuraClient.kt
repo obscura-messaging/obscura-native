@@ -421,7 +421,7 @@ class ObscuraClient(
     /** Commit receive ratchets with local durable writes; network-dependent control handlers run afterward. */
     internal suspend fun receive(envelope: Envelope, ack: suspend (ByteString) -> Unit = { gateway.ack(it) }) {
         val envelopeId = UuidCodec.uuidString(envelope.id)
-        val senderUserId = UuidCodec.uuidString(envelope.senderId)
+        val senderUserId = UuidCodec.uuidString(envelope.senderUserId)
         val senderDeviceId = UuidCodec.uuidString(envelope.senderDeviceId)
         if (envelopeId == null || senderUserId == null || senderDeviceId == null) {
             log("RECV malformed envelope (id, sender or sender device is not 16 bytes); not acked")

@@ -3,7 +3,7 @@ import SwiftProtobuf
 
 struct Envelope: Sendable {
     let id: Data
-    let senderId: Data
+    let senderUserId: Data
     let senderDeviceId: Data
     let message: Data
 }
@@ -137,7 +137,7 @@ final class GatewaySocket: NSObject, URLSessionWebSocketDelegate, Sendable {
         switch frame.payload {
         case .envelopeBatch(let batch)?:
             for envelope in batch.envelopes {
-                continuation.yield(.envelope(Envelope(id: envelope.id, senderId: envelope.senderID,
+                continuation.yield(.envelope(Envelope(id: envelope.id, senderUserId: envelope.senderUserID,
                                                       senderDeviceId: envelope.senderDeviceID, message: envelope.message)))
             }
         case .preKeyStatus(let status)?:

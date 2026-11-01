@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS ModelEntry (
     model_name TEXT NOT NULL,
     entry_id TEXT NOT NULL,
     data TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
     author_user_id TEXT NOT NULL,
     author_device_id TEXT NOT NULL,
     local_metadata TEXT,
@@ -20,7 +20,7 @@ SELECT * FROM ModelEntry WHERE model_name = ? AND entry_id IN ?;
 
 insertEntry:
 INSERT OR REPLACE INTO ModelEntry(
-    model_name, entry_id, data, timestamp, author_user_id, author_device_id, local_metadata
+    model_name, entry_id, data, sent_at, author_user_id, author_device_id, local_metadata
 )
 VALUES (?, ?, ?, ?, ?, ?, ?);
 

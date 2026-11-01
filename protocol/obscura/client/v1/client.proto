@@ -99,12 +99,12 @@ message LinkBundle {
   // libsignal IdentityKeyPair.serialize().
   bytes identity_key_pair = 1;
   string user_id = 2;
-  string username = 3;
-  uint64 friend_list_version = 4;
-  repeated FriendRecord friends = 5;
+  string primary_device_id = 3;
+  string username = 4;
+  uint64 friend_list_version = 5;
+  repeated FriendRecord friends = 6;
   // Absent when the primary's entry store is empty.
-  HistorySnapshot history = 6;
-  string primary_device_id = 7;
+  HistorySnapshot history = 7;
 }
 
 // An attachment holding a serialized EntrySnapshot, encrypted like any attachment.
@@ -125,6 +125,6 @@ message SnapshotEntry {
   string id = 2;
   bytes data = 3;
   uint64 sent_at = 4;
-  string author_device_id = 5;
-  string author_user_id = 6;
+  string author_user_id = 5;
+  string author_device_id = 6;
 }

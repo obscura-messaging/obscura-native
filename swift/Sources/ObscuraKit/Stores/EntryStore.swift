@@ -35,7 +35,7 @@ public actor EntryStore {
 
     private static func put(model: String, entry: StoredEntry, in db: Database) throws {
         try db.execute(sql: """
-            INSERT OR REPLACE INTO model_entries (model_name, id, data, timestamp, author_user_id, author_device_id, local_metadata)
+            INSERT OR REPLACE INTO model_entries (model_name, id, data, sent_at, author_user_id, author_device_id, local_metadata)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, arguments: [
             model.storedText, entry.id.storedText, entry.data.storedText, Int64(clamping: entry.sentAt),
@@ -109,7 +109,7 @@ public actor EntryStore {
         StoredEntry(
             id: try row.text("id"),
             data: try row.text("data"),
-            sentAt: UInt64(max(0, row["timestamp"] as Int64)),
+            sentAt: UInt64(max(0, row["sent_at"] as Int64)),
             authorUserId: try row.text("author_user_id"),
             authorDeviceId: try row.text("author_device_id"),
             localMetadata: try row.optionalText("local_metadata")

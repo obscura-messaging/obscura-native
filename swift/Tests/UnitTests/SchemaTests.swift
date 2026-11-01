@@ -50,7 +50,7 @@ final class SchemaTests: XCTestCase {
         let db = try ObscuraDatabase.inMemory()
 
         XCTAssertEqual(try columns(of: "model_entries", in: db), [
-            "model_name:BLOB", "id:BLOB", "data:BLOB", "timestamp:INTEGER",
+            "model_name:BLOB", "id:BLOB", "data:BLOB", "sent_at:INTEGER",
             "author_user_id:BLOB", "author_device_id:BLOB", "local_metadata:BLOB",
         ])
         XCTAssertEqual(try columns(of: "inbox_rows", in: db), [
@@ -75,7 +75,7 @@ final class SchemaTests: XCTestCase {
             for value in ["first", "second"] {
                 try db.execute(sql: """
                     INSERT OR REPLACE INTO model_entries
-                        (model_name, id, data, timestamp, author_user_id, author_device_id)
+                        (model_name, id, data, sent_at, author_user_id, author_device_id)
                     VALUES ('story', 'e1', ?, 1, 'user-a', 'device-a')
                 """, arguments: [value])
             }

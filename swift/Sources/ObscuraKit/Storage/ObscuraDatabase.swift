@@ -108,7 +108,7 @@ enum ObscuraDatabase {
                     model_name BLOB NOT NULL,
                     id BLOB NOT NULL,
                     data BLOB NOT NULL,
-                    timestamp INTEGER NOT NULL,
+                    sent_at INTEGER NOT NULL,
                     author_user_id BLOB NOT NULL,
                     author_device_id BLOB NOT NULL,
                     local_metadata BLOB,

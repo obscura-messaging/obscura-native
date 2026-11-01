@@ -105,7 +105,7 @@ class FakeObscuraServer : AutoCloseable {
             for (submission in valid) {
                 devices.getValue(UuidCodec.uuidString(submission.deviceId)!!).mailbox.add(Envelope.newBuilder()
                     .setId(UuidCodec.uuidToBytes(UUID.randomUUID()))
-                    .setSenderId(UuidCodec.uuidToBytes(UUID.fromString(sender.userId)))
+                    .setSenderUserId(UuidCodec.uuidToBytes(UUID.fromString(sender.userId)))
                     .setSenderDeviceId(UuidCodec.uuidToBytes(UUID.fromString(sender.deviceId)))
                     .setMessage(submission.message)
                     .build())
@@ -168,7 +168,7 @@ class FakeDevice internal constructor(
         val encrypted = EncryptedMessage.parseFrom(envelope.message)
         val senderDevice = UuidCodec.uuidString(envelope.senderDeviceId)!!
         val plaintext = messenger.decryptAndCommit(senderDevice, envelope.message,
-            record = { directory.addInTransaction(UuidCodec.uuidString(envelope.senderId)!!, senderDevice) }) { it }
+            record = { directory.addInTransaction(UuidCodec.uuidString(envelope.senderUserId)!!, senderDevice) }) { it }
         Received(
             ClientMessage.parseFrom(plaintext),
             encrypted.type,

@@ -210,19 +210,19 @@ nonisolated struct Obscura_V1_Envelope: Sendable {
   /// recipient authenticates the sender via the Signal session (identity key), and
   /// takes the display name from its own friend graph — never by trusting this
   /// field or the payload. See TRANSPORT.md.
-  var senderID: Data = Data()
-
-  /// Server-generated timestamp (ms) of when the message was received.
-  var timestamp: UInt64 = 0
-
-  /// The encrypted message payload
-  var message: Data = Data()
+  var senderUserID: Data = Data()
 
   /// UUID of the sending DEVICE (16 bytes), server-stamped from the sender's
   /// device-scoped JWT (unforgeable). This is Signal's Envelope.source_device:
   /// Signal sessions are pairwise device-to-device, so the recipient selects the
   /// inbound session by this device. A successful MAC then proves the sender.
   var senderDeviceID: Data = Data()
+
+  /// Server-generated timestamp (ms) of when the message was received.
+  var timestamp: UInt64 = 0
+
+  /// The encrypted message payload
+  var message: Data = Data()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -572,7 +572,7 @@ nonisolated extension Obscura_V1_EnvelopeBatch: SwiftProtobuf.Message, SwiftProt
 
 nonisolated extension Obscura_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Envelope"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}sender_id\0\u{1}timestamp\0\u{1}message\0\u{3}sender_device_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}sender_user_id\0\u{3}sender_device_id\0\u{1}timestamp\0\u{1}message\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -581,10 +581,10 @@ nonisolated extension Obscura_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf.
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularBytesField(value: &self.id) }()
-      case 2: try { try decoder.decodeSingularBytesField(value: &self.senderID) }()
-      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.timestamp) }()
-      case 4: try { try decoder.decodeSingularBytesField(value: &self.message) }()
-      case 5: try { try decoder.decodeSingularBytesField(value: &self.senderDeviceID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.senderUserID) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.senderDeviceID) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.timestamp) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.message) }()
       default: break
       }
     }
@@ -594,27 +594,27 @@ nonisolated extension Obscura_V1_Envelope: SwiftProtobuf.Message, SwiftProtobuf.
     if !self.id.isEmpty {
       try visitor.visitSingularBytesField(value: self.id, fieldNumber: 1)
     }
-    if !self.senderID.isEmpty {
-      try visitor.visitSingularBytesField(value: self.senderID, fieldNumber: 2)
-    }
-    if self.timestamp != 0 {
-      try visitor.visitSingularUInt64Field(value: self.timestamp, fieldNumber: 3)
-    }
-    if !self.message.isEmpty {
-      try visitor.visitSingularBytesField(value: self.message, fieldNumber: 4)
+    if !self.senderUserID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.senderUserID, fieldNumber: 2)
     }
     if !self.senderDeviceID.isEmpty {
-      try visitor.visitSingularBytesField(value: self.senderDeviceID, fieldNumber: 5)
+      try visitor.visitSingularBytesField(value: self.senderDeviceID, fieldNumber: 3)
+    }
+    if self.timestamp != 0 {
+      try visitor.visitSingularUInt64Field(value: self.timestamp, fieldNumber: 4)
+    }
+    if !self.message.isEmpty {
+      try visitor.visitSingularBytesField(value: self.message, fieldNumber: 5)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Obscura_V1_Envelope, rhs: Obscura_V1_Envelope) -> Bool {
     if lhs.id != rhs.id {return false}
-    if lhs.senderID != rhs.senderID {return false}
+    if lhs.senderUserID != rhs.senderUserID {return false}
+    if lhs.senderDeviceID != rhs.senderDeviceID {return false}
     if lhs.timestamp != rhs.timestamp {return false}
     if lhs.message != rhs.message {return false}
-    if lhs.senderDeviceID != rhs.senderDeviceID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
