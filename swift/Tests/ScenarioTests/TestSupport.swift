@@ -4,7 +4,7 @@ import XCTest
 @testable import ObscuraKit
 
 enum TestServer {
-    static let apiURL = ProcessInfo.processInfo.environment["OBSCURA_TEST_API"] ?? "https://obscura.barrelmaker.dev"
+    static let apiURL = ProcessInfo.processInfo.environment["OBSCURA_TEST_API"] ?? "http://localhost:3000"
     static let password = "testpass123456"
 
     static func username() -> String { "test_\(Int.random(in: 100_000_000...999_999_999))" }

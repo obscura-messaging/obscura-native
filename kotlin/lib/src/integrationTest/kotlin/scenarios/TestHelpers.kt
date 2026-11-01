@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
-val API: String = System.getenv("OBSCURA_TEST_API") ?: "https://obscura.barrelmaker.dev"
+val API: String = System.getenv("OBSCURA_TEST_API") ?: "http://localhost:3000"
 const val TEST_PASSWORD = "testpass123!xyz"
 
 private val serverUp: Boolean by lazy {

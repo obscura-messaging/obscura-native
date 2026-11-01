@@ -20,7 +20,7 @@ OBSCURA_TEST_API=https://devscura.barrelmaker.dev \
 - Unit coverage floors are 48% lines and 40% instructions. Reports are under
   `lib/build/reports/kover/`. Integration is excluded unless
   `-Pkover.includeIntegration=true`.
-- Integration defaults to `https://obscura.barrelmaker.dev` and skips when
+- Integration defaults to `http://localhost:3000` and skips when
   `<api>/openapi.yaml` is unreachable. Check executed/skipped counts in
   `lib/build/test-results/integrationTest/`. Server setup:
   [`CONTRIBUTING.md`](../CONTRIBUTING.md#integration-tests).
