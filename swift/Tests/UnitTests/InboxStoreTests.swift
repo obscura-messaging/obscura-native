@@ -20,13 +20,11 @@ final class InboxStoreTests: XCTestCase {
 
     private func record(
         _ envelopeId: String,
-        kind: String = "APP_ENTRY",
         payload: Data? = nil,
-        modelKey: String? = "directMessage"
+        modelKey: String = "directMessage"
     ) -> InboxInsert {
         InboxInsert(
             envelopeId: envelopeId,
-            kind: kind,
             senderUserId: "user_peer",
             senderDeviceId: "device_peer",
             modelKey: modelKey,
@@ -34,6 +32,17 @@ final class InboxStoreTests: XCTestCase {
             sentAt: 1_700_000_000_000,
             payload: payload ?? Data(envelopeId.utf8)
         )
+    }
+
+    func testPeerSuppliedTextWithEmbeddedNULRoundTripsExactly() async throws {
+        let inbox = try makeInbox()
+        _ = try await inbox.put(InboxInsert(
+            envelopeId: "e", senderUserId: "user_peer", senderDeviceId: "device_peer",
+            modelKey: "model\0suffix", entryId: "entry\0\u{1}👩‍👩‍👧", sentAt: 1, payload: Data([0])))
+
+        let row = try await inbox.peek(limit: 1).first
+        XCTAssertEqual(row?.modelKey, "model\0suffix")
+        XCTAssertEqual(row?.entryId, "entry\0\u{1}👩‍👩‍👧")
     }
 
     // MARK: - Idempotence
@@ -264,39 +273,10 @@ final class InboxStoreTests: XCTestCase {
         let rows = try await inbox.peek(limit: 50)
         let row = try XCTUnwrap(rows.first)
 
-        XCTAssertEqual(row.kind, "APP_ENTRY")
         XCTAssertEqual(row.senderUserId, "user_peer")
         XCTAssertEqual(row.senderDeviceId, "device_peer")
         XCTAssertEqual(row.modelKey, "directMessage")
         XCTAssertEqual(row.entryId, "entry_1")
         XCTAssertEqual(row.payload, payload)
     }
-
-    /// An unknown arm has no AppEntry to derive from, so those columns are null. The row
-    /// still exists, which is the point — the message is preserved rather than destroyed.
-    func testAnUnknownArmIsStoredWithNilAppEntryFields() async throws {
-        let inbox = try makeInbox()
-        _ = try await inbox.put(
-            InboxInsert(
-                envelopeId: "env_1",
-                kind: "UNKNOWN_ARM",
-                senderUserId: "user_peer",
-                senderDeviceId: "device_peer",
-                modelKey: nil,
-                entryId: nil,
-                sentAt: nil,
-                payload: Data([9, 9, 9])
-            )
-        )
-
-        // The await is hoisted: XCTUnwrap takes an autoclosure, which cannot contain one.
-        let rows = try await inbox.peek(limit: 50)
-        let row = try XCTUnwrap(rows.first)
-
-        XCTAssertEqual(row.kind, "UNKNOWN_ARM")
-        XCTAssertNil(row.modelKey)
-        XCTAssertNil(row.entryId)
-        XCTAssertNil(row.sentAt)
-    }
-
 }

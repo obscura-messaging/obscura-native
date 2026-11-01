@@ -1,11 +1,12 @@
 CREATE TABLE IF NOT EXISTS SignalLocalIdentity (
-    id INTEGER NOT NULL PRIMARY KEY DEFAULT 1,
+    id INTEGER NOT NULL PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     identity_key_pair BLOB NOT NULL,
     registration_id INTEGER NOT NULL
 );
 
+-- The trusted identity key of each peer account, keyed by user id.
 CREATE TABLE IF NOT EXISTS SignalIdentity (
-    address TEXT NOT NULL PRIMARY KEY,
+    user_id TEXT NOT NULL PRIMARY KEY,
     identity_key BLOB NOT NULL
 );
 
@@ -25,11 +26,6 @@ CREATE TABLE IF NOT EXISTS SignalSession (
     record BLOB NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS SignalSenderKey (
-    address TEXT NOT NULL PRIMARY KEY,
-    record BLOB NOT NULL
-);
-
 selectLocalIdentity:
 SELECT * FROM SignalLocalIdentity WHERE id = 1;
 
@@ -39,11 +35,11 @@ INSERT OR REPLACE INTO SignalLocalIdentity(id, identity_key_pair, registration_i
 deleteLocalIdentity:
 DELETE FROM SignalLocalIdentity;
 
-selectIdentityByAddress:
-SELECT identity_key FROM SignalIdentity WHERE address = ?;
+selectIdentityByUser:
+SELECT identity_key FROM SignalIdentity WHERE user_id = ?;
 
 insertIdentity:
-INSERT OR REPLACE INTO SignalIdentity(address, identity_key) VALUES (?, ?);
+INSERT OR REPLACE INTO SignalIdentity(user_id, identity_key) VALUES (?, ?);
 
 deleteAllIdentities:
 DELETE FROM SignalIdentity;
@@ -102,14 +98,8 @@ DELETE FROM SignalSession WHERE address = ?;
 deleteSessionsByPrefix:
 DELETE FROM SignalSession WHERE address LIKE ?;
 
+deleteSessionsOfUser:
+DELETE FROM SignalSession WHERE address IN (SELECT device_id || '.1' FROM Device WHERE user_id = ?);
+
 deleteAllSessions:
 DELETE FROM SignalSession;
-
-selectSenderKey:
-SELECT record FROM SignalSenderKey WHERE address = ?;
-
-insertSenderKey:
-INSERT OR REPLACE INTO SignalSenderKey(address, record) VALUES (?, ?);
-
-deleteAllSenderKeys:
-DELETE FROM SignalSenderKey;

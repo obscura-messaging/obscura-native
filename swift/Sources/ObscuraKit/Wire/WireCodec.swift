@@ -9,6 +9,7 @@ enum WireCodec {
         case .friendAccept?: return "FRIEND_ACCEPT"
         case .appEntry?: return "APP_ENTRY"
         case .typingSignal?: return "TYPING_SIGNAL"
+        case .friendListSync?: return "FRIEND_LIST_SYNC"
         case nil: return ""
         }
     }
@@ -25,6 +26,35 @@ enum WireCodec {
         switch state {
         case .started: return .started
         case .stopped: return .stopped
+        }
+    }
+
+    static func friendRecord(_ friend: Friend) -> Obscura_Client_V1_FriendRecord {
+        var record = Obscura_Client_V1_FriendRecord()
+        record.userID = friend.userId
+        record.username = friend.username
+        switch friend.status {
+        case .pendingSent: record.status = .pendingSent
+        case .pendingReceived: record.status = .pendingReceived
+        case .accepted: record.status = .accepted
+        }
+        return record
+    }
+
+    /// Throws unless every record names a user and a known status.
+    static func friends(_ records: [Obscura_Client_V1_FriendRecord]) throws
+        -> [(userId: String, username: String, status: FriendStatus)] {
+        try records.map { record in
+            let status: FriendStatus
+            switch record.status {
+            case .pendingSent: status = .pendingSent
+            case .pendingReceived: status = .pendingReceived
+            case .accepted: status = .accepted
+            case .unspecified, .UNRECOGNIZED:
+                throw ObscuraError.protocolViolation("friend record \(record.userID) has status \(record.status.rawValue)")
+            }
+            guard !record.userID.isEmpty else { throw ObscuraError.protocolViolation("friend record without a user id") }
+            return (record.userID, record.username, status)
         }
     }
 }

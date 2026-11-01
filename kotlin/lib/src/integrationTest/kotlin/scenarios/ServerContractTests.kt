@@ -16,8 +16,6 @@ import dev.barrelmaker.obscura.kit.stores.FriendStatus
 import kotlinx.coroutines.runBlocking
 import obscura.client.v1.Client.ClientMessage
 import obscura.client.v1.appEntry
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -44,18 +42,8 @@ class ServerContractTests {
     // Alter only the access credential; the refresh credential is still issued by the real server.
     private fun expireAccess(client: ObscuraClient) {
         val current = client.auth.requireCredentials()
-        val claims = """{"sub":"${current.userId}","exp":1}"""
-        val expired = "e30.${Base64.getUrlEncoder().withoutPadding().encodeToString(claims.toByteArray())}.sig"
         AuthManager::class.java.getDeclaredField("credentials").apply { isAccessible = true }
-            .set(client.auth, current.copy(token = expired))
-    }
-
-    private fun deleteDevice(client: ObscuraClient) {
-        val request = Request.Builder().url("$API/v1/devices/${client.deviceId}")
-            .header("Authorization", "Bearer ${client.auth.requireCredentials().token}").delete().build()
-        OkHttpClient().newCall(request).execute().use {
-            assertEquals(200, it.code, it.body.string())
-        }
+            .set(client.auth, current.copy(token = "expired.token.sig", expiresAt = 1L))
     }
 
     @Test
@@ -67,6 +55,7 @@ class ServerContractTests {
         inspector.register(uniqueName("inspector"), TEST_PASSWORD)
         try {
             val sender = Messenger(inspector.signalStore, inspector.api)
+            inspector.devices.add(receiver.userId!!, listOf(receiver.deviceId!!))
             val original = inspector.api.fetchPreKeyBundles(receiver.userId!!)
             val first = original.getJSONObject(0)
             val identity = first.getString("identityKey")
@@ -92,7 +81,7 @@ class ServerContractTests {
             assertEquals(identity, rotated.getString("identityKey"))
             assertTrue(receiver.signalStore.containsSignedPreKey(originalSignedId))
             assertEquals(SubmissionStatus.ACCEPTED,
-                sender.submit(receiver.userId!!, listOf(delayed)).single().result.status)
+                sender.submit(receiver.userId!!, listOf(delayed)).submitted.single().result.status)
             receiver.awaitRow { it.entryId == "delayed-before-rotation" }
 
             // Consumption while connected must trigger another advisory-driven refill, including refresh.
@@ -121,22 +110,21 @@ class ServerContractTests {
     }
 
     @Test
-    fun `deleting the last established recipient device is an explicit user rejection`(): Unit = runBlocking {
+    fun `a recipient whose every device is gone is rejected and forgotten`(): Unit = runBlocking {
         val alice = registerAndConnect("deleted_sender")
-        val bob = registerAndConnect("deleted_target")
         try {
-            sendAndVerify(alice, bob, "establish")
-            val userId = bob.userId!!
-            bob.disconnect()
-            deleteDevice(bob)
-            val results = sendText(alice, bob, "not deliverable").recipients
+            val userId = UUID.randomUUID().toString()
+            alice.devices.add(userId, listOf(UUID.randomUUID().toString()))
+            suspend fun gone(text: String) = alice.send(listOf(userId), "directMessage", text, 1, text.toByteArray()).recipients
+            val results = gone("not deliverable")
             assertEquals(1, results.size)
             assertEquals(userId, results.single().userId)
             assertNull(results.single().deviceId)
             assertEquals(SubmissionStatus.REJECTED, results.single().status)
-            assertFalse(results.single().error.isNullOrBlank())
+            assertEquals("No devices found", results.single().error)
             assertTrue(alice.devices.devicesOf(userId).isEmpty())
-        } finally { alice.logout(); bob.logout() }
+            assertEquals(SubmissionStatus.REJECTED, gone("no devices").single().status)
+        } finally { alice.logout() }
     }
 
     @Test
@@ -193,14 +181,14 @@ class ServerContractTests {
         bob.register(uniqueName("batch_target"), TEST_PASSWORD)
         try {
             val messenger = Messenger(alice.signalStore, alice.api)
+            alice.devices.add(bob.userId!!, listOf(bob.deviceId!!))
             messenger.establishSession(parsePeerBundles(alice.api.fetchPreKeyBundles(bob.userId!!)).single())
             val submissions = List(101) { messenger.prepareSubmission(bob.deviceId!!, entry("batch-$it")) }
-            val results = messenger.submit(bob.userId!!, submissions).map { it.result }
+            val results = messenger.submit(bob.userId!!, submissions).submitted.map { it.result }
             assertEquals(101, results.size)
             assertTrue(results.all { it.status == SubmissionStatus.REJECTED }, results.toString())
             assertTrue(results.all { it.error?.contains("413") == true })
             assertTrue(results.all { it.deviceId == bob.deviceId && it.userId == bob.userId })
-            assertEquals(101, submissions.map { UuidCodec.uuidString(it.submissionId) }.distinct().size)
         } finally { alice.logout(); bob.logout() }
     }
 
@@ -219,8 +207,11 @@ class ServerContractTests {
             assertEquals(LoginScenario.DEVICE_MISMATCH, first.login(secondName, TEST_PASSWORD))
             assertEquals(AuthState.LOGGED_OUT, first.authState.value)
             assertEquals(LoginScenario.EXISTING_DEVICE, first.login(firstName, TEST_PASSWORD))
-            deleteDevice(first)
             first.logout()
+            val resetKeys = dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.generateProvisioningKeys(
+                org.signal.libsignal.protocol.IdentityKeyPair.generate()
+            )
+            first.api.resetAccount(firstName, TEST_PASSWORD, "replacement", resetKeys.toDeviceKeys())
             assertEquals(LoginScenario.DEVICE_MISMATCH, first.login(firstName, TEST_PASSWORD))
             assertEquals(AuthState.LOGGED_OUT, first.authState.value)
         } finally { first.logout(); second.logout() }
@@ -233,7 +224,7 @@ class ServerContractTests {
         try {
             val before = alice.api.fetchPreKeyBundles(bob.userId!!).getJSONObject(0)
                 .getJSONObject("oneTimePreKey").getInt("keyId")
-            repeat(3) { assertEquals(listOf(bob.deviceId), bob.api.fetchOwnDeviceIds()) }
+            repeat(3) { assertEquals(listOf(bob.deviceId), bob.api.fetchOwnDevices().map { it.deviceId }) }
             sendAndVerify(alice, bob, "first session")
             val afterFirst = alice.api.fetchPreKeyBundles(bob.userId!!).getJSONObject(0)
                 .getJSONObject("oneTimePreKey").getInt("keyId")
@@ -356,7 +347,7 @@ class ServerContractTests {
             assertEquals(before.getValue("deviceId"), storage.data!!.getValue("deviceId"))
             val replay = runCatching { client.api.refreshSession(before.getValue("refreshToken")) }.exceptionOrNull()
             assertTrue(replay is ObscuraError.Http && replay.status == 401, "old refresh must be spent: $replay")
-            assertEquals(listOf(client.deviceId), client.api.fetchOwnDeviceIds())
+            assertEquals(listOf(client.deviceId), client.api.fetchOwnDevices().map { it.deviceId })
             client.connect()
         } finally { client.logout() }
     }

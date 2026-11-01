@@ -13,6 +13,12 @@ sealed class ObscuraError(val code: String, message: String, cause: Throwable? =
     /** A message that must reach a user was accepted by none of their devices. */
     class SendFailed(val reason: String) : ObscuraError("SEND_FAILED", reason)
 
+    /** Only the account's primary device may do this. */
+    class NotPrimary : ObscuraError("NOT_PRIMARY", "Only the primary device can do this")
+
+    /** The link session expired or is unknown, or its envelope does not decrypt. */
+    class LinkFailed(val reason: String, cause: Throwable? = null) : ObscuraError("LINK_FAILED", reason, cause)
+
     /** The server answered with a non-2xx status. */
     class Http(val status: Int, val body: String) : ObscuraError("HTTP_ERROR", "HTTP $status")
 }

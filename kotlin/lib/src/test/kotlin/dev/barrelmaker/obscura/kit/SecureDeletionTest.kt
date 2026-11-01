@@ -34,7 +34,7 @@ class SecureDeletionTest {
         val client = ObscuraClient(ObscuraConfig("http://127.0.0.1:1", "test"), driver, MemoryStorage())
         val signalMarker = client.signalStore.generateIdentity().first.serialize()
         val entryMarker = "CHECKPOINT-SECRET-${UUID.randomUUID()}"
-        client.entries.put("m", StoredEntry("e", entryMarker, 1, SELF_DEVICE_ID))
+        client.entries.put("m", StoredEntry("e", entryMarker, 1, SELF_USER_ID, SELF_DEVICE_ID))
         driver.truncateWal()
         driver.pragma("PRAGMA secure_delete = OFF")
         fun contains(path: File, marker: ByteArray) = path.exists() &&
@@ -46,7 +46,7 @@ class SecureDeletionTest {
             reader.createStatement().use { statement ->
                 statement.executeQuery("SELECT data FROM ModelEntry").use { rows ->
                     assertTrue(rows.next())
-                    client.entries.put("m", StoredEntry("e", "$entryMarker-updated", 2, SELF_DEVICE_ID))
+                    client.entries.put("m", StoredEntry("e", "$entryMarker-updated", 2, SELF_USER_ID, SELF_DEVICE_ID))
                     assertTrue(contains(file, signalMarker), "control: Signal identity is present in main database")
                     assertTrue(contains(file, entryMarker.toByteArray()), "control: entry is present in main database")
                     assertTrue(contains(wal, entryMarker.toByteArray()), "control: entry is present in WAL")

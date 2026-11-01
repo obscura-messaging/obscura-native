@@ -39,7 +39,7 @@ class SessionLifecycleTest {
     }
 
     private fun refresh(status: Int = 200) = MockResponse.Builder().code(status)
-        .body(if (status == 200) """{"token":"${jwt(SELF_USER_ID, FAR_FUTURE)}","refreshToken":"rotated"}""" else "{}")
+        .body(if (status == 200) authResponseJson(refreshToken = "rotated").toString() else "{}")
         .bodyDelay(300, TimeUnit.MILLISECONDS).build()
 
     @Test fun `wrong credentials on a local device issue exactly one password request`() = runBlocking {
@@ -67,7 +67,7 @@ class SessionLifecycleTest {
 
         assertEquals("rotated", storage.data!!["refreshToken"])
         val request = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("/v1/push-tokens", request.url.encodedPath)
+        assertEquals("/v1/push-token", request.url.encodedPath)
         assertEquals("Bearer ${c.auth.requireCredentials().token}", request.headers["Authorization"])
         assertEquals(TokenStatus.FRESH, pending.await())
         assertEquals(2, server.requestCount)
@@ -77,12 +77,12 @@ class SessionLifecycleTest {
 
     @Test fun `restore rejects missing Signal identity and a mismatched device before authentication`() = runBlocking {
         val missing = newClient(url, storedSession())
-        missing.devices.storeIdentity(SELF_DEVICE_ID)
+        missing.storeLocalDevice()
         assertFalse(missing.restorePersistedSession())
         assertEquals(AuthState.LOGGED_OUT, missing.authState.value)
 
         val mismatch = sessionClient(url, storedSession())
-        mismatch.devices.storeIdentity("019f025a-0000-7de6-84b6-000000000099")
+        mismatch.storeLocalDevice(deviceId = "019f025a-0000-7de6-84b6-000000000099")
         assertFalse(mismatch.restorePersistedSession())
         assertEquals(AuthState.LOGGED_OUT, mismatch.authState.value)
         assertEquals(0, server.requestCount)
@@ -166,7 +166,7 @@ class SessionLifecycleTest {
         assertNull(c.userId)
         assertEquals(ConnectionState.DISCONNECTED, c.connectionState.value)
         assertEquals(emptyList<String>(), c.observeTyping("ctx").first())
-        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", "kept", 1, SELF_DEVICE_ID))
+        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", "kept", 1, SELF_USER_ID, SELF_DEVICE_ID))
         val wipeError = runCatching { c.wipeDevice() }.exceptionOrNull()
         assertTrue(wipeError is ObscuraError.StorageFailed)
         assertSame(storage.cause, wipeError!!.cause)
@@ -237,7 +237,7 @@ class SessionLifecycleTest {
         driver.pragma("PRAGMA journal_mode = WAL")
         val c = ObscuraClient(ObscuraConfig(url, "test"), driver, MemoryStorage())
         val secret = "DEVICE-WIPE-SECRET-83a10"
-        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", secret, 1, SELF_DEVICE_ID))
+        c.entries.put("m", dev.barrelmaker.obscura.kit.stores.StoredEntry("e", secret, 1, SELF_USER_ID, SELF_DEVICE_ID))
         fun onDisk() = listOf(file, java.io.File("${file.absolutePath}-wal")).filter { it.exists() }
             .any { String(it.readBytes(), Charsets.ISO_8859_1).contains(secret) }
         assertTrue(onDisk())

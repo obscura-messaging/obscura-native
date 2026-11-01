@@ -6,7 +6,7 @@ public protocol ObscuraLogger: Sendable {
     func ackFailed(envelopeId: String, reason: String)
     func tokenRefreshFailed(attempt: Int, reason: String)
     func preKeyReplenishFailed(reason: String)
-    func identityChanged(address: String)
+    func identityChanged(userId: String)
     func sessionEstablishFailed(userId: String, reason: String)
     func databaseError(store: String, operation: String, reason: String)
 }
@@ -57,9 +57,9 @@ final class RecordingLogger: ObscuraLogger {
         host.preKeyReplenishFailed(reason: reason)
     }
 
-    func identityChanged(address: String) {
-        record("identity changed for \(address)")
-        host.identityChanged(address: address)
+    func identityChanged(userId: String) {
+        record("identity changed for \(userId)")
+        host.identityChanged(userId: userId)
     }
 
     func sessionEstablishFailed(userId: String, reason: String) {

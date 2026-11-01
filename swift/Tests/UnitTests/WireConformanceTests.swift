@@ -21,6 +21,7 @@ final class WireConformanceTests: XCTestCase {
         "friend_accept": .friendAccept(Obscura_Client_V1_FriendAccept()),
         "app_entry": .appEntry(Obscura_Client_V1_AppEntry()),
         "typing_signal": .typingSignal(Obscura_Client_V1_TypingSignal()),
+        "friend_list_sync": .friendListSync(Obscura_Client_V1_FriendListSync()),
     ]
     private let typingStateByWire: [String: Obscura_Client_V1_TypingState] = [
         "TYPING_STATE_STARTED": .started,

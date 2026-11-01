@@ -23,12 +23,10 @@ class InboxStoreTest {
 
     private fun record(
         envelopeId: String,
-        kind: String = "APP_ENTRY",
         payload: ByteArray = "{}".toByteArray(),
-        modelKey: String? = "directMessage",
+        modelKey: String = "directMessage",
     ) = InboxInsert(
         envelopeId = envelopeId,
-        kind = kind,
         senderUserId = "user_peer",
         senderDeviceId = "device_peer",
         modelKey = modelKey,
@@ -165,26 +163,10 @@ class InboxStoreTest {
 
         val row = inbox.peek().single()
 
-        assertEquals("APP_ENTRY", row.kind)
         assertEquals("user_peer", row.senderUserId)
         assertEquals("device_peer", row.senderDeviceId)
         assertEquals("directMessage", row.modelKey)
         assertEquals("entry_1", row.entryId)
         assertArrayEquals(payload, row.payload, "payload is opaque bytes and must not be re-encoded")
-    }
-
-    @Test
-    fun `an unknown arm is stored with null AppEntry fields`() = runBlocking {
-        inbox.put(
-            record("env_1", kind = "UNKNOWN_ARM", modelKey = null)
-                .copy(entryId = null, sentAt = null)
-        )
-
-        val row = inbox.peek().single()
-
-        assertEquals("UNKNOWN_ARM", row.kind)
-        assertNull(row.modelKey)
-        assertNull(row.entryId)
-        assertNull(row.sentAt)
     }
 }

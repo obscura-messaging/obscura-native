@@ -13,12 +13,8 @@ internal enum class PayloadDisposition {
     DROPPABLE,
 }
 
-/**
- * Unknown and unset arms are inboxed: leaving them unacked would let any sender fill the server's
- * per-device queue, which evicts oldest first.
- */
 internal fun payloadDisposition(arm: PayloadCase): PayloadDisposition = when (arm) {
-    PayloadCase.FRIEND_REQUEST, PayloadCase.FRIEND_ACCEPT -> PayloadDisposition.KIT_INTERNAL
-    PayloadCase.TYPING_SIGNAL -> PayloadDisposition.DROPPABLE
-    else -> PayloadDisposition.INBOXED
+    PayloadCase.APP_ENTRY -> PayloadDisposition.INBOXED
+    PayloadCase.FRIEND_REQUEST, PayloadCase.FRIEND_ACCEPT, PayloadCase.FRIEND_LIST_SYNC -> PayloadDisposition.KIT_INTERNAL
+    PayloadCase.TYPING_SIGNAL, PayloadCase.PAYLOAD_NOT_SET -> PayloadDisposition.DROPPABLE
 }

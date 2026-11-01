@@ -1,25 +1,23 @@
--- Decrypted inboxed messages, written before the server copy is acked. An ack deletes the server
--- copy, so a row leaves only through the app's consume/discard or a device wipe.
+-- Decrypted inboxed APP_ENTRY messages, written before the server copy is acked. An ack deletes
+-- the server copy, so a row leaves only through the app's consume/discard or a device wipe.
 --
 -- AUTOINCREMENT because plain rowids are reused after deletion and `peek` orders by id.
 -- envelope_id UNIQUE with INSERT OR IGNORE absorbs redeliveries.
--- model_key, entry_id and sent_at are NULL for every kind but APP_ENTRY.
 CREATE TABLE IF NOT EXISTS InboxRow (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     envelope_id TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL,
     sender_user_id TEXT NOT NULL,
-    sender_device_id TEXT,
-    model_key TEXT,
-    entry_id TEXT,
-    sent_at INTEGER,
+    sender_device_id TEXT NOT NULL,
+    model_key TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    sent_at INTEGER NOT NULL,
     payload BLOB NOT NULL
 );
 
 insertRow:
 INSERT OR IGNORE INTO InboxRow(
-    envelope_id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    envelope_id, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
+) VALUES (?, ?, ?, ?, ?, ?, ?);
 
 -- INSERT OR IGNORE ignores every constraint violation, not only the duplicate, so `put` checks for
 -- the row instead of counting changes.
@@ -27,7 +25,7 @@ existsByEnvelopeId:
 SELECT EXISTS(SELECT 1 FROM InboxRow WHERE envelope_id = ?);
 
 peek:
-SELECT id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
+SELECT id, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload
 FROM InboxRow ORDER BY id ASC LIMIT ?;
 
 deleteByIds:

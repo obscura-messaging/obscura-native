@@ -63,8 +63,14 @@ let client = try ObscuraClient(
 
 let restored = await client.restorePersistedSession()
 let scenario = try await client.login(username, password)
-try await client.loginAndProvision(username, password)
 try await client.register(username, password)
+try await client.resetAccount(username, password)
+let request = try await client.beginLink(username, password, deviceName: deviceName)
+try await client.completeLink(request)
+try await client.approveLink(request.code)
+let devices = try await client.devices()
+try await client.unlinkDevice(deviceId)
+let isPrimary = try await client.isPrimary
 try await client.connect()
 await client.disconnect()
 try await client.logout()
@@ -76,7 +82,7 @@ let username = await client.username
 
 let report = try await client.send(
     to: recipientUserIds, modelKey: modelKey, entryId: entryId,
-    sentAt: timestamp, payload: bytes, acceptedDeviceIds: acceptedDeviceIds
+    sentAt: timestamp, payload: bytes
 )
 let rows = try await client.inbox.peek(limit: 50)
 try await client.inbox.consume(rowIds)
@@ -84,7 +90,7 @@ try await client.inbox.discard(rowIds, reason: reason)
 let depth = try await client.inbox.depth()
 try await client.entries.put(model: modelKey, entry: StoredEntry(
     id: entryId, data: opaqueString, sentAt: timestamp,
-    authorDeviceId: authorDeviceId, localMetadata: metadata
+    authorUserId: authorUserId, authorDeviceId: authorDeviceId, localMetadata: metadata
 ))
 let entries = try await client.entries.get(model: modelKey, ids: entryIds)
 let all = try await client.entries.all(model: modelKey)
@@ -112,7 +118,7 @@ func load() throws -> [String: String]?
 func clear() throws
 ```
 
-The dictionary keys are `token`, `refreshToken`, `userId`, `deviceId`, and
+The dictionary keys are `token`, `refreshToken`, `expiresAt`, `userId`, `deviceId`, and
 `username`. The host must implement durable storage. Session storage failures
 surface as `ObscuraError.storageFailed`, code `STORAGE_ERROR`;
 `restorePersistedSession()` reports failures through the logger and returns

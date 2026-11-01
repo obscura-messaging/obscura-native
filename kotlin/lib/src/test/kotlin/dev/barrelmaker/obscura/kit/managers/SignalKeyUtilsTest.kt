@@ -2,7 +2,9 @@ package dev.barrelmaker.obscura.kit.managers
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import dev.barrelmaker.obscura.kit.crypto.SignalStore
+import dev.barrelmaker.obscura.kit.crypto.toBase64
 import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
+import dev.barrelmaker.obscura.kit.generateIdentity
 import dev.barrelmaker.obscura.kit.managers.SignalKeyUtils.toApiJson
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -22,7 +24,6 @@ class SignalKeyUtilsTest {
 
     private lateinit var store: SignalStore
     private lateinit var db: ObscuraDatabase
-    private lateinit var identity: IdentityKeyPair
 
     @BeforeEach
     fun setup() {
@@ -30,82 +31,78 @@ class SignalKeyUtilsTest {
         ObscuraDatabase.Schema.create(driver)
         db = ObscuraDatabase(driver)
         store = SignalStore(db)
-        identity = store.generateIdentity().first
     }
 
+    private fun provisioned(): ProvisioningKeys =
+        SignalKeyUtils.generateProvisioningKeys(IdentityKeyPair.generate()).also { SignalKeyUtils.install(store, it) }
+
     @Test
-    fun `generateSignedPreKey produces a signature that verifies against the identity key`() {
-        val record = SignalKeyUtils.generateSignedPreKey(store, identity, id = 7)
+    fun `a signed prekey's signature verifies against the identity key`() {
+        val identity = IdentityKeyPair.generate()
+        val record = SignalKeyUtils.signedPreKey(identity, id = 7)
 
         assertEquals(7, record.id)
-        assertTrue(
-            Curve.verifySignature(
-                identity.publicKey.publicKey,
-                record.keyPair.publicKey.serialize(),
-                record.signature
-            ),
-            "signed prekey signature must verify against the identity public key"
-        )
+        assertTrue(Curve.verifySignature(identity.publicKey.publicKey, record.keyPair.publicKey.serialize(), record.signature))
     }
 
     @Test
-    fun `generateSignedPreKey persists the record in the store`() {
-        val record = SignalKeyUtils.generateSignedPreKey(store, identity, id = 3)
-        val loaded = store.loadSignedPreKey(3)
-        assertEquals(record.id, loaded.id)
+    fun `provisioning keys are signed by the given identity and stored only on install`() {
+        val identity = IdentityKeyPair.generate()
+        val keys = SignalKeyUtils.generateProvisioningKeys(identity)
+
+        assertEquals(SignalKeyUtils.SIGNED_PREKEY_ID, keys.signedPreKey.id)
+        assertTrue(identity.publicKey.publicKey.verifySignature(keys.signedPreKey.keyPair.publicKey.serialize(), keys.signedPreKey.signature))
+        assertEquals((1..100).toList(), keys.oneTimePreKeys.map { it.id })
+        assertTrue(keys.registrationId > 0)
+        assertFalse(store.hasIdentity())
+        assertEquals(0L, store.getPreKeyCount())
+
+        SignalKeyUtils.install(store, keys)
+
+        assertArrayEquals(identity.serialize(), store.identityKeyPair.serialize())
+        assertEquals(keys.registrationId, store.localRegistrationId)
+        assertEquals(100L, store.getPreKeyCount())
+        assertArrayEquals(keys.signedPreKey.serialize(), store.loadSignedPreKey(1).serialize())
+        assertArrayEquals(identity.serialize(), SignalStore(db).identityKeyPair.serialize())
     }
 
     @Test
-    fun `generateOneTimePreKeys creates a contiguous id range and stores each`() {
-        val keys = SignalKeyUtils.generateOneTimePreKeys(store, startId = 100, count = 5)
+    fun `an install inside a rolled-back transaction leaves no identity`() {
+        val keys = SignalKeyUtils.generateProvisioningKeys(IdentityKeyPair.generate())
+        runCatching { db.transaction { SignalKeyUtils.install(store, keys); error("server refused") } }
 
-        assertEquals(listOf(100, 101, 102, 103, 104), keys.map { it.id })
-        for (id in 100..104) assertTrue(store.containsPreKey(id), "prekey $id should be stored")
-        assertFalse(store.containsPreKey(105))
+        assertFalse(store.hasIdentity())
+        assertEquals(0L, store.getPreKeyCount())
     }
 
     @Test
-    fun `generateOneTimePreKeys with zero count produces none`() {
-        assertTrue(SignalKeyUtils.generateOneTimePreKeys(store, startId = 1, count = 0).isEmpty())
-    }
+    fun `device keys carry the identity, registration id and prekeys the server expects`() {
+        val keys = SignalKeyUtils.generateProvisioningKeys(IdentityKeyPair.generate())
+        val json = keys.toDeviceKeys().toJson()
 
-    @Test
-    fun `signed prekey toApiJson carries the id and base64 key material`() {
-        val record = SignalKeyUtils.generateSignedPreKey(store, identity, id = 9)
-        val json = record.toApiJson()
-
-        assertEquals(9, json.keyId)
-        assertTrue(json.publicKey.isNotEmpty())
-        assertTrue(json.signature.isNotEmpty())
-    }
-
-    @Test
-    fun `one-time prekey list toApiJson maps ids and keys in order`() {
-        val keys = SignalKeyUtils.generateOneTimePreKeys(store, startId = 50, count = 3)
-        val json = keys.toApiJson()
-
-        assertEquals(listOf(50, 51, 52), json.map { it.keyId })
-        assertTrue(json.all { it.publicKey.isNotEmpty() })
+        assertEquals(setOf("identityKey", "registrationId", "signedPreKey", "oneTimePreKeys"), json.keySet())
+        assertEquals(keys.identity.publicKey.serialize().toBase64(), json.getString("identityKey"))
+        assertEquals(keys.registrationId, json.getInt("registrationId"))
+        assertEquals(keys.signedPreKey.toApiJson().signature, json.getJSONObject("signedPreKey").getString("signature"))
+        assertEquals(100, json.getJSONArray("oneTimePreKeys").length())
     }
 
     @Test
     fun `every refill advances the signed prekey id required by the server across reloads`() {
-        val initial = SignalKeyUtils.generateDeviceKeys(store)
-        var serverMaxId = initial.signedPreKey.keyId
+        val initial = provisioned()
+        var serverMaxId = initial.signedPreKey.id
         val records = mutableMapOf(serverMaxId to store.loadSignedPreKey(serverMaxId).serialize())
 
         repeat(3) { refill ->
             store = SignalStore(db)
             val upload = SignalKeyUtils.generateMorePreKeys(store, 50)
 
-            assertTrue(upload.signedPreKey.keyId > serverMaxId, "the server rejects an equal or lower signed prekey id")
+            assertEquals(setOf("signedPreKey", "oneTimePreKeys"), upload.toJson().keySet(), "a refill cannot carry the identity")
             assertEquals(serverMaxId + 1, upload.signedPreKey.keyId)
-            assertEquals(initial.identityKey, upload.identityKey)
-            assertEquals(initial.registrationId, upload.registrationId)
             assertEquals((101 + refill * 50..150 + refill * 50).toList(), upload.oneTimePreKeys.map { it.keyId })
             val signed = store.loadSignedPreKey(upload.signedPreKey.keyId)
             assertEquals(signed.toApiJson(), upload.signedPreKey)
-            assertTrue(Curve.verifySignature(store.identityKeyPair.publicKey.publicKey, signed.keyPair.publicKey.serialize(), signed.signature))
+            assertTrue(Curve.verifySignature(initial.identity.publicKey.publicKey, signed.keyPair.publicKey.serialize(), signed.signature))
             records.forEach { (id, bytes) -> assertArrayEquals(bytes, store.loadSignedPreKey(id).serialize()) }
             serverMaxId = upload.signedPreKey.keyId
             records[serverMaxId] = signed.serialize()
@@ -114,27 +111,27 @@ class SignalKeyUtilsTest {
 
     @Test
     fun `a refill after an unpublished attempt does not reuse its signed prekey id`() {
-        SignalKeyUtils.generateDeviceKeys(store)
+        provisioned()
         val unpublished = SignalKeyUtils.generateMorePreKeys(store, 50)
         store = SignalStore(db)
 
         val retry = SignalKeyUtils.generateMorePreKeys(store, 50)
 
         assertEquals(3, retry.signedPreKey.keyId)
-        assertTrue(retry.signedPreKey.keyId > unpublished.signedPreKey.keyId)
         assertEquals((151..200).toList(), retry.oneTimePreKeys.map { it.keyId })
         assertTrue(store.containsSignedPreKey(unpublished.signedPreKey.keyId))
     }
 
     @Test
     fun `a message using an earlier bundle still decrypts after signed prekey rotation`() {
-        SignalKeyUtils.generateDeviceKeys(store)
+        provisioned()
         val signed = store.loadSignedPreKey(1)
         val preKey = store.loadPreKey(1)
-        val senderDriver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
-        senderDriver.use { driver ->
+        JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY).use { driver ->
             ObscuraDatabase.Schema.create(driver)
-            val sender = SignalStore(ObscuraDatabase(driver)).also { it.generateIdentity() }
+            val senderDb = ObscuraDatabase(driver)
+            senderDb.deviceQueries.insert("receiver-user", "receiver")
+            val sender = SignalStore(senderDb).also { it.generateIdentity() }
             val receiverAddress = SignalProtocolAddress("receiver", 1)
             SessionBuilder(sender, receiverAddress).process(PreKeyBundle(
                 store.localRegistrationId, 1, preKey.id, preKey.keyPair.publicKey,
@@ -145,6 +142,7 @@ class SignalKeyUtilsTest {
 
             repeat(2) { SignalKeyUtils.generateMorePreKeys(store, 50) }
             store = SignalStore(db)
+            db.deviceQueries.insert("sender-user", "sender")
 
             assertArrayEquals(plaintext, SessionCipher(store, SignalProtocolAddress("sender", 1))
                 .decrypt(PreKeySignalMessage(ciphertext.serialize())))
@@ -154,7 +152,7 @@ class SignalKeyUtilsTest {
     @Test
     fun `older signed prekeys stay for the grace period after a newer one is published`() {
         val grace = SignalStore.SIGNED_PREKEY_GRACE_MS
-        SignalKeyUtils.generateDeviceKeys(store)
+        provisioned()
         val second = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId
         store.retireSignedPreKeys(second, nowMs = 0)
 
@@ -169,7 +167,7 @@ class SignalKeyUtilsTest {
     @Test
     fun `the grace period runs from the first publish that superseded a key`() {
         val grace = SignalStore.SIGNED_PREKEY_GRACE_MS
-        SignalKeyUtils.generateDeviceKeys(store)
+        provisioned()
         val second = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId
         store.retireSignedPreKeys(second, nowMs = 0)
         val unpublished = SignalKeyUtils.generateMorePreKeys(store, 50).signedPreKey.keyId

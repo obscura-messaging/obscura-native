@@ -4,20 +4,58 @@ import dev.barrelmaker.obscura.kit.db.ObscuraDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** This device's id, and the device ids of every user the client addresses, its own included. */
+/** This device and the account's primary device. */
+internal data class LocalDevice(val deviceId: String, val primaryDeviceId: String) {
+    val isPrimary get() = deviceId == primaryDeviceId
+}
+
+/** This device, and the device directory: every device the client addresses, its own included. */
 internal class DeviceStore(private val db: ObscuraDatabase) {
     private val dispatcher = Dispatchers.IO.limitedParallelism(1)
     private val queries = db.deviceQueries
 
-    suspend fun storeIdentity(deviceId: String) = withContext(dispatcher) { queries.insertIdentity(deviceId) }
+    suspend fun getIdentity(): String? = getLocal()?.deviceId
 
-    suspend fun getIdentity(): String? = withContext(dispatcher) { queries.selectIdentity().executeAsOneOrNull() }
+    suspend fun getLocal(): LocalDevice? = withContext(dispatcher) { getLocalInTransaction() }
 
-    suspend fun add(userId: String, deviceId: String) = withContext(dispatcher) {
-        addInTransaction(userId, deviceId)
+    internal fun getLocalInTransaction(): LocalDevice? =
+        queries.selectIdentity().executeAsOneOrNull()?.let { LocalDevice(it.device_id, it.primary_device_id) }
+
+    /** This device and its own directory entry. Joins an enclosing transaction. */
+    internal fun storeLocalInTransaction(userId: String, local: LocalDevice) = db.transaction {
+        queries.insertIdentity(local.deviceId, local.primaryDeviceId)
+        addInTransaction(userId, local.deviceId)
     }
 
-    internal fun addInTransaction(userId: String, deviceId: String) = queries.insert(userId, deviceId)
+    suspend fun add(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
+        db.transaction { deviceIds.forEach { addInTransaction(userId, it) } }
+    }
+
+    internal fun addInTransaction(userId: String, deviceId: String) {
+        val existing = queries.selectUser(deviceId).executeAsOneOrNull()
+        if (existing != null && existing != userId) {
+            throw dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation("Device $deviceId belongs to $existing, not $userId")
+        }
+        queries.insert(userId, deviceId)
+    }
+
+    suspend fun remove(userId: String, deviceIds: List<String>) = withContext(dispatcher) {
+        db.transaction {
+            deviceIds.forEach {
+                queries.delete(userId, it)
+                if (db.friendQueries.changes().executeAsOne() > 0) {
+                    db.signalKeyQueries.deleteSession("$it.1")
+                }
+            }
+        }
+    }
+
+    suspend fun removeByUser(userId: String) = withContext(dispatcher) {
+        db.transaction {
+            db.signalKeyQueries.deleteSessionsOfUser(userId)
+            queries.deleteByUser(userId)
+        }
+    }
 
     suspend fun devicesOf(userId: String): List<String> = withContext(dispatcher) {
         queries.selectByUser(userId).executeAsList()

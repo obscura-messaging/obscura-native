@@ -3,16 +3,24 @@ package dev.barrelmaker.obscura.kit.stores
 import dev.barrelmaker.obscura.kit.newInMemoryDatabase
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class DeviceStoreTest {
     private val devices = DeviceStore(newInMemoryDatabase())
 
     @Test
-    fun `identity round-trips and starts empty`() = runTest {
-        assertNull(devices.getIdentity())
-        devices.storeIdentity("device-1")
+    fun `this device round-trips with its own directory entry and the primary`() = runTest {
+        assertNull(devices.getLocal())
+        devices.storeLocalInTransaction("me", LocalDevice("device-1", primaryDeviceId = "primary-1"))
+        assertEquals(LocalDevice("device-1", "primary-1"), devices.getLocal())
+        assertFalse(devices.getLocal()!!.isPrimary)
+        assertEquals(listOf("device-1"), devices.devicesOf("me"))
+
+        devices.storeLocalInTransaction("me", LocalDevice("device-1", primaryDeviceId = "device-1"))
+        assertTrue(devices.getLocal()!!.isPrimary)
         assertEquals("device-1", devices.getIdentity())
     }
 
@@ -37,12 +45,17 @@ class DeviceStoreTest {
     }
 
     @Test
-    fun `the same device id under two users is two entries`() = runTest {
-        devices.replace("victim", listOf("d1"))
-        devices.replace("mallory", listOf("d1"))
-        devices.replace("mallory", emptyList())
+    fun `a device belongs to one user and removal is scoped to that user`() = runTest {
+        devices.add("first", listOf("d1", "d2"))
+        devices.add("second", listOf("d3"))
+        org.junit.jupiter.api.Assertions.assertThrows(dev.barrelmaker.obscura.kit.ObscuraError.ProtocolViolation::class.java) {
+            kotlinx.coroutines.runBlocking { devices.add("second", listOf("d1")) }
+        }
+        devices.remove("second", listOf("d1"))
 
-        assertEquals(listOf("d1"), devices.devicesOf("victim"))
-        assertEquals(emptyList<String>(), devices.devicesOf("mallory"))
+        assertEquals(listOf("d1", "d2"), devices.devicesOf("first"))
+        assertEquals(listOf("d3"), devices.devicesOf("second"))
+        devices.remove("first", listOf("d1", "d2"))
+        assertEquals(emptyList<String>(), devices.devicesOf("first"))
     }
 }

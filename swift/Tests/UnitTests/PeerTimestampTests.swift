@@ -25,14 +25,14 @@ final class PeerTimestampTests: XCTestCase {
         let entries = EntryStore(db: db)
 
         try await entries.put(model: "story", entry: StoredEntry(
-            id: "s1", data: #"{"x":1}"#, sentAt: Self.aboveInt64Max, authorDeviceId: "dev-1", localMetadata: nil))
+            id: "s1", data: #"{"x":1}"#, sentAt: Self.aboveInt64Max, authorUserId: "user-1", authorDeviceId: "dev-1", localMetadata: nil))
 
         let written = try await entries.all(model: "story")
         XCTAssertEqual(written.map(\.sentAt), [UInt64(Int64.max)], "the write saturates rather than trapping")
 
         // A peer kit, where proto3 uint64 is a signed Long, can store a negative.
         try await db.write { db in
-            try db.execute(sql: "UPDATE model_entries SET timestamp = ? WHERE id = ?", arguments: [Int64(-1), "s1"])
+            try db.execute(sql: "UPDATE model_entries SET sent_at = ? WHERE id = ?", arguments: [Int64(-1), "s1".storedText])
         }
 
         let read = try await entries.all(model: "story")

@@ -1,26 +1,24 @@
 import Foundation
 import GRDB
 
-/// One inbox row. `payload` is opaque. The `AppEntry` fields are nil for every other kind.
+/// One inboxed `AppEntry` row. `payload` is opaque.
 public struct InboxRecord: Sendable, Equatable {
     public let id: Int64
-    public let kind: String
     public let senderUserId: String
-    public let senderDeviceId: String?
-    public let modelKey: String?
-    public let entryId: String?
-    public let sentAt: UInt64?
+    public let senderDeviceId: String
+    public let modelKey: String
+    public let entryId: String
+    public let sentAt: UInt64
     public let payload: Data
 }
 
 struct InboxInsert: Sendable {
     let envelopeId: String
-    let kind: String
     let senderUserId: String
     let senderDeviceId: String
-    let modelKey: String?
-    let entryId: String?
-    let sentAt: UInt64?
+    let modelKey: String
+    let entryId: String
+    let sentAt: UInt64
     let payload: Data
 }
 
@@ -53,11 +51,11 @@ public actor InboxStore {
         let exists = "SELECT EXISTS(SELECT 1 FROM inbox_rows WHERE envelope_id = ?)"
         if try Bool.fetchOne(db, sql: exists, arguments: [record.envelopeId]) == true { return false }
         try db.execute(sql: """
-            INSERT INTO inbox_rows (envelope_id, kind, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO inbox_rows (envelope_id, sender_user_id, sender_device_id, model_key, entry_id, sent_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, arguments: [
-            record.envelopeId, record.kind, record.senderUserId, record.senderDeviceId,
-            record.modelKey, record.entryId, record.sentAt.map { Int64(clamping: $0) }, record.payload,
+            record.envelopeId, record.senderUserId, record.senderDeviceId,
+            record.modelKey.storedText, record.entryId.storedText, Int64(clamping: record.sentAt), record.payload,
         ])
         return true
     }
@@ -68,13 +66,12 @@ public actor InboxStore {
             try Row.fetchAll(db, sql: "SELECT * FROM inbox_rows ORDER BY id LIMIT ?", arguments: [limit]).map { row in
                 InboxRecord(
                     id: row["id"],
-                    kind: row["kind"],
                     senderUserId: row["sender_user_id"],
                     senderDeviceId: row["sender_device_id"],
-                    modelKey: row["model_key"],
-                    entryId: row["entry_id"],
+                    modelKey: try row.text("model_key"),
+                    entryId: try row.text("entry_id"),
                     // A peer kit may have stored a negative value; UInt64(_:) would trap.
-                    sentAt: (row["sent_at"] as Int64?).map { UInt64(max(0, $0)) },
+                    sentAt: UInt64(max(0, row["sent_at"] as Int64)),
                     payload: row["payload"]
                 )
             }

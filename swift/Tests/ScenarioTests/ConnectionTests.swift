@@ -5,7 +5,8 @@ final class ConnectionTests: XCTestCase {
     func testAFailedConnectReturnsToDisconnectedWithoutRetrying() async throws {
         let client = try ObscuraClient(apiURL: "http://127.0.0.1:1", database: ObscuraDatabase.inMemory(),
                                        deviceName: "d", sessionStorage: MemorySessionStorage(), logger: SilentLogger())
-        try await client.begin(Session(token: "t", refreshToken: "r", userId: "u", deviceId: "d", username: "n"))
+        try await client.begin(Session(token: "t", refreshToken: "r", expiresAt: Int64(Date().timeIntervalSince1970) + 3600,
+                                       userId: "u", deviceId: "d", username: "n"))
 
         do {
             try await client.connect()
@@ -92,8 +93,8 @@ final class ConnectionTests: XCTestCase {
         try await alice.send("before-restart", to: [bob])
         let row = try await bob.waitForEntry("before-restart")
         try await bob.client.entries.put(model: "testModel", entry: StoredEntry(
-            id: "before-restart", data: "hello", sentAt: row.sentAt ?? 0, authorDeviceId: row.senderDeviceId ?? "",
-            localMetadata: nil))
+            id: "before-restart", data: "hello", sentAt: row.sentAt, authorUserId: row.senderUserId,
+            authorDeviceId: row.senderDeviceId, localMetadata: nil))
         try await bob.client.inbox.consume([row.id])
         await bob.client.disconnect()
 

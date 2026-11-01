@@ -1,10 +1,13 @@
 package dev.barrelmaker.obscura.kit.network
 
+import dev.barrelmaker.obscura.kit.FAR_FUTURE
+import dev.barrelmaker.obscura.kit.ObscuraError
+import dev.barrelmaker.obscura.kit.SELF_DEVICE_ID
+import dev.barrelmaker.obscura.kit.SELF_USER_ID
 import org.json.JSONObject
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
-import java.util.Base64
 
 /** The JSON shapes the server expects and returns. */
 class ApiTypesTest {
@@ -14,8 +17,7 @@ class ApiTypesTest {
         val json = DeviceKeys(
             identityKey = "idk",
             registrationId = 100,
-            signedPreKey = SignedPreKeyJson(1, "spk", "sig"),
-            oneTimePreKeys = listOf(OneTimePreKeyJson(2, "otk")),
+            preKeys = PreKeyUpload(SignedPreKeyJson(1, "spk", "sig"), listOf(OneTimePreKeyJson(2, "otk"))),
         ).toJson()
 
         assertEquals(setOf("identityKey", "registrationId", "signedPreKey", "oneTimePreKeys"), json.keySet())
@@ -26,19 +28,14 @@ class ApiTypesTest {
     }
 
     @Test
-    fun `an auth response has a device id only when device-scoped`() {
-        val user = AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1}"""))
-        val device = AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1,"deviceId":"d"}"""))
-        assertNull(user.deviceId)
-        assertEquals(AuthResponse("t", "r", "d"), device)
-    }
-
-    @Test
-    fun `the access token's subject and expiry are read without padding`() {
-        val claims = Base64.getUrlEncoder().withoutPadding().encodeToString("""{"sub":"u-1","exp":42}""".toByteArray())
-        assertEquals("u-1", Jwt.userId("h.$claims.s"))
-        assertEquals(42L, Jwt.expiresAt("h.$claims.s"))
-        assertNull(Jwt.expiresAt("not-a-jwt"))
+    fun `an auth response requires token, refreshToken, expiresAt, userId and deviceId`() {
+        val valid = AuthResponse.from(
+            JSONObject("""{"token":"t","refreshToken":"r","expiresAt":$FAR_FUTURE,"userId":"$SELF_USER_ID","deviceId":"$SELF_DEVICE_ID"}""")
+        )
+        assertEquals(AuthResponse("t", "r", FAR_FUTURE, SELF_USER_ID, SELF_DEVICE_ID), valid)
+        assertThrows(ObscuraError.ProtocolViolation::class.java) {
+            AuthResponse.from(JSONObject("""{"token":"t","refreshToken":"r","expiresAt":1}"""))
+        }
     }
 
     @Test

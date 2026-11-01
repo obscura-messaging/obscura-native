@@ -18,7 +18,7 @@ class PushTests {
         bob.disconnect()
 
         for ((model, id) in listOf("model-a" to "a1", "model-a" to "a2", "model-b" to "b1")) {
-            alice.send(listOf(bob.userId!!), model, id, System.currentTimeMillis(), "opaque-$id".toByteArray(), emptySet())
+            alice.send(listOf(bob.userId!!), model, id, System.currentTimeMillis(), "opaque-$id".toByteArray())
         }
 
         assertEquals(3, bob.processPendingMessages(timeoutMs = 10_000))

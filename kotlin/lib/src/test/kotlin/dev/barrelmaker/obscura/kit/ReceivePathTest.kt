@@ -95,24 +95,32 @@ class ReceivePathTest {
         val row = c.inbox.peek().single()
         assertEquals(peer, row.senderUserId)
         assertEquals(peerDevice, row.senderDeviceId)
-        assertEquals("APP_ENTRY", row.kind)
         assertEquals("pix", row.modelKey)
         assertEquals("entry-1", row.entryId)
         assertArrayEquals("payload".toByteArray(), row.payload)
     }
 
     @Test
-    fun `an unknown arm is inboxed whole as UNKNOWN and not announced`() = runBlocking {
+    fun `entry bytes with NUL and awkward characters are inboxed byte for byte`() = runBlocking {
+        val c = authenticatedClient()
+        val bytes = "a\u0000b\u0000 é 😀 \u2028\r\n".toByteArray() + byteArrayOf(0, 0, -1, 0x7F)
+        val message = ClientMessage.newBuilder().setAppEntry(obscura.client.v1.appEntry {
+            model = "m"; id = "e"; timestamp = 1; data = ByteString.copyFrom(bytes)
+        }).build()
+
+        c.receive(ClientMessage.parseFrom(message.toByteArray()))
+
+        assertArrayEquals(bytes, c.inbox.peek().single().payload)
+    }
+
+    @Test
+    fun `an unknown arm or blank AppEntry is acked and ignored without an inbox row`() = runBlocking {
         val c = authenticatedClient()
         val unknown = ClientMessage.newBuilder().setTimestamp(5).build()
 
         c.receive(unknown)
 
-        val row = c.inbox.peek().single()
-        assertEquals("UNKNOWN", row.kind)
-        assertNull(row.modelKey)
-        assertNull(row.sentAt)
-        assertArrayEquals(unknown.toByteArray(), row.payload)
+        assertTrue(c.inbox.peek().isEmpty())
         assertNull(c.messageReceived.tryReceive().getOrNull())
     }
 

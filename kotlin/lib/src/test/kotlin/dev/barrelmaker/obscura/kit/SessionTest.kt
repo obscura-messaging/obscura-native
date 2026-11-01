@@ -24,14 +24,14 @@ class SessionTest {
     private val refreshCalls = AtomicInteger()
     private val logoutCalls = AtomicInteger()
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-        createContext("/v1/sessions/refresh") { exchange ->
+        createContext("/v1/session/refresh") { exchange ->
             refreshCalls.incrementAndGet()
             Thread.sleep(100)
-            val body = if (refreshStatus == 200) """{"token":"${jwt(SELF_USER_ID, FAR_FUTURE)}","refreshToken":"rotated"}""" else "{}"
+            val body = if (refreshStatus == 200) authResponseJson(refreshToken = "rotated").toString() else "{}"
             exchange.sendResponseHeaders(refreshStatus, body.length.toLong())
             exchange.responseBody.use { it.write(body.toByteArray()) }
         }
-        createContext("/v1/sessions") { exchange ->
+        createContext("/v1/session") { exchange ->
             logoutCalls.incrementAndGet()
             exchange.sendResponseHeaders(500, -1)
             exchange.close()
@@ -42,7 +42,7 @@ class SessionTest {
 
     @AfterEach fun stop() = server.stop(0)
 
-    private fun expiredSession() = storedSession(token = jwt(SELF_USER_ID, exp = 1))
+    private fun expiredSession() = storedSession(expiresAt = 1)
 
     @Test
     fun `nothing stored restores nothing`() = runBlocking {
@@ -135,10 +135,10 @@ class SessionTest {
         val c = sessionClient(url, storedSession())
         assertTrue(c.restorePersistedSession())
         c.signalStore.generateIdentity()
-        c.devices.storeIdentity(SELF_DEVICE_ID)
+        c.storeLocalDevice()
         c.route(friendRequest(), "019f025a-0000-7de6-84b6-000000000002", "dev", "env-1")
         c.route(ClientMessage.getDefaultInstance(), "019f025a-0000-7de6-84b6-000000000002", "dev", "env-2")
-        c.entries.put("m", StoredEntry("e", "{}", 1, "dev"))
+        c.entries.put("m", StoredEntry("e", "{}", 1, SELF_USER_ID, "dev"))
 
         c.wipeDevice()
 
@@ -157,7 +157,7 @@ class SessionTest {
             { c.connect() },
             { c.friendCode() },
             { c.sendTyping(listOf("u"), "ctx", TypingState.STARTED) },
-            { c.send(listOf("u"), "m", "e", 1, ByteArray(0), emptySet()) },
+            { c.send(listOf("u"), "m", "e", 1, ByteArray(0)) },
             { c.uploadAttachment(ByteArray(1)) },
         )) {
             val error = runCatching { call() }.exceptionOrNull()
