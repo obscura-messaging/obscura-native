@@ -130,7 +130,11 @@ jobs:
       - name: Start backing services
         run: |
           cd /tmp/obscura-server
-          just services
+          docker compose up -d --wait db minio valkey
+          docker compose exec -T db sh -c 'until pg_isready -h 127.0.0.1 -U user -d signal_server; do sleep 1; done'
+          AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
+            aws --endpoint-url http://localhost:9000 --region us-east-1 \
+            s3api create-bucket --bucket test-bucket
 
       - name: Start obscura-server
         env:
