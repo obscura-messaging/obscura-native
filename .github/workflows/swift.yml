@@ -9,6 +9,9 @@ concurrency:
   group: swift-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   # libsignal is cloned + Rust-built at setup (gitignored, not vendored in-repo).
   LIBSIGNAL_REF: 7ef4efdb85d8b2ebd77f3cf1e2b542a2115033c5

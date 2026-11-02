@@ -9,6 +9,9 @@ concurrency:
   group: kotlin-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 defaults:
   run:
     working-directory: kotlin
