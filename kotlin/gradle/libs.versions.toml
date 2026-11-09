@@ -5,7 +5,7 @@
 # the kit unconsumable. Bump ONLY in lockstep with an app RN upgrade.
 # Dependabot is configured to leave org.jetbrains.kotlin:* alone.
 kotlin = "2.1.20"
-protobuf-plugin = "0.10.0"
+protobuf-plugin = "0.10.1"
 protobuf = "4.36.2"
 sqldelight = "2.0.2"
 libsignal = "0.72.0"
